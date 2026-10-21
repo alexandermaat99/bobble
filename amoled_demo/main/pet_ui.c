@@ -1127,6 +1127,14 @@ static const uint8_t spark_cov[SPARK_N * SPARK_N] = {
     0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
 };
 
+// Colour v at coverage a over what's there already (on black, the same as fading it; on a bubble, no dark fringe)
+static void over(uint16_t *px, const int v[3], float a)
+{
+    uint16_t d = SWAP16(*px);
+    float r = (d >> 11) * 255 / 31.0f, g = ((d >> 5) & 63) * 255 / 63.0f, b = (d & 31) * 255 / 31.0f;
+    *px = rgb((int)(r + (v[0] - r) * a), (int)(g + (v[1] - g) * a), (int)(b + (v[2] - b) * a));
+}
+
 static void draw_spark(uint16_t *buf, int y0, int h, int cx, int cy, const int v[3], float alpha, float scale)
 {
     int R = (int)ceilf((SPARK_R + 1) * scale);
@@ -1137,8 +1145,7 @@ static void draw_spark(uint16_t *buf, int y0, int h, int cx, int cy, const int v
             if (x < 0 || x >= W || i < 0 || j < 0 || i >= SPARK_N || j >= SPARK_N) continue;
             int n = spark_cov[j * SPARK_N + i];
             if (!n) continue;
-            float a = alpha * n / 16;
-            buf[(y - y0) * W + x] = rgb((int)(v[0] * a), (int)(v[1] * a), (int)(v[2] * a));   // (on black)
+            over(&buf[(y - y0) * W + x], v, alpha * n / 16);
         }
     }
 }
@@ -1314,7 +1321,7 @@ static void draw_top_icon(uint16_t *buf, int y0, int h, int cx, int cy, float k)
     if (k > 0.8f) draw_ftext(buf, y0, h, cx - ftext_width(f, l) / 2, cy - f->line_h / 2, f, l, rgb(200, 200, 210));
 }
 
-// A logo n px across, centred on cx, cy, in colour col (on black)
+// A logo n px across, centred on cx, cy, in colour col (over what's there)
 static void draw_icon(uint16_t *buf, int y0, int h, const icon_t *ic, int cx, int cy, int n, const int col[3])
 {
     int ox = cx - n / 2, oy = cy - n / 2;
@@ -1325,8 +1332,7 @@ static void draw_icon(uint16_t *buf, int y0, int h, const icon_t *ic, int cx, in
             int sx = x * ICON_SIZE / n, sy = y * ICON_SIZE / n, q = sy * ICON_SIZE + sx;
             int a = (ic->mask[q / 2] >> (q & 1 ? 0 : 4)) & 15;
             if (!a || ox + x < 0 || ox + x >= W) continue;
-            float f = a / 15.0f;
-            buf[(py - y0) * W + ox + x] = rgb((int)(col[0] * f), (int)(col[1] * f), (int)(col[2] * f));
+            over(&buf[(py - y0) * W + ox + x], col, a / 15.0f);
         }
     }
 }
