@@ -39,7 +39,7 @@ void fill_tri(uint16_t *buf, int y0, int h, int ax, int ay, int bx, int by, int 
 // Anti-aliased proportional text (Inter, generated into font_ui.c by tools/make_font.py). y is the top of the line.
 typedef struct { uint32_t off; uint8_t w, h; int8_t x, y; uint16_t adv4; } glyph_t;   // adv4: advance in 1/4 px
 typedef struct { const glyph_t *g; const uint8_t *bits; uint8_t line_h, ascent; } font_t;
-extern const font_t font_big, font_body, font_label;
+extern const font_t font_big, font_body, font_label, font_small;
 int ftext_width(const font_t *f, const char *s);
 int ftext_width_n(const font_t *f, const char *s, int n);   // just the first n characters
 void draw_ftext(uint16_t *buf, int y0, int h, int x, int y, const font_t *f, const char *s, uint16_t col);

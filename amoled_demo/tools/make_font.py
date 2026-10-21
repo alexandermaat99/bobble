@@ -9,6 +9,7 @@ FONTS = [  # C name, pixel size, weight
     ("font_big", 42, 600),     # the agent's speech bubble, short messages
     ("font_body", 33, 600),    # the agent's speech bubble
     ("font_label", 19, 500),   # small labels (project name)
+    ("font_small", 15, 600),   # the square board's chat titles (its pixels are bigger: still easy to read)
 ]
 
 def build(path, name, size, weight):

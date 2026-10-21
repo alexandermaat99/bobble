@@ -1460,7 +1460,6 @@ void pet_ui_draw(uint16_t *buf, int y0, int h)
 #define CROWD_HEAD (CROWD_FEET - SPRITE_H * CROWD_PX)
 #define CROWD_TOP 46                          // the bubbles reach no higher than this (clear of the status corner)
 #define CROWD_PAD 12
-#define CROWD_TITLE_H 28                      // the logo and title row at the top of a bubble
 #define CROWD_LINES 10
 #define CROWD_HOLD_US 30000000
 
@@ -1656,12 +1655,18 @@ static void crowd_draw(uint16_t *buf, int y0, int h)
         // the bubble: logo and title, then the words, over its character with the tail pointing down at it
         int x0 = (int)lroundf(ms->x - ms->cw / 2 + 8), x1 = (int)lroundf(ms->x + ms->cw / 2 - 8), tw = x1 - x0 - 2 * CROWD_PAD;
         int y1 = CROWD_HEAD - 18;
-        int room = (y1 - CROWD_TOP - 2 * CROWD_PAD - CROWD_TITLE_H) / f->line_h;
+        const font_t *tf = &font_small;               // the title: small, wrapped beside the logo, all of it (titles are
+        const char *tline[4];                         // under 48 characters: four narrow lines hold any)
+        int tlen[4];
+        bool tcut;
+        int tn = crowd_wrap(c->title[0] ? c->title : c->project, tf, tw - 30, tline, tlen, 4, &tcut);
+        int title_h = (tn ? tn : 1) * tf->line_h + 8;
+        int room = (y1 - CROWD_TOP - 2 * CROWD_PAD - title_h) / f->line_h;
         const char *line[CROWD_LINES];
         int len[CROWD_LINES];
         bool cut;
         int nl = crowd_wrap(c->detail, f, tw, line, len, room < CROWD_LINES ? room : CROWD_LINES, &cut);
-        int yb0 = y1 - 2 * CROWD_PAD - CROWD_TITLE_H - nl * f->line_h;
+        int yb0 = y1 - 2 * CROWD_PAD - title_h - nl * f->line_h;
         uint16_t bg = rgb((int)(pal[0] * a), (int)(pal[1] * a), (int)(pal[2] * a));
         fill_rrect(buf, y0, h, x0, yb0, x1, y1, 16, bg);
         int tx = (int)lroundf(ms->x);
@@ -1669,19 +1674,16 @@ static void crowd_draw(uint16_t *buf, int y0, int h)
         int lc[3];                                    // the logo and title in the chat's colour (darker on a light bubble)
         for (int q = 0; q < 3; q++) lc[q] = (int)(cc[q] * (light ? 0.5f : 1) * a);
         int ty = yb0 + CROWD_PAD;
-        crowd_logo(buf, y0, h, c->agent, x0 + CROWD_PAD + 11, ty + f->line_h / 2, lc);
-        char title[52];
-        snprintf(title, sizeof title, "%s", c->title[0] ? c->title : c->project);
-        int ttw = tw - 30, dw = ftext_width(f, "..."), tl = strlen(title);
-        if (ftext_width(f, title) > ttw) {
-            while (tl > 0 && ftext_width_n(f, title, tl) + dw > ttw) tl--;
-            while (tl > 0 && title[tl - 1] == ' ') tl--;
-            strcpy(title + tl, "...");
+        crowd_logo(buf, y0, h, c->agent, x0 + CROWD_PAD + 11, ty + tf->line_h / 2, lc);
+        uint16_t tc = rgb(lc[0], lc[1], lc[2]);
+        for (int l = 0; l < tn; l++) {
+            int ly = ty + l * tf->line_h;
+            draw_ftext_n(buf, y0, h, x0 + CROWD_PAD + 30, ly, tf, tline[l], tlen[l], tc);
+            if (tcut && l == tn - 1) draw_ftext(buf, y0, h, x0 + CROWD_PAD + 30 + ftext_width_n(tf, tline[l], tlen[l]), ly, tf, "...", tc);
         }
-        draw_ftext(buf, y0, h, x0 + CROWD_PAD + 30, ty, f, title, rgb(lc[0], lc[1], lc[2]));
         uint16_t fg = rgb((int)(pal[3] * a), (int)(pal[4] * a), (int)(pal[5] * a));
         for (int l = 0; l < nl; l++) {
-            int ly = ty + CROWD_TITLE_H + l * f->line_h;
+            int ly = ty + title_h + l * f->line_h;
             draw_ftext_n(buf, y0, h, x0 + CROWD_PAD, ly, f, line[l], len[l], fg);
             if (cut && l == nl - 1) draw_ftext(buf, y0, h, x0 + CROWD_PAD + ftext_width_n(f, line[l], len[l]), ly, f, "...", fg);
         }
