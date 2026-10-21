@@ -1,0 +1,11 @@
+# Bobble
+
+A desk display that shows what your coding agents are doing, with its Mac app.
+
+- `amoled_demo/`: the display's firmware (ESP-IDF 5.5, ESP32-S3 AMOLED board), and `sim/`, the same firmware running on
+  the Mac as the Bobble Simulator. Before building, copy `main/secrets.h.example` to `main/secrets.h`.
+  Build with `idf.py build`; a release build (only paired Macs get in) is `idf.py -B build-release -D BOBBLE_RELEASE=1 build`.
+- `agent_bridge/`: Bobble.app, the menu-bar app that takes Claude Code, Codex and Cursor hook events and sends them to
+  the display. `./build_app.sh --release` publishes a new build; installed copies update themselves.
+
+Download the app from [Releases](../../releases/latest).

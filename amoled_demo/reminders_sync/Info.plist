@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key><string>com.amoled-calendar.reminders-sync</string>
+    <key>CFBundleName</key><string>AMOLED Reminders Sync</string>
+    <key>NSRemindersFullAccessUsageDescription</key>
+    <string>Shows your reminders on the AMOLED desk calendar and completes the ones you tick off on it.</string>
+</dict>
+</plist>

@@ -1,0 +1,24 @@
+# Only the Bobble projects: everything else in ~/esp (ESP-IDF, backups) stays out
+/*
+!/.gitignore
+!/.gitattributes
+!/README.md
+!/agent_bridge/
+!/amoled_demo/
+
+# Secrets: copy amoled_demo/main/secrets.h.example to secrets.h and fill it in
+amoled_demo/main/secrets.h
+
+# Built or downloaded
+build/
+build-release/
+.build/
+managed_components/
+amoled_demo/sim/Sources/Firmware/fw/
+amoled_demo/reminders_sync/reminders_sync
+*.bak
+.DS_Store
+__pycache__/
+.build-*/
+.cache/
+*.bin

@@ -1,0 +1,6 @@
+dependencies:
+  idf: ">=5.0"
+  espressif/esp_lcd_sh8601: "*"
+  espressif/qrcode: "*"
+  espressif/mdns: "*"
+  espressif/esp_jpeg: "*"
