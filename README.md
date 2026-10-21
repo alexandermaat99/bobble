@@ -8,4 +8,9 @@ A desk display that shows what your coding agents are doing, with its Mac app.
 - `agent_bridge/`: Bobble.app, the menu-bar app that takes Claude Code, Codex and Cursor hook events and sends them to
   the display. `./build_app.sh --release` publishes a new build; installed copies update themselves.
 
+**A new Bobble:** open the setup page, https://alexandermaat99.github.io/bobble/, in Chrome or Edge with the board
+plugged in over USB, and click Install. Or run `amoled_demo/flash_new.sh`, which needs only `esptool`
+(`python3 -m pip install --user esptool`). Either way it gets the latest release; then tap the bubble on its screen to
+set up Wi-Fi, and pair it from the Mac app.
+
 Download the app from [Releases](../../releases/latest).

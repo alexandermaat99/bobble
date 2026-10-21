@@ -29,6 +29,12 @@ Updates: `./build_app.sh --release` installs, then publishes `Bobble.zip` as a r
 repo in `update_repo` (alexandermaat99/bobble, public; needs `gh auth login` once). `Updater.swift` checks the latest
 release 20 s after launch, every 4 hours, and from "Check for Updates…". A higher build number gets downloaded,
 checked (bundle id, build, codesign --verify), swapped in for the copy in /Applications, and started again. Copies
-outside an Applications folder (build/) don't update themselves. `BOBBLE_NOTES="…"` sets the release notes.
+outside an Applications folder (build/) don't update themselves.
+
+A release (`./build_app.sh --release "what changed"`) is built from a clean copy of what's committed, named "Bobble
+<VERSION> — <summary>", with notes from the commits since the last one. It carries the display's release firmware
+and the pieces a blank board needs (bootloader, partition table, otadata). The app sends the firmware to its paired
+board once no chat is busy. `publish_pages.sh` then puts the setup page (`amoled_demo/flasher/index.html`, ESP Web
+Tools) and those pieces on the gh-pages branch, for flashing new Bobbles from the browser.
 
 Next: a persistent connection, approving permission prompts from the display, and adapters for other agents.

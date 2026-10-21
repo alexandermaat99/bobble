@@ -42,6 +42,10 @@ if [[ $1 == --release ]]; then                # (in the clean copy now)
     fi
     mkdir -p build
     cp $fw/build-release/amoled_demo.bin build/bobble-firmware.bin
+    # (and what a blank board needs besides, for flash_new.sh and the setup page: offsets as in flash_args)
+    cp $fw/build-release/bootloader/bootloader.bin build/bobble-bootloader.bin
+    cp $fw/build-release/partition_table/partition-table.bin build/bobble-partitions.bin
+    cp $fw/build-release/ota_data_initial.bin build/bobble-otadata.bin
 fi
 swift build -c release 2>&1 | grep -vE "ld: warning: search path" || true
 app="build/Bobble.app"
@@ -102,9 +106,10 @@ if [[ $1 == --release ]]; then                # out to everyone: the newest rele
     [[ -n $app_log ]] && notes+=$'\n\n**Mac app**\n'"$app_log"
     [[ -n $fw_log ]] && notes+=$'\n\n**Display**\n'"$fw_log"
     notes+=$'\n\n'"Build $build. The Mac app updates itself, then its paired Bobble once no chat is busy."
-    gh release create "build-$build" ~/Desktop/Bobble.zip build/bobble-firmware.bin --repo "$repo" \
+    gh release create "build-$build" ~/Desktop/Bobble.zip build/bobble-{firmware,bootloader,partitions,otadata}.bin --repo "$repo" \
         --target "$(git -C $src rev-parse HEAD)" --title "Bobble $version — $summary" --notes "$notes"
     echo "released Bobble $version (build $build) to $repo"
+    ./publish_pages.sh build $version            # (the setup page, for flashing new Bobbles from the browser)
 fi
 if [[ $1 == --open || $1 == --install || $1 == --release ]]; then
     pkill -x AgentBridge 2>/dev/null || true
