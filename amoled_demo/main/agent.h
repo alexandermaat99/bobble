@@ -34,8 +34,19 @@ typedef struct {
     uint32_t activity;      // goes up with every new message (state or words changed): wakes the screen to show it
 } agent_status_t;
 
+// One chat with something to show, all of it (agent_get has the words of just the shown one): for the square board,
+// which shows several at once. bubble: its words are still up (a long-finished one is just its logo).
+typedef struct {
+    agent_state_t state;
+    int slot;               // as dot_slot: steady for the session (its colour)
+    int64_t since;          // esp_timer time its state began
+    bool bubble;
+    char detail[200], title[48], project[32], agent[12], model[24];
+} agent_chat_t;
+
 void agent_register(httpd_handle_t server);
 void agent_get(agent_status_t *out);
+int agent_get_chats(agent_chat_t out[AGENT_MAX]);   // every chat not idle, in slot order; how many
 void agent_select_next(void);   // show the next session (a tap on the bubble); back to the most urgent after 30 s
 void agent_select_slot(int slot);   // show this one (a tap on its dot), the same way
 

@@ -411,6 +411,30 @@ void agent_get(agent_status_t *out)
     xSemaphoreGive(lock);
 }
 
+int agent_get_chats(agent_chat_t out[AGENT_MAX])
+{
+    if (!lock) return 0;
+    int64_t now = esp_timer_get_time(), n = 0;
+    xSemaphoreTake(lock, portMAX_DELAY);
+    refresh(now);                                     // (forgets stale ones)
+    for (int i = 0; i < MAX_SESS; i++) {
+        const sess_t *s = &sess[i];
+        if (!s->id[0] || s->state == AG_IDLE) continue;
+        agent_chat_t *c = &out[n++];
+        c->state = s->state;
+        c->slot = i;
+        c->since = s->since;
+        c->bubble = !(s->state == AG_DONE && now - s->since > DONE_SHOW_US);
+        strlcpy(c->detail, s->detail, sizeof c->detail);
+        strlcpy(c->title, s->title, sizeof c->title);
+        strlcpy(c->project, s->project, sizeof c->project);
+        strlcpy(c->agent, s->agent, sizeof c->agent);
+        strlcpy(c->model, s->model, sizeof c->model);
+    }
+    xSemaphoreGive(lock);
+    return (int)n;
+}
+
 void agent_select_next(void)
 {
     if (!lock) return;

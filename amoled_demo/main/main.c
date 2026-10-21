@@ -976,6 +976,7 @@ static int part_r;
 // Columns of a strip to send: the round glass's widest row in the strip, narrowed to part_r's circle
 static void strip_window(int y0, int h, int *x0, int *x1)
 {
+    if (!SCREEN_ROUND && !part_r) { *x0 = 0; *x1 = W; return; }   // (the square glass: every row is all of it)
     int dmin = H;                                       // the strip's row closest to the centre is its widest
     for (int y = y0; y < y0 + h; y++) {
         int d = abs(2 * y + 1 - H) / 2;

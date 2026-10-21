@@ -122,6 +122,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         login.state = SMAppService.mainApp.status == .enabled ? .on : .off
         menu.addItem(login)
         menu.addItem(updateItem)
+        menu.addItem(note("Build \(Updater.build)"))
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Quit Bobble", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
     }
