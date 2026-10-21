@@ -12,23 +12,35 @@ set -e -o pipefail
 cd "${0:A:h}"
 repo=${BOBBLE_REPO:-$(cat update_repo 2>/dev/null || true)}  # owner/name of the GitHub repo the app updates from (in ./update_repo)
 build=$(date +%y%m%d%H%M)                      # the build number: newer is bigger, which is all the updater compares
-version=$(cat VERSION 2>/dev/null || echo 0.1)   # the version people see (the last one released)
-if [[ $1 == --release ]]; then
+src=${BOBBLE_SNAPSHOT:-$PWD}                   # (the real agent_bridge, for git and VERSION, when building a release copy)
+version=$(cat $src/VERSION 2>/dev/null || echo 0.1)   # the version people see (the last one released)
+if [[ $1 == --release && -z $BOBBLE_SNAPSHOT ]]; then
+    # A release is what's committed: built in a clean copy of HEAD, so work in progress (and the development token)
+    # stays out of it
     command -v gh >/dev/null || { echo "needs gh: brew install gh, then gh auth login"; exit 1; }
     [[ -n $repo ]] || { echo "put the repo (owner/name) in update_repo"; exit 1; }
+    [[ -n $2 ]] || { echo 'say what changed: ./build_app.sh --release "Pairing code can be dismissed"'; exit 1; }
+    [[ -z $(git status --porcelain -- . ../amoled_demo) ]] || echo "note: uncommitted changes are left out (a release is what's committed)"
+    snap=$(mktemp -d)/bobble
+    mkdir -p $snap
+    git -C .. archive HEAD agent_bridge amoled_demo | tar -x -C $snap
+    cp -R ../amoled_demo/managed_components $snap/amoled_demo/ 2>/dev/null || true   # (saves downloading them again)
+    cp $snap/amoled_demo/main/secrets.h.example $snap/amoled_demo/main/secrets.h       # (a release takes no development token)
+    mkdir -p $snap/agent_bridge/build; cp build/AppIcon.icns $snap/agent_bridge/build/ 2>/dev/null || true
+    BOBBLE_SNAPSHOT=$PWD exec $snap/agent_bridge/build_app.sh --release "$2"
+fi
+if [[ $1 == --release ]]; then                # (in the clean copy now)
     summary=$2
-    [[ -n $summary ]] || { echo 'say what changed: ./build_app.sh --release "Pairing code can be dismissed"'; exit 1; }
     version=${version%.*}.$(( ${version##*.} + 1 ))   # 0.2 -> 0.3
-    [[ -z $(git status --porcelain -- . ../amoled_demo) ]] || echo "note: uncommitted changes go into this build but not the repo"
     echo "building the display firmware (release, build $build)..."
     fw=../amoled_demo
-    mkdir -p $fw/build-release build
-    if ! (cd $fw && . ~/esp/esp-idf/export.sh >/dev/null 2>&1 &&
+    if ! (cd $fw && . ~/esp/esp-idf/export.sh >/dev/null 2>&1 && mkdir -p build-release &&
           idf.py -B build-release -D BOBBLE_RELEASE=1 -D BOBBLE_BUILD=$build build > build-release/last_build.log 2>&1); then
         grep -E "error:" $fw/build-release/last_build.log | head -20
-        echo "firmware build failed - nothing released (full output: amoled_demo/build-release/last_build.log)"
+        echo "firmware build failed - nothing released (full output: $fw/build-release/last_build.log)"
         exit 1
     fi
+    mkdir -p build
     cp $fw/build-release/amoled_demo.bin build/bobble-firmware.bin
 fi
 swift build -c release 2>&1 | grep -vE "ld: warning: search path" || true
@@ -79,19 +91,19 @@ if [[ $1 == --install || $1 == --release ]]; then                # into /Applica
     echo "zipped ~/Desktop/Bobble.zip"
 fi
 if [[ $1 == --release ]]; then                # out to everyone: the newest release is what the apps look at
-    echo $version > VERSION                    # (committed and pushed, so the release's tag has it)
-    git commit -q -m "Bobble $version" -- VERSION
-    git push -q
-    git fetch -q --tags origin
-    prev=$(git tag -l 'build-*' | sort | tail -1)
-    log() { [[ -n $prev ]] && git log --format='- %s' "$prev..HEAD" -- "$@" | grep -v "^- Bobble [0-9.]*$" || true }
+    git -C $src fetch -q --tags origin
+    prev=$(git -C $src tag -l 'build-*' | sort | tail -1)
+    log() { [[ -n $prev ]] && git -C $src log --format='- %s' "$prev..HEAD" -- "$@" | grep -v "^- Bobble [0-9.]*$" || true }
     app_log=$(log . ':!VERSION'); fw_log=$(log ../amoled_demo)
+    echo $version > $src/VERSION               # (committed and pushed, so the release's tag has it)
+    git -C $src commit -q -m "Bobble $version" -- VERSION
+    git -C $src push -q
     notes="$summary"
     [[ -n $app_log ]] && notes+=$'\n\n**Mac app**\n'"$app_log"
     [[ -n $fw_log ]] && notes+=$'\n\n**Display**\n'"$fw_log"
-    notes+=$'\n\n'"Build $build. The Mac app updates itself, then updates its paired Bobble once no chat is busy."
+    notes+=$'\n\n'"Build $build. The Mac app updates itself, then its paired Bobble once no chat is busy."
     gh release create "build-$build" ~/Desktop/Bobble.zip build/bobble-firmware.bin --repo "$repo" \
-        --target "$(git rev-parse HEAD)" --title "Bobble $version — $summary" --notes "$notes"
+        --target "$(git -C $src rev-parse HEAD)" --title "Bobble $version — $summary" --notes "$notes"
     echo "released Bobble $version (build $build) to $repo"
 fi
 if [[ $1 == --open || $1 == --install || $1 == --release ]]; then
