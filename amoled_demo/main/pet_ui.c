@@ -111,8 +111,9 @@ static int halo_q[3], halo_drawn[3];
 static bool bub_closed;                       // a long "done" message has been read to the end: closed (a tap brings it back)
 static dotsf_t dots, dots_drawn;
 static int64_t swap_t0, swap_in_t0 = -10000000;
-// The square board's crowd (any chat up: a character each, see the end of the file); nothing on the round one
-static bool crowd_on, crowd_drawn_last;
+// The square board's crowd (a character per chat, or Bobble's own when there are none: see the end of the file; it's
+// all the square shows, never the eyes); nothing on the round one. awake: something's being said (keeps the screen on).
+static bool crowd_on, crowd_drawn_last, crowd_awake;
 #if !SCREEN_ROUND
 static void crowd_update(int64_t now, float dt);
 static bool crowd_tap(int x, int y, int64_t now);
@@ -879,7 +880,7 @@ void pet_ui_update(int tx, int ty, int64_t now, const float up[3], float ang, in
         memcmp(halo_q, halo_drawn, sizeof halo_q)) dirty = true;
 }
 
-bool pet_ui_bubble_open(void) { return crowd_on || (cap_kind != CAP_PLAIN && cap_kind != CAP_HELLO && cap_kind != CAP_MEETQ && !bub_closed); }   // (the welcome lets it sleep)
+bool pet_ui_bubble_open(void) { return crowd_on ? crowd_awake : (cap_kind != CAP_PLAIN && cap_kind != CAP_HELLO && cap_kind != CAP_MEETQ && !bub_closed); }   // (the welcome lets it sleep)
 
 void pet_ui_set_welcome(int stage) { welcome = stage; }
 
@@ -1449,10 +1450,12 @@ void pet_ui_draw(uint16_t *buf, int y0, int h)
 }
 
 // ---------------------------------------------------------------- the square's crowd
-// Bobble Square, with any chat up: a pixel character each along the bottom (sprites_ui: the knight, wizard, robot...,
-// by the chat's slot), acting out its state (marching and tapping away while it works, hopping and waving when it
-// needs you, cheering when it's done, standing greyed when stopped) under its own bubble (its logo and title, then its
-// words), up to CROWD_MAX side by side, the most pressing ones. A tap on one shows its chat on the one pet for 30 s.
+// Bobble Square never shows the eyes: a pixel character per chat along the bottom (sprites_ui: the knight, wizard,
+// robot..., by the chat's slot), acting out its state (marching and tapping away while it works, hopping and waving
+// when it needs you, cheering when it's done, standing greyed when stopped, resting dimmer with just its title once
+// it's long finished) under its own bubble (its logo and title, then its words), up to CROWD_MAX side by side, the
+// most pressing ones. With no chats, or a meeting to announce, Bobble's own character (the host) is there too, saying
+// what the eyes would have (the welcome, a meeting); a tap on it during the welcome goes on to Wi-Fi setup.
 #if !SCREEN_ROUND
 #define CROWD_MAX 3
 #define CROWD_PX 5                            // screen pixels to a sprite pixel
@@ -1461,7 +1464,8 @@ void pet_ui_draw(uint16_t *buf, int y0, int h)
 #define CROWD_TOP 46                          // the bubbles reach no higher than this (clear of the status corner)
 #define CROWD_PAD 12
 #define CROWD_LINES 10
-#define CROWD_HOLD_US 30000000
+#define HOST_SLOT AGENT_MAX                   // the host's place in crowd_chat (after the chats' slots)
+#define HOST_WHO 2                            // ...and its character (the robot, like Bobble's robot eyes)
 
 typedef struct {
     int slot;                                 // the chat's (-1: free)
@@ -1474,13 +1478,17 @@ typedef struct {
     float dy;                                 // hopping: px up
 } mascot_t;
 static mascot_t crowd[CROWD_MAX + 2];
-static agent_chat_t crowd_chat[AGENT_MAX];    // by slot
+static agent_chat_t crowd_chat[AGENT_MAX + 1];   // by slot (and the host's)
 static int crowd_more;                        // chats up that don't fit
-static int64_t crowd_hold_until;
 static int16_t crowd_q[CROWD_MAX + 2][12];    // what the last frame showed, roughly (anything changed: redraw)
 static uint32_t crowd_sum;
 
 static const int urgency[] = {[AG_IDLE] = 0, [AG_STOPPED] = 1, [AG_DONE] = 2, [AG_WORKING] = 3, [AG_WAITING] = 4};
+static int crowd_rank(const agent_chat_t *c)      // which matter most (a meeting announced most of all; resting least)
+{
+    if (c->slot == HOST_SLOT) return c->state == AG_WAITING ? 5 : 0;
+    return c->bubble ? urgency[c->state] : 0;
+}
 static const float crowd_pal[5][6] = {{0}, {40, 40, 50, 228, 228, 236}, {244, 244, 247, 22, 22, 28},
                                       {208, 240, 218, 16, 72, 40}, {34, 34, 40, 118, 118, 128}};   // (by state, as the big bubble)
 
@@ -1507,14 +1515,27 @@ static void crowd_update(int64_t now, float dt)
 {
     static bool init;
     if (!init) { init = true; for (int i = 0; i < CROWD_MAX + 2; i++) crowd[i].slot = -1; }
-    agent_chat_t all[AGENT_MAX], *pick[AGENT_MAX];
+    agent_chat_t all[AGENT_MAX + 1], *pick[AGENT_MAX + 1];
     int n = agent_get_chats(all), m = 0;
-    for (int i = 0; i < n; i++) if (all[i].bubble) pick[m++] = &all[i];
-    bool want = m >= 1 && now >= crowd_hold_until;
+    for (int i = 0; i < n; i++) pick[m++] = &all[i];   // every chat, long-finished ones too (resting)
+    // the host: what the eyes would be saying (the welcome, a meeting), when there's no chat or there's a meeting
+    const char *say = cap_kind == CAP_MEET || cap_kind == CAP_MEETQ || cap_kind == CAP_HELLO || (cap_kind == CAP_PLAIN && caption[0])
+                      ? caption : mt_caption;
+    if (!n || say[0]) {
+        agent_chat_t *hc = &all[n];
+        memset(hc, 0, sizeof *hc);
+        hc->slot = HOST_SLOT;
+        hc->bubble = say[0] != 0;
+        hc->state = cap_kind == CAP_MEET || cap_kind == CAP_HELLO ? AG_WAITING : AG_IDLE;   // (announcing: waving)
+        strlcpy(hc->detail, say, sizeof hc->detail);
+        pick[m++] = hc;
+    }
+    bool want = true;
     for (int i = 1; i < m; i++)                       // the most pressing first (needs you, working, ...; newest among equals)
         for (int j = i; j > 0; j--) {
             agent_chat_t *a = pick[j - 1], *b = pick[j];
-            if (urgency[b->state] > urgency[a->state] || (b->state == a->state && b->since > a->since)) { pick[j - 1] = b; pick[j] = a; }
+            int ra = crowd_rank(a), rb = crowd_rank(b);
+            if (rb > ra || (rb == ra && b->since > a->since)) { pick[j - 1] = b; pick[j] = a; }
             else break;
         }
     crowd_more = m > CROWD_MAX ? m - CROWD_MAX : 0;
@@ -1524,6 +1545,7 @@ static void crowd_update(int64_t now, float dt)
 
     for (int i = 0; i < CROWD_MAX + 2; i++) crowd[i].live = false;
     uint32_t sum = crowd_more;
+    crowd_awake = false;
     for (int i = 0; i < m && want; i++) {
         agent_chat_t *c = pick[i];
         float cw = (float)W / m, x = cw * (i + 0.5f);
@@ -1538,6 +1560,8 @@ static void crowd_update(int64_t now, float dt)
             ms->next_hop = now + 4000000;
             ms->state = c->state;
         }
+        if (c->bubble && (c->slot != HOST_SLOT || cap_kind == CAP_MEET)) crowd_awake = true;   // (as the eyes' bubble)
+        sum = sum * 31 + c->bubble;
         for (const char *p = c->detail; *p; p++) sum = sum * 31 + (uint8_t)*p;
         for (const char *p = c->title; *p; p++) sum = sum * 31 + (uint8_t)*p;
         sum = sum * 31 + c->state;
@@ -1557,7 +1581,8 @@ static void crowd_update(int64_t now, float dt)
         pose_t p = {ARM_DOWN, ARM_DOWN, 0, false};
         float dy = 0, since = (now - crowd_chat[ms->slot].since) / 1e6f;
         int beat = (int)floorf(t * 3 + ms->phase);    // (a third of a second each)
-        switch (ms->state) {
+        bool resting = !crowd_chat[ms->slot].bubble && ms->slot != HOST_SLOT;
+        switch (resting ? AG_IDLE : ms->state) {
         case AG_WORKING:                              // marching in place, one hand tapping away
             p.step = (beat & 1) + 1;
             p.arm_r = beat % 4 < 2 ? ARM_OUT : ARM_DOWN;
@@ -1569,7 +1594,7 @@ static void crowd_update(int64_t now, float dt)
         case AG_DONE:                                 // cheering, for a few seconds; then just standing happily
             if (since < 4) { p.arm_l = p.arm_r = ARM_UP; dy = fabsf(sinf(t * 7)) * 6; }
             break;
-        default: break;                               // stopped: standing still (and greyed)
+        default: break;                               // stopped, resting, the host with nothing to say: standing still
         }
         if (now >= ms->next_blink) { ms->blink_t0 = now; ms->next_blink = now + (int64_t)(frand(2, 6) * 1e6f); }
         p.blink = ms->blink_t0 >= 0 && now - ms->blink_t0 < 140000;
@@ -1577,7 +1602,7 @@ static void crowd_update(int64_t now, float dt)
         ms->pose = p;
         ms->dy = dy;
         int16_t q[12] = {(int16_t)ms->slot, (int16_t)lroundf(ms->x), (int16_t)lroundf(ms->cw), (int16_t)lroundf(ms->k * 100),
-                         (int16_t)lroundf(dy), p.arm_l, p.arm_r, p.step, p.blink, (int16_t)ms->state, 0, 0};
+                         (int16_t)lroundf(dy), p.arm_l, p.arm_r, p.step, p.blink, (int16_t)ms->state, resting, 0};
         if (memcmp(q, crowd_q[i], sizeof q)) { memcpy(crowd_q[i], q, sizeof q); changed = true; }
     }
     if (any != crowd_on) changed = true;
@@ -1588,15 +1613,10 @@ static void crowd_update(int64_t now, float dt)
 static bool crowd_tap(int x, int y, int64_t now)
 {
     if (!crowd_on) return false;
-    for (int i = 0; i < CROWD_MAX + 2; i++) {
+    for (int i = 0; i < CROWD_MAX + 2; i++) {         // (a chat's character: nothing yet)
         mascot_t *ms = &crowd[i];
-        if (ms->slot < 0 || !ms->live || fabsf(x - ms->x) > ms->cw / 2) continue;
-        agent_select_slot(ms->slot);                  // its chat, full size, for a while
-        crowd_hold_until = now + CROWD_HOLD_US;
-        meet_pin_until = 0;
-        bub_closed = false;
-        scroll_t0 = now;
-        break;
+        if (ms->slot != HOST_SLOT || !ms->live || fabsf(x - ms->x) > ms->cw / 2) continue;
+        if (cap_kind == CAP_HELLO && welcome == 1) wants_wifi = true;   // the welcome: on to Wi-Fi setup
     }
     return true;
 }
@@ -1646,11 +1666,19 @@ static void crowd_draw(uint16_t *buf, int y0, int h)
         const mascot_t *ms = &crowd[i];
         if (ms->slot < 0 || ms->k < 0.05f) continue;
         const agent_chat_t *c = &crowd_chat[ms->slot];
-        const int *cc = chat_col[ms->slot];
+        bool host = ms->slot == HOST_SLOT, resting = !host && !c->bubble;
+        static const int host_col[3] = {205, 205, 215};
+        static const float quiet[6] = {40, 40, 50, 190, 190, 200};
+        const int *cc = host ? host_col : chat_col[ms->slot];
         float k = clampf(ms->k, 0, 1), a = k * k;     // (grows in from black)
         int st = c->state >= AG_WORKING && c->state <= AG_STOPPED ? c->state : AG_WORKING;
-        const float *pal = crowd_pal[st];
+        const float *pal = host ? (c->state == AG_WAITING ? crowd_pal[AG_WAITING] : quiet) : resting ? crowd_pal[AG_STOPPED] : crowd_pal[st];
         bool light = pal[0] > 128;
+        float dimk = st == AG_STOPPED && !host ? 0.5f : resting ? 0.6f : 1;
+        if (host && !c->bubble) {                     // the host with nothing to say: just itself
+            sprite_draw(buf, y0, h, HOST_WHO, &ms->pose, ms->x, CROWD_FEET - ms->dy, CROWD_PX * k, fminf(1, k * 1.5f));
+            continue;
+        }
 
         // the bubble: logo and title, then the words, over its character with the tail pointing down at it
         int x0 = (int)lroundf(ms->x - ms->cw / 2 + 8), x1 = (int)lroundf(ms->x + ms->cw / 2 - 8), tw = x1 - x0 - 2 * CROWD_PAD;
@@ -1659,13 +1687,13 @@ static void crowd_draw(uint16_t *buf, int y0, int h)
         const char *tline[4];                         // under 48 characters: four narrow lines hold any)
         int tlen[4];
         bool tcut;
-        int tn = crowd_wrap(c->title[0] ? c->title : c->project, tf, tw - 30, tline, tlen, 4, &tcut);
-        int title_h = (tn ? tn : 1) * tf->line_h + 8;
+        int tn = host ? 0 : crowd_wrap(c->title[0] ? c->title : c->project, tf, tw - 30, tline, tlen, 4, &tcut);
+        int title_h = host ? 0 : (tn ? tn : 1) * tf->line_h + (resting ? 0 : 8);   // (the host: no title; resting: only one)
         int room = (y1 - CROWD_TOP - 2 * CROWD_PAD - title_h) / f->line_h;
         const char *line[CROWD_LINES];
         int len[CROWD_LINES];
-        bool cut;
-        int nl = crowd_wrap(c->detail, f, tw, line, len, room < CROWD_LINES ? room : CROWD_LINES, &cut);
+        bool cut = false;
+        int nl = resting ? 0 : crowd_wrap(c->detail, f, tw, line, len, room < CROWD_LINES ? room : CROWD_LINES, &cut);
         int yb0 = y1 - 2 * CROWD_PAD - title_h - nl * f->line_h;
         uint16_t bg = rgb((int)(pal[0] * a), (int)(pal[1] * a), (int)(pal[2] * a));
         fill_rrect(buf, y0, h, x0, yb0, x1, y1, 16, bg);
@@ -1674,7 +1702,7 @@ static void crowd_draw(uint16_t *buf, int y0, int h)
         int lc[3];                                    // the logo and title in the chat's colour (darker on a light bubble)
         for (int q = 0; q < 3; q++) lc[q] = (int)(cc[q] * (light ? 0.5f : 1) * a);
         int ty = yb0 + CROWD_PAD;
-        crowd_logo(buf, y0, h, c->agent, x0 + CROWD_PAD + 11, ty + tf->line_h / 2, lc);
+        if (!host) crowd_logo(buf, y0, h, c->agent, x0 + CROWD_PAD + 11, ty + tf->line_h / 2, lc);
         uint16_t tc = rgb(lc[0], lc[1], lc[2]);
         for (int l = 0; l < tn; l++) {
             int ly = ty + l * tf->line_h;
@@ -1689,7 +1717,7 @@ static void crowd_draw(uint16_t *buf, int y0, int h)
         }
 
         // its character, growing in from its feet; greyed when stopped
-        sprite_draw(buf, y0, h, ms->slot, &ms->pose, ms->x, CROWD_FEET - ms->dy, CROWD_PX * k, st == AG_STOPPED ? 0.5f : fminf(1, k * 1.5f));
+        sprite_draw(buf, y0, h, host ? HOST_WHO : ms->slot, &ms->pose, ms->x, CROWD_FEET - ms->dy, CROWD_PX * k, dimk * fminf(1, k * 1.5f));
     }
     if (crowd_more) {                                 // more chats than room: how many more, bottom right
         char t[8];
