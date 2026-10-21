@@ -213,6 +213,25 @@ final class Device {
         }
     }
 
+    // ---- firmware: which build the board runs, and putting a new one on it (Updater does this from a release)
+
+    // Its release build number (0: an everyday build, or firmware from before boards said), and whether it's a release
+    // build (nil: too old to say). nil overall: not reachable.
+    func firmware(_ done: @escaping ((build: Int, release: Bool?)?) -> Void) {
+        guard !simulator, let endpoint else { done(nil); return }
+        request(endpoint, "/info", Data(), method: "GET") { code, body in
+            guard code == 200, let body, let j = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any] else { done(nil); return }
+            done(((j["fw"] as? NSNumber)?.intValue ?? 0, j["release"] as? Bool))
+        }
+    }
+
+    // POST /ota with our key: the board checks the image, switches to it and restarts (and goes back to the old one by
+    // itself if the new one doesn't come up). Calls back with the status code: 403 not paired, 0 not reachable.
+    func updateFirmware(_ image: Data, _ done: @escaping (Int) -> Void) {
+        guard !simulator, paired, let endpoint else { done(0); return }
+        request(endpoint, "/ota", image, key: key, timeout: 180) { code, _ in done(code) }
+    }
+
     // ---- calendars: kept on the display (their private .ics links); this just shows and replaces the list
 
     func getCalendars(_ done: @escaping ([String]?) -> Void) {
@@ -262,7 +281,7 @@ final class Device {
 
     // One HTTP request to the display: calls back with the status code (0 if it couldn't be reached) and the body
     private func request(_ endpoint: NWEndpoint, _ path: String, _ body: Data, key: String = "", method: String = "POST",
-                         _ done: @escaping (Int, Data?) -> Void) {
+                         timeout: Double = 5, _ done: @escaping (Int, Data?) -> Void) {
         let c = NWConnection(to: endpoint, using: .tcp)
         var finished = false
         func finish(_ code: Int, _ data: Data?) {
@@ -288,7 +307,7 @@ final class Device {
             }
         }
         c.start(queue: .main)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { finish(0, nil) }
+        DispatchQueue.main.asyncAfter(deadline: .now() + timeout) { finish(0, nil) }
     }
 }
 

@@ -45,6 +45,11 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
             s.start()
         }
+        updater.board = device
+        updater.busy = { [weak self] in                 // (open with -forceBoardUpdate YES to test it mid-chat)
+            if UserDefaults.standard.bool(forKey: "forceBoardUpdate") { return false }
+            return self?.chats.all.values.contains { $0.state == .working || $0.state == .waiting } ?? false
+        }
         updater.start()
         refreshIcon()
         Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in self?.chats.check() }   // (interrupts)
@@ -122,7 +127,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         login.state = SMAppService.mainApp.status == .enabled ? .on : .off
         menu.addItem(login)
         menu.addItem(updateItem)
-        menu.addItem(note("Build \(Updater.build)"))
+        menu.addItem(note("Bobble \(Updater.version) · build \(Updater.build)"))
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Quit Bobble", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
     }
@@ -416,12 +421,15 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let title: String
         switch updater.status {
         case .checking: title = "Checking for Updates…"
-        case .installing(let n): title = "Installing Build \(n)…"
+        case .installing: title = "Updating Bobble…"
+        case .updatingBoard: title = "Updating Your Bobble…"
+        case .boardWaiting: title = "Bobble Update Waiting for Chats…"
         default: title = "Check for Updates…"
         }
         let it = action(title, #selector(checkUpdates))
         if case .checking = updater.status { it.isEnabled = false }
         if case .installing = updater.status { it.isEnabled = false }
+        if case .updatingBoard = updater.status { it.isEnabled = false }
         it.toolTip = "Bobble build \(Updater.build)"
         return it
     }
@@ -430,7 +438,9 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         updater.onChange = { [weak self] in
             guard let self else { return }
             switch self.updater.status {
-            case .upToDate: self.say("Bobble is up to date", "This is build \(Updater.build), the newest.")
+            case .upToDate: self.say("Bobble is up to date", "This is Bobble \(Updater.version), the newest.")
+            case .boardUpdated: self.say("Your Bobble was updated", "It restarts into the new version in a few seconds.")
+            case .boardWaiting: self.say("Your Bobble will update soon", "A new version is ready. It installs once your chats finish, since the display restarts.")
             case .failed(let why): self.say("Couldn't update Bobble", why)
             default: return
             }
