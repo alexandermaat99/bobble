@@ -4,3 +4,8 @@ idf_component_register(SRCS "main.c" "gfx.c" "wifi_setup.c" "wifi_ui.c" "ical.c"
 if(BOBBLE_RELEASE)
     target_compile_definitions(${COMPONENT_LIB} PRIVATE BOBBLE_RELEASE=1)
 endif()
+# Which build this is (yymmddHHMM, set by agent_bridge/build_app.sh --release): the board reports it in GET /info so the
+# Mac app knows when a release has newer firmware. Everyday builds leave it at 0.
+if(BOBBLE_BUILD)
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE BOBBLE_BUILD=${BOBBLE_BUILD})
+endif()

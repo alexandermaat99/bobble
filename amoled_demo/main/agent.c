@@ -222,6 +222,10 @@ bool agent_just_paired(void) { return paired_at && esp_timer_get_time() - paired
 
 bool agent_known(void) { return seen || n_macs; }
 
+#ifndef BOBBLE_BUILD
+#define BOBBLE_BUILD 0LL
+#endif
+
 // GET /info: who this board is (anyone on the network may ask: it's what the Bonjour advert says anyway)
 static esp_err_t info_get(httpd_req_t *req)
 {
@@ -229,6 +233,12 @@ static esp_err_t info_get(httpd_req_t *req)
     cJSON_AddStringToObject(j, "id", agent_device_id());
     cJSON_AddStringToObject(j, "name", agent_device_name());
     cJSON_AddNumberToObject(j, "macs", n_macs);
+    cJSON_AddNumberToObject(j, "fw", (double)BOBBLE_BUILD);   // which release build (0: an everyday build)
+#ifdef BOBBLE_RELEASE
+    cJSON_AddBoolToObject(j, "release", true);
+#else
+    cJSON_AddBoolToObject(j, "release", false);
+#endif
     char *s = cJSON_PrintUnformatted(j);
     httpd_resp_set_type(req, "application/json");
     esp_err_t r = httpd_resp_sendstr(req, s);
