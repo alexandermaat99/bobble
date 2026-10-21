@@ -11,6 +11,7 @@ void wifi_setup_start(void);
 wifi_state_t wifi_state(void);
 const char *wifi_ssid(void);     // network we're joined to / trying to join
 const char *wifi_ip(void);
+int wifi_rssi(void);             // the joined network's signal (dBm), 0 if not connected
 const char *wifi_ap_ssid(void);  // setup hotspot name
 const char *wifi_ap_pass(void);
 int wifi_ap_clients(void);       // phones currently joined to the setup hotspot

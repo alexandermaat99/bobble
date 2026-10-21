@@ -878,7 +878,7 @@ void pet_ui_update(int tx, int ty, int64_t now, const float up[3], float ang, in
         memcmp(halo_q, halo_drawn, sizeof halo_q)) dirty = true;
 }
 
-bool pet_ui_bubble_open(void) { return crowd_on || cap_kind != CAP_PLAIN && cap_kind != CAP_HELLO && cap_kind != CAP_MEETQ && !bub_closed; }   // (the welcome lets it sleep)
+bool pet_ui_bubble_open(void) { return crowd_on || (cap_kind != CAP_PLAIN && cap_kind != CAP_HELLO && cap_kind != CAP_MEETQ && !bub_closed); }   // (the welcome lets it sleep)
 
 void pet_ui_set_welcome(int stage) { welcome = stage; }
 

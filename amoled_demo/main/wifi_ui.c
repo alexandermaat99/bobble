@@ -1,4 +1,5 @@
-// Settings card for the 466x466 round AMOLED: a small menu (Wi-Fi, touch and tilt calibration, lock, reset), plus
+// Settings card for the 466x466 round AMOLED (and the 480x480 square board, which lays the menu out as tiles and says
+// which firmware it runs): a small menu (Wi-Fi, touch and tilt calibration, lock, reset), plus
 // the Wi-Fi screens: pick a network from a scrollable list,
 // type the password on an on-screen keyboard, then watch it connect (and show a synced clock).
 // Phone setup through the hotspot / QR code is still available from the list.
@@ -17,6 +18,7 @@
 #include "ota.h"
 #include "screen.h"
 #include "agent.h"
+#include "esp_app_desc.h"
 
 enum view { V_MENU, V_LIST, V_KEYS, V_STATUS, V_PHONE, V_RESET };
 static enum view view;
@@ -81,6 +83,25 @@ static const button_t phone_buttons[] = {{CX - 55, 408, CX + 55, 440, ID_BACK, "
 #define BUB_Y1 122     // bubble rows
 #define BUB_Y2 256
 #define BUB_R 62
+#if !SCREEN_ROUND
+// The square: a title, four big tiles two by two (icon, name and a line about it), the brightness slider across, then
+// Factory reset and what this board is and runs
+#define TILE_X0 20
+#define TILE_X1 (W - 20)
+#define TILE_MID (W / 2)
+#define TILE_GAP 6                             // (half the gap between tiles)
+#define TILE_Y1 76                             // tile rows: top edges, and their height
+#define TILE_Y2 188
+#define TILE_H 100
+static const button_t menu_buttons[] = {
+    {TILE_X0, TILE_Y1, TILE_MID - TILE_GAP, TILE_Y1 + TILE_H, ID_WIFI, "Wi-Fi"},
+    {TILE_X0, TILE_Y2, TILE_MID - TILE_GAP, TILE_Y2 + TILE_H, ID_CAL_TOUCH, "Touch"},
+    {TILE_MID + TILE_GAP, TILE_Y2, TILE_X1, TILE_Y2 + TILE_H, ID_CAL_TILT, "Tilt"},
+    {TILE_MID + TILE_GAP, TILE_Y1, TILE_X1, TILE_Y1 + TILE_H, ID_LOCK, "Lock"},
+    {TILE_X0, 304, TILE_X1, 352, ID_BRIGHT, ""},   // brightness slider row
+    {TILE_X0, 374, 200, 422, ID_RESET, "Factory reset"},
+};
+#else
 static const button_t menu_buttons[] = {
     // round icon bubbles, two by two
     {CX - BUB_DX - BUB_R, BUB_Y1 - BUB_R, CX - BUB_DX + BUB_R, BUB_Y1 + BUB_R, ID_WIFI, "Wi-Fi"},
@@ -90,6 +111,7 @@ static const button_t menu_buttons[] = {
     {CX - 172, 338, CX + 172, 386, ID_BRIGHT, ""},   // brightness slider row
     {CX - 100, 396, CX + 100, 434, ID_RESET, "Factory reset"},
 };
+#endif
 #define ERASE_Y 262
 static const button_t reset_buttons[] = {
     {CX - BUB_R, ERASE_Y - BUB_R, CX + BUB_R, ERASE_Y + BUB_R, ID_ERASE, "Hold"},
@@ -430,6 +452,88 @@ static void draw_hold_ring(uint16_t *buf, int y0, int h, int cx, int cy, uint16_
     }
 }
 
+#if !SCREEN_ROUND
+// Text in font f cut with "..." to fit w
+static void draw_fit(uint16_t *buf, int y0, int h, int x, int y, const font_t *f, const char *s, int w, uint16_t col)
+{
+    char t[64];
+    strlcpy(t, s, sizeof t);
+    if (ftext_width(f, t) > w) {
+        int n = strlen(t), dw = ftext_width(f, "...");
+        while (n > 0 && ftext_width_n(f, t, n) + dw > w) n--;
+        strcpy(t + n, "...");
+    }
+    draw_ftext(buf, y0, h, x, y, f, t, col);
+}
+
+// Which firmware: its version (git's, from the build) and, for a release, its build number; else when it was built
+static void draw_about(uint16_t *buf, int y0, int h, int x1, int y)
+{
+    const font_t *f = &font_label;
+    const esp_app_desc_t *d = esp_app_get_description();
+    char v[48], b[40];
+    snprintf(v, sizeof v, "Firmware %s", d->version);
+#if defined(BOBBLE_BUILD) && BOBBLE_BUILD
+    snprintf(b, sizeof b, "Build %lld", (long long)BOBBLE_BUILD);
+#else
+    snprintf(b, sizeof b, "Built %s", ota_build_time());
+#endif
+    const char *lines[3] = {agent_device_name(), v, b};
+    const uint16_t cols[3] = {rgb(200, 200, 212), C_GREY, rgb(90, 90, 108)};
+    for (int i = 0; i < 3; i++) {
+        int w = ftext_width(f, lines[i]), room = x1 - 216;
+        if (w > room) w = room;
+        draw_fit(buf, y0, h, x1 - w, y + i * f->line_h, f, lines[i], room, cols[i]);
+    }
+}
+
+static void draw_menu(uint16_t *buf, int y0, int h)
+{
+    static const int kinds[] = {ICON_WIFI, ICON_TOUCH, ICON_TILT, ICON_LOCK};
+    const font_t *f = &font_label;
+    draw_ftext(buf, y0, h, TILE_X0 + 4, 16, &font_body, "Settings", C_WHITE);
+    for (int i = 0; i < 4; i++) {
+        const button_t *b = &menu_buttons[i];
+        if (b->y1 <= y0 || b->y0 >= y0 + h) continue;
+        bool on = current_id() == b->id;
+        int cy = (b->y0 + b->y1) / 2, tx = b->x0 + 84, tw = b->x1 - 12 - tx;
+        fill_rrect(buf, y0, h, b->x0, b->y0, b->x1, b->y1, 18, on ? C_PRESS : C_PANEL);
+        uint16_t icol = C_ACCENT;                      // Wi-Fi: green when connected, grey when not
+        const char *sub = "Calibrate";
+        if (i == 0) {
+            bool conn = wifi_state() == WS_CONNECTED;
+            icol = conn ? C_GREEN : C_GREY;
+            sub = conn ? wifi_ssid() : wifi_state() == WS_CONNECTING ? "Connecting..." : "Not connected";
+        }
+        if (i == 3) sub = "Hold 3 s";
+        draw_icon(buf, y0, h, kinds[i], b->x0 + 44, cy, 24, on ? C_WHITE : icol);
+        draw_ftext(buf, y0, h, tx, cy - f->line_h + 1, f, b->label, C_WHITE);
+        draw_fit(buf, y0, h, tx, cy + 3, f, sub, tw, on ? rgb(200, 240, 232) : C_GREY);
+        if (i == 3 && on) {                            // holding Lock: a bar fills along the tile's foot
+            int64_t held = esp_timer_get_time() - press_us;
+            float frac = held >= LOCK_HOLD_US ? 1 : held / (float)LOCK_HOLD_US;
+            fill_rrect(buf, y0, h, b->x0 + 16, b->y1 - 12, b->x1 - 16, b->y1 - 7, 2, C_DIM);
+            fill_rrect(buf, y0, h, b->x0 + 16, b->y1 - 12, b->x0 + 16 + (int)((b->x1 - b->x0 - 32) * frac), b->y1 - 7, 2, C_ACCENT);
+        }
+    }
+    const button_t *b = &menu_buttons[4];            // brightness: small sun, track with knob, big sun (as round)
+    int cy = (b->y0 + b->y1) / 2, tx0 = b->x0 + 56, tx1 = b->x1 - 56;
+    int kx = tx0 + (tx1 - tx0) * (screen_brightness_get() - 10) / 245;
+    fill_rrect(buf, y0, h, b->x0, b->y0, b->x1, b->y1, 18, C_PANEL);
+    draw_icon(buf, y0, h, ICON_SUN, b->x0 + 30, cy, 11, C_GREY);
+    draw_icon(buf, y0, h, ICON_SUN, b->x1 - 30, cy, 17, C_WHITE);
+    fill_rrect(buf, y0, h, tx0, cy - 4, tx1, cy + 4, 4, rgb(60, 60, 78));
+    fill_rrect(buf, y0, h, tx0, cy - 4, kx, cy + 4, 4, C_ACCENT);
+    fill_circle(buf, y0, h, kx, cy, current_id() == ID_BRIGHT ? 17 : 14, C_WHITE);
+
+    const button_t *r = &menu_buttons[5];
+    bool ron = current_id() == ID_RESET;
+    fill_rrect(buf, y0, h, r->x0, r->y0, r->x1, r->y1, 18, ron ? C_PRESS : C_PANEL);
+    draw_ftext(buf, y0, h, (r->x0 + r->x1 - ftext_width(f, r->label)) / 2, (r->y0 + r->y1 - f->line_h) / 2, f, r->label,
+               ron ? C_WHITE : C_RED);
+    draw_about(buf, y0, h, TILE_X1, 366);
+}
+#else
 static void draw_menu(uint16_t *buf, int y0, int h)
 {
     static const int kinds[] = {ICON_WIFI, ICON_TOUCH, ICON_TILT, ICON_LOCK};
@@ -459,6 +563,7 @@ static void draw_menu(uint16_t *buf, int y0, int h)
     fill_rrect(buf, y0, h, r->x0, r->y0, r->x1, r->y1, 18, current_id() == ID_RESET ? C_PRESS : C_PANEL);
     text_c(buf, y0, h, (r->y0 + r->y1) / 2 - 7, 2, r->label, current_id() == ID_RESET ? C_WHITE : C_GREY);
 }
+#endif
 
 // Factory reset: says what goes, then a red bubble you hold for 3 s (main.c does the wiping)
 static void draw_reset(uint16_t *buf, int y0, int h)

@@ -670,7 +670,8 @@ static void page_bg(int p, uint16_t *buf, int y0, int y1)
 }
 
 // the pet's face stays clear of the battery until it's getting low
-static bool status_shown(int p) { return p != PAGE_PET || battery_percent() <= 15; }
+// (the square's corner is clear of everything: always there)
+static bool status_shown(int p) { return !SCREEN_ROUND || p != PAGE_PET || battery_percent() <= 15; }
 
 static void page_fg(int p, uint16_t *buf, int y0, int h)
 {
@@ -731,7 +732,7 @@ static void draw_overlay(uint16_t *buf, int y0, int h)
                 for (int r = 0; r < h; r++) {
                     int y = y0 + r;
                     float dy = y - CY + 0.5f;
-                    int half = (int)sqrtf(fmaxf(0, (W / 2) * (W / 2) - dy * dy)), xa = CX - half, xb = CX + half;
+                    int half = SCREEN_ROUND ? (int)sqrtf(fmaxf(0, (W / 2) * (W / 2) - dy * dy)) : W / 2, xa = CX - half, xb = CX + half;
                     uint16_t *d = snap_buf[0] + y * W;
                     memset(d, 0, xa * 2);
                     memcpy(d + xa, buf + r * W + xa, (xb - xa) * 2);
@@ -1062,7 +1063,7 @@ static void snapshot(int p, uint16_t *dst)
         split_rows(page_render_bg, dst + y0 * W, y0, h);
         page_fg(p, dst + y0 * W, y0, h);
     }
-    for (int y = 0; y < H; y++) {                    // clip to the round glass: pages slide past as discs
+    for (int y = 0; y < H && SCREEN_ROUND; y++) {    // clip to the round glass: pages slide past as discs (square: whole)
         float dy = y - CY + 0.5f;
         int half = (int)sqrtf(fmaxf(0, (W / 2) * (W / 2) - dy * dy));
         int xa = CX - half, xb = CX + half;

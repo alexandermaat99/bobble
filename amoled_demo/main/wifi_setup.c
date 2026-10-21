@@ -151,6 +151,11 @@ static httpd_handle_t httpd;
 wifi_state_t wifi_state(void) { return state; }
 const char *wifi_ssid(void) { return sta_ssid; }
 const char *wifi_ip(void) { return ip_str; }
+int wifi_rssi(void)
+{
+    wifi_ap_record_t ap;
+    return state == WS_CONNECTED && esp_wifi_sta_get_ap_info(&ap) == ESP_OK ? ap.rssi : 0;
+}
 const char *wifi_ap_ssid(void) { return ap_ssid; }
 const char *wifi_ap_pass(void) { return ap_pass; }
 int wifi_ap_clients(void) { return ap_clients; }
