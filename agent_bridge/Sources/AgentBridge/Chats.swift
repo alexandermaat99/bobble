@@ -21,6 +21,12 @@ final class Chat {
     var inTool = false              // a tool is running (between Pre- and PostToolUse): long silences are fine then
     var transcript = ""             // its log (Claude Code's or Codex's), for spotting an interrupt
     var logSize: UInt64 = 0         // its size when last checked (unchanged: nothing new to look at)
+    // Waiting on a choice you can tap on the display ("Yes" / "No", a question's answers): Claude Code's hook is held
+    // open meanwhile. answer: what a tap on choice i does; release: lets the hook go undecided (the terminal asks)
+    var options: [String] = []
+    var qid = ""
+    var answer: ((Int) -> Void)?
+    var release: (() -> Void)?
     init(id: String) { self.id = id }
 }
 
@@ -45,6 +51,7 @@ final class Chats {
         if let cwd = j["cwd"] as? String { chat.project = (cwd as NSString).lastPathComponent }
         if !transcript.isEmpty { chat.transcript = transcript }
         chat.heard = Date()
+        if ["PostToolUse", "UserPromptSubmit", "Stop", "SessionEnd"].contains(event) { letGo(chat) }   // (answered in the terminal)
         if event == "PreToolUse" { chat.inTool = true }
         if event == "PostToolUse" || event == "Stop" || event == "UserPromptSubmit" { chat.inTool = false }
 
@@ -101,9 +108,9 @@ final class Chats {
                 if let said = words.map(summarize), !said.isEmpty { detail = said }
                 chat.working = detail
             }
-        case "PermissionRequest":                    // (Codex) it's asking you to approve something
+        case "PermissionRequest":                    // it's asking you to approve something
             state = .waiting
-            detail = (input["description"] as? String).flatMap { $0.isEmpty ? nil : "\($0)?" } ?? chat.ask
+            detail = codex ? (input["description"] as? String).flatMap { $0.isEmpty ? nil : "\($0)?" } ?? chat.ask : chat.ask
             if detail.isEmpty { detail = "Needs your permission" }
         case "Notification":
             // permission prompts and questions need you; the "idle for 60 s" reminder doesn't (it already shows done)
@@ -174,7 +181,74 @@ final class Chats {
         }
     }
 
+    // Claude Code's hooks that wait for an answer from the display (HookServer's /permission): PermissionRequest for
+    // a tool ("Yes" / "No"), PreToolUse for AskUserQuestion (its answers, when it's one question with one answer to
+    // pick). Nothing tapped in a minute, or anything else happening in the chat: the hook goes with no decision, and
+    // Claude Code asks in the terminal as usual.
+    func handlePermission(_ j: [String: Any], reply: @escaping HookServer.Reply) {
+        guard let sid = j["session_id"] as? String, !sid.isEmpty else { reply(""); return }
+        let event = j["hook_event_name"] as? String ?? "", tool = j["tool_name"] as? String ?? ""
+        let input = j["tool_input"] as? [String: Any] ?? [:]
+        let asking = tool == "AskUserQuestion"
+        if asking != (event == "PreToolUse") { reply(""); return }   // (a question's answered at PreToolUse, not here)
+        if let old = all[sid] { letGo(old) }
+        var options: [String] = [], decide: (Int) -> [String: Any]
+        if asking {
+            let qs = input["questions"] as? [[String: Any]] ?? []
+            let q = qs.first ?? [:], text = q["question"] as? String ?? ""
+            options = ((q["options"] as? [[String: Any]]) ?? []).compactMap { $0["label"] as? String }
+            guard qs.count == 1, q["multiSelect"] as? Bool != true, !text.isEmpty, (1...4).contains(options.count) else { reply(""); handle(j); return }
+            decide = { i in
+                var answered = input
+                answered["answers"] = [text: options[i]]
+                return ["hookEventName": "PreToolUse", "permissionDecision": "allow", "updatedInput": answered]
+            }
+        } else {
+            options = ["Yes", "No"]
+            decide = { i in
+                ["hookEventName": "PermissionRequest",
+                 "decision": i == 0 ? ["behavior": "allow"] : ["behavior": "deny", "message": "The user said no (on their Bobble display)."]]
+            }
+        }
+        let chat = all[sid] ?? Chat(id: sid)
+        all[sid] = chat
+        let qid = String(UUID().uuidString.prefix(8))
+        chat.options = options
+        chat.qid = qid
+        chat.release = { reply("") }
+        chat.answer = { [weak self, weak chat] i in
+            guard let self, let chat, i < chat.options.count else { return }
+            let out = (try? JSONSerialization.data(withJSONObject: ["hookSpecificOutput": decide(i)])).map { String(decoding: $0, as: UTF8.self) } ?? ""
+            chat.release = nil
+            reply(out)
+            self.letGo(chat)
+            self.set(chat, .working, chat.working.isEmpty ? "Thinking" : chat.working)
+        }
+        handle(j)                                    // (waiting, with the question)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 60) { [weak self, weak chat] in
+            guard let self, let chat, chat.qid == qid else { return }
+            self.letGo(chat)
+            self.onUpdate(chat)                      // (the choices go from the display: it's the terminal's now)
+        }
+    }
+
+    // A choice tapped on the display (Device.fetchAnswers)
+    func answer(session: String, qid: String, choice: Int) {
+        guard let c = all[session], c.qid == qid, !qid.isEmpty else { return }
+        c.answer?(choice)
+    }
+
+    // Its held hook, if any, let go undecided; no choices on the display
+    private func letGo(_ c: Chat) {
+        c.release?()
+        c.release = nil
+        c.answer = nil
+        c.options = []
+        c.qid = ""
+    }
+
     private func set(_ c: Chat, _ state: ChatState, _ detail: String) {
+        if state != .waiting { letGo(c) }
         c.state = state
         c.detail = detail
         c.changed = Date()
@@ -246,10 +320,15 @@ final class Chats {
         d = String(d.unicodeScalars.filter { $0.value >= 32 && $0.value < 127 }.map(Character.init))
         if d.count > 190 { d = String(d.prefix(190)); if let sp = d.lastIndex(of: " ") { d = String(d[..<sp]) }; d += "..." }
         let ascii = { (s: String) in String(s.unicodeScalars.filter { $0.value >= 32 && $0.value < 127 }.map(Character.init)) }
-        return ["session": c.id, "state": c.state.rawValue, "detail": d, "project": ascii(c.project),
+        var p: [String: Any] = ["session": c.id, "state": c.state.rawValue, "detail": d, "project": ascii(c.project),
                 "model": ascii(c.model), "title": hideText ? "" : ascii(c.title), "tool": c.tool, "agent": c.agent,
                 "provider": provider(c.model, c.runtime),
                 "t": Int64(Date().timeIntervalSince1970 * 1000)]
+        if c.state == .waiting, !c.options.isEmpty {   // (choices to tap: each cut to the display's 31 characters)
+            p["options"] = c.options.map { String(ascii($0).prefix(31)) }
+            p["qid"] = c.qid
+        }
+        return p
     }
 }
 

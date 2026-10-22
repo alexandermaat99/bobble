@@ -29,7 +29,15 @@ typedef struct {
     char detail[200], project[32], agent[12], model[24], title[48], tool[24], provider[16];
     int64_t since, heard;
     double sent;            // the Mac's clock (ms) on the newest post: an older one arriving late is ignored
+    int nopt, picked;       // the choices it's waiting on (see agent_answer), and the one tapped (-1: none)
+    char opt[AGENT_OPTS][32], qid[24];
 } sess_t;
+
+// Choices tapped on the display, till the Mac collects them (POST /agent/answers)
+#define ANSWERS_MAX 6
+typedef struct { char id[40], qid[24]; int choice; } answer_t;
+static answer_t answers[ANSWERS_MAX];
+static int n_answers;
 
 static sess_t sess[MAX_SESS];
 static uint32_t attention, activity;
@@ -274,6 +282,37 @@ static esp_err_t name_post(httpd_req_t *req)
     return info_get(req);
 }
 
+// POST /agent/answers {"sessions": ["…", …]}: the choices tapped for these chats (the asking Mac's own), as
+// [{"session", "qid", "choice"}], handed over once
+static esp_err_t answers_post(httpd_req_t *req)
+{
+    if (!agent_token_ok(req)) { httpd_resp_set_status(req, "403 Forbidden"); return httpd_resp_sendstr(req, "bad token\n"); }
+    char body[1024];
+    if (read_body(req, body, sizeof body) < 0) return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad size");
+    cJSON *j = cJSON_Parse(body), *ids = cJSON_GetObjectItem(j, "sessions"), *out = cJSON_CreateArray();
+    xSemaphoreTake(lock, portMAX_DELAY);
+    for (int i = 0; i < n_answers; i++) {
+        bool ours = false;
+        cJSON *id;
+        cJSON_ArrayForEach(id, ids) if (cJSON_IsString(id) && !strncmp(id->valuestring, answers[i].id, sizeof answers[i].id - 1)) ours = true;
+        if (!ours) continue;
+        cJSON *a = cJSON_CreateObject();
+        cJSON_AddStringToObject(a, "session", answers[i].id);
+        cJSON_AddStringToObject(a, "qid", answers[i].qid);
+        cJSON_AddNumberToObject(a, "choice", answers[i].choice);
+        cJSON_AddItemToArray(out, a);
+        answers[i--] = answers[--n_answers];
+    }
+    xSemaphoreGive(lock);
+    cJSON_Delete(j);
+    char *s = cJSON_PrintUnformatted(out);
+    httpd_resp_set_type(req, "application/json");
+    esp_err_t r = httpd_resp_sendstr(req, s);
+    cJSON_free(s);
+    cJSON_Delete(out);
+    return r;
+}
+
 static esp_err_t agent_post(httpd_req_t *req)
 {
     char body[1024];
@@ -293,6 +332,7 @@ static esp_err_t agent_post(httpd_req_t *req)
     cJSON *pr = cJSON_GetObjectItem(j, "project");    // optional, and kept from earlier posts when left out:
     cJSON *ai = cJSON_GetObjectItem(j, "agent"), *mo = cJSON_GetObjectItem(j, "model"), *ti = cJSON_GetObjectItem(j, "title"),
           *to = cJSON_GetObjectItem(j, "tool"), *pv = cJSON_GetObjectItem(j, "provider");     // (sent every time: "" when it isn't using one)
+    cJSON *op = cJSON_GetObjectItem(j, "options"), *qi = cJSON_GetObjectItem(j, "qid");   // (waiting on a choice you can tap)
     if (!cJSON_IsString(id) || !cJSON_IsString(st)) { cJSON_Delete(j); return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "need session and state"); }
 
     int64_t now = esp_timer_get_time();
@@ -331,6 +371,15 @@ static esp_err_t agent_post(httpd_req_t *req)
     if (cJSON_IsString(ti) && ti->valuestring[0]) strlcpy(s->title, ti->valuestring, sizeof s->title);
     if (cJSON_IsString(pv) && pv->valuestring[0]) strlcpy(s->provider, pv->valuestring, sizeof s->provider);
     strlcpy(s->tool, cJSON_IsString(to) ? to->valuestring : "", sizeof s->tool);
+    const char *q = state == AG_WAITING && cJSON_IsString(qi) ? qi->valuestring : "";
+    if (strncmp(q, s->qid, sizeof s->qid - 1)) s->picked = -1;   // a new question: nothing tapped yet
+    strlcpy(s->qid, q, sizeof s->qid);
+    s->nopt = 0;
+    if (q[0] && cJSON_IsArray(op)) {
+        cJSON *o;
+        cJSON_ArrayForEach(o, op) if (cJSON_IsString(o) && s->nopt < AGENT_OPTS) strlcpy(s->opt[s->nopt++], o->valuestring, sizeof s->opt[0]);
+    }
+    if (!s->nopt) s->picked = -1;
     xSemaphoreGive(lock);
     ESP_LOGI(TAG, "%.8s: %s %s", id->valuestring, st->valuestring, cJSON_IsString(de) ? de->valuestring : "");
     cJSON_Delete(j);
@@ -352,6 +401,7 @@ void agent_register(httpd_handle_t server)
     }
     const httpd_uri_t u[] = {
         {.uri = "/agent", .method = HTTP_POST, .handler = agent_post},
+        {.uri = "/agent/answers", .method = HTTP_POST, .handler = answers_post},
         {.uri = "/pair/start", .method = HTTP_POST, .handler = pair_start},
         {.uri = "/pair/finish", .method = HTTP_POST, .handler = pair_finish},
         {.uri = "/pair/cancel", .method = HTTP_POST, .handler = pair_cancel},
@@ -440,6 +490,9 @@ int agent_get_chats(agent_chat_t out[AGENT_MAX])
         strlcpy(c->project, s->project, sizeof c->project);
         strlcpy(c->agent, s->agent, sizeof c->agent);
         strlcpy(c->model, s->model, sizeof c->model);
+        c->nopt = s->nopt;
+        memcpy(c->opt, s->opt, sizeof c->opt);
+        c->picked = s->picked;
     }
     xSemaphoreGive(lock);
     return (int)n;
@@ -473,6 +526,24 @@ void agent_select_slot(int slot)
         strlcpy(pinned, sess[slot].id, sizeof pinned);
         pin_until = now + PIN_US;
         activity++;
+    }
+    xSemaphoreGive(lock);
+}
+
+void agent_answer(int slot, int choice)
+{
+    if (!lock || slot < 0 || slot >= MAX_SESS) return;
+    xSemaphoreTake(lock, portMAX_DELAY);
+    sess_t *s = &sess[slot];
+    if (s->id[0] && s->state == AG_WAITING && choice >= 0 && choice < s->nopt && s->picked < 0) {
+        s->picked = choice;
+        if (n_answers == ANSWERS_MAX) answers[0] = answers[--n_answers];   // (full: the oldest goes)
+        answer_t *a = &answers[n_answers++];
+        strlcpy(a->id, s->id, sizeof a->id);
+        strlcpy(a->qid, s->qid, sizeof a->qid);
+        a->choice = choice;
+        activity++;
+        ESP_LOGI(TAG, "%.8s: answered \"%s\"", s->id, s->opt[choice]);
     }
     xSemaphoreGive(lock);
 }

@@ -95,6 +95,18 @@ final class Device {
         pump()
     }
 
+    // Choices tapped on the display for these chats (ours: waiting on one), as [(session, qid, choice)]
+    func fetchAnswers(_ sessions: [String], _ done: @escaping ([(String, String, Int)]) -> Void) {
+        guard let endpoint, let body = try? JSONSerialization.data(withJSONObject: ["sessions": sessions]) else { return }
+        request(endpoint, "/agent/answers", body, key: key, timeout: 2) { code, reply in
+            guard code == 200, let reply, let list = (try? JSONSerialization.jsonObject(with: reply)) as? [[String: Any]] else { return }
+            done(list.compactMap { a in
+                guard let s = a["session"] as? String, let q = a["qid"] as? String, let c = a["choice"] as? Int else { return nil }
+                return (s, q, c)
+            })
+        }
+    }
+
     private func pump() {
         guard !sending, let endpoint, let chat = order.first, let data = pending[chat] else { return }
         sending = true

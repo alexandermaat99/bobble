@@ -1,14 +1,18 @@
 // The hooks' way in: a tiny HTTP server on 127.0.0.1 (this Mac only). Each agent's hook command POSTs the event's
 // JSON (Claude Code to /hook, Cursor to /cursor); we answer at once (a hook mustn't hold the agent up) and hand it on.
+// Except Claude Code's permission requests (/permission): those are held for a minute at most, for an answer tapped on
+// the display.
 import Foundation
 import Network
 
 final class HookServer {
     static let port: UInt16 = 47823
     private var listener: NWListener?
-    private let onEvent: (_ path: String, _ event: [String: Any]) -> Void
+    // The hook's output, for a permission request held open (a decision, or "" for Claude Code to ask as usual)
+    typealias Reply = (_ output: String) -> Void
+    private let onEvent: (_ path: String, _ event: [String: Any], _ reply: Reply?) -> Void
 
-    init(onEvent: @escaping (String, [String: Any]) -> Void) {
+    init(onEvent: @escaping (String, [String: Any], Reply?) -> Void) {
         self.onEvent = onEvent
     }
 
@@ -28,11 +32,17 @@ final class HookServer {
     private func serve(_ c: NWConnection) {
         c.start(queue: .main)
         HTTP.readMessage(c) { [weak self] req in
-            let reply = "HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\nok\n"
-            c.send(content: reply.data(using: .utf8), completion: .contentProcessed { _ in c.cancel() })
-            guard let req, let j = (try? JSONSerialization.jsonObject(with: req.body)) as? [String: Any] else { return }
-            let path = req.first.split(separator: " ").dropFirst().first.map(String.init) ?? "/hook"   // "POST /cursor HTTP/1.1"
-            self?.onEvent(path, j)
+            var sent = false
+            let reply: Reply = { body in
+                if sent { return }
+                sent = true
+                let head = "HTTP/1.1 200 OK\r\nContent-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n"
+                c.send(content: Data((head + body).utf8), completion: .contentProcessed { _ in c.cancel() })
+            }
+            let path = req.flatMap { $0.first.split(separator: " ").dropFirst().first.map(String.init) } ?? "/hook"   // "POST /cursor HTTP/1.1"
+            guard let req, let j = (try? JSONSerialization.jsonObject(with: req.body)) as? [String: Any] else { reply(""); return }
+            if path.hasPrefix("/permission") { self?.onEvent(path, j, reply) }   // (answered later, or with "")
+            else { reply("ok\n"); self?.onEvent(path, j, nil) }
         }
     }
 }

@@ -1497,11 +1497,24 @@ static agent_chat_t crowd_chat[AGENT_MAX + 1];   // by slot (and the host's)
 static int crowd_more;                        // chats up that don't fit
 static int16_t crowd_q[CROWD_POOL][12];    // what the last frame showed, roughly (anything changed: redraw)
 static uint32_t crowd_sum;
+// The choices over a waiting chat's bubble ("Yes" / "No", a question's answers), as last drawn: where to tap
+#define PILL_GAP 8
+static struct { int slot, n, r[AGENT_OPTS][4]; } pills[CROWD_POOL];
+static int ask_n;                             // chats waiting on a choice (the first has the screen; "1 of 3")
+// How the choices look: 1 inside the bubble, over the question, as pills in the chat's colour; 2 a numbered list over
+// the bubble, like a terminal's
+#ifndef ASK_STYLE
+#define ASK_STYLE 1
+#endif
 
 static const int urgency[] = {[AG_IDLE] = 0, [AG_STOPPED] = 1, [AG_DONE] = 2, [AG_WORKING] = 3, [AG_WAITING] = 4};
-static int crowd_rank(const agent_chat_t *c)      // which matter most (a meeting announced most of all; resting least)
+#define PEEK_US 30000000                      // a resting one tapped: back up front with its last bubble this long
+static int peek_slot = -1;
+static int64_t peek_until;
+static int crowd_rank(const agent_chat_t *c)      // which matter most (a meeting announced, or one you tapped, most of all; resting least)
 {
     if (c->slot == HOST_SLOT) return c->state == AG_WAITING ? 5 : 0;
+    if (c->slot == peek_slot) return 5;
     return c->bubble ? urgency[c->state] : 0;
 }
 static const float crowd_pal[5][6] = {{0}, {40, 40, 50, 228, 228, 236}, {244, 244, 247, 22, 22, 28},
@@ -1532,16 +1545,27 @@ static void crowd_update(int64_t now, float dt)
     if (!init) { init = true; for (int i = 0; i < CROWD_POOL; i++) crowd[i].slot = -1; }
     agent_chat_t all[AGENT_MAX + 1], *pick[AGENT_MAX + 1], *rest[AGENT_MAX];
     int n = agent_get_chats(all), m = 0, r = 0;
+    // a chat waiting on a choice takes the whole screen, the one that asked first; the rest step aside till it's
+    // answered, then the next one asking goes
+    agent_chat_t *ask = NULL;
+    ask_n = 0;
+    for (int i = 0; i < n; i++)
+        if (all[i].state == AG_WAITING && all[i].nopt) {
+            ask_n++;
+            if (!ask || all[i].since < ask->since) ask = &all[i];
+        }
     for (int i = 0; i < n; i++) {                     // the busy ones up front; the quiet ones (a minute done) off to the side
         agent_chat_t *c = &all[i];
         bool quiet = (c->state == AG_DONE || c->state == AG_STOPPED) && now - c->since > REST_AFTER_US;
+        if (c->slot == peek_slot && now < peek_until) { quiet = false; c->bubble = true; }   // (tapped: its last words again)
+        if (ask) quiet = c != ask;
         if (quiet) { c->bubble = false; rest[r++] = c; }
         else pick[m++] = c;
     }
     // the host: what the eyes would be saying (the welcome, a meeting), when no chat's up front or there's a meeting
     const char *say = cap_kind == CAP_MEET || cap_kind == CAP_MEETQ || cap_kind == CAP_HELLO || (cap_kind == CAP_PLAIN && caption[0])
                       ? caption : mt_caption;
-    if (!m || say[0]) {
+    if (!ask && (!m || say[0])) {
         agent_chat_t *hc = &all[n];
         memset(hc, 0, sizeof *hc);
         hc->slot = HOST_SLOT;
@@ -1595,8 +1619,11 @@ static void crowd_update(int64_t now, float dt)
         for (const char *p = c->detail; *p; p++) sum = sum * 31 + (uint8_t)*p;
         for (const char *p = c->title; *p; p++) sum = sum * 31 + (uint8_t)*p;
         sum = sum * 31 + c->state;
+        sum = sum * 31 + c->nopt * 8 + c->picked + 1;
+        for (int o = 0; o < c->nopt; o++) for (const char *p = c->opt[o]; *p; p++) sum = sum * 31 + (uint8_t)*p;
     }
 
+    sum = sum * 31 + ask_n;
     bool any = false, changed = sum != crowd_sum;
     crowd_sum = sum;
     float t = now / 1e6f;
@@ -1649,6 +1676,28 @@ static void crowd_update(int64_t now, float dt)
 static bool crowd_tap(int x, int y, int64_t now)
 {
     if (!crowd_on) return false;
+    for (int i = 0; i < CROWD_POOL; i++) {         // a character waiting at the side: back up front with its last bubble
+        const mascot_t *ms = &crowd[i];            // (or, tapped again while it's there, off it goes)
+        if (ms->slot < 0 || ms->slot == HOST_SLOT || !ms->live) continue;
+        float half = SPRITE_W * CROWD_PX * ms->sc / 2 + 8;
+        if (fabsf(x - ms->x) > half || y < CROWD_FEET - SPRITE_H * CROWD_PX * ms->sc - 12) continue;
+        bool peeked = ms->slot == peek_slot && now < peek_until;
+        if (!ms->resting && !peeked) continue;
+        peek_slot = peeked ? -1 : ms->slot;
+        peek_until = peeked ? 0 : now + PEEK_US;
+        dirty = true;
+        return true;
+    }
+    for (int i = 0; i < CROWD_POOL; i++) {         // a choice over a bubble: the answer, sent on to the Mac
+        if (crowd[i].slot < 0 || crowd[i].slot != pills[i].slot) continue;
+        for (int o = 0; o < pills[i].n; o++) {
+            const int *r = pills[i].r[o];
+            if (x >= r[0] - PILL_GAP / 2 && x <= r[2] + PILL_GAP / 2 && y >= r[1] - PILL_GAP / 2 && y <= r[3] + PILL_GAP / 2) {
+                agent_answer(crowd[i].slot, o);
+                return true;
+            }
+        }
+    }
     for (int i = 0; i < CROWD_POOL; i++) {         // (a chat's character: nothing yet)
         mascot_t *ms = &crowd[i];
         if (ms->slot != HOST_SLOT || !ms->live || fabsf(x - ms->x) > ms->cw / 2) continue;
@@ -1701,6 +1750,7 @@ static void crowd_draw(uint16_t *buf, int y0, int h)
     for (int pass = 0; pass < 2 * CROWD_POOL; pass++) {   // the waiting line first (behind), then the ones up front
         int i = pass % CROWD_POOL;
         const mascot_t *ms = &crowd[i];
+        if (pass < CROWD_POOL) pills[i].n = 0;
         if (ms->slot < 0 || ms->k < 0.05f || ms->resting != (pass < CROWD_POOL)) continue;
         const agent_chat_t *c = &crowd_chat[ms->slot];
         if (ms->resting) {                            // waiting at the side: just itself, smaller and dimmer
@@ -1723,7 +1773,10 @@ static void crowd_draw(uint16_t *buf, int y0, int h)
         }
 
         // the bubble: logo and title, then the words, over its character with the tail pointing down at it
-        int x0 = (int)lroundf(ms->x - ms->cw / 2 + 8), x1 = (int)lroundf(ms->x + ms->cw / 2 - 8), tw = x1 - x0 - 2 * CROWD_PAD;
+        // (waiting on a choice, it has the screen: the whole width, over the ones that stepped aside)
+        bool asking = !host && !resting && c->state == AG_WAITING && c->nopt;
+        int x0 = asking ? 8 : (int)lroundf(ms->x - ms->cw / 2 + 8), x1 = asking ? W - 8 : (int)lroundf(ms->x + ms->cw / 2 - 8);
+        int tw = x1 - x0 - 2 * CROWD_PAD;
         int y1 = CROWD_HEAD - 18;
         const font_t *tf = &font_small;               // the title: small, wrapped beside the logo, all of it (titles are
         const char *tline[4];                         // under 48 characters: four narrow lines hold any)
@@ -1731,19 +1784,25 @@ static void crowd_draw(uint16_t *buf, int y0, int h)
         bool tcut;
         int tn = host ? 0 : crowd_wrap(c->title[0] ? c->title : c->project, tf, tw - 30, tline, tlen, 4, &tcut);
         int title_h = host ? 0 : (tn ? tn : 1) * tf->line_h + (resting ? 0 : 8);   // (the host: no title; resting: only one)
-        int room = (y1 - CROWD_TOP - 2 * CROWD_PAD - title_h) / f->line_h;
+        // waiting on a choice: one each, stacked, in the bubble over the question (ASK_STYLE 1: pills) or a numbered
+        // list over the bubble (2); they take their room from its words
+        int np = !host && !resting && c->state == AG_WAITING ? c->nopt : 0, ph = f->line_h + 12;
+        int inner = ASK_STYLE == 1 && np ? np * (ph + PILL_GAP) + 4 : 0;               // (in the bubble)
+        int outer = ASK_STYLE == 2 && np ? np * ph + 14 : 0;                             // (over it)
+        int room = (y1 - CROWD_TOP - 2 * CROWD_PAD - title_h - inner - outer) / f->line_h;
+        if (room < 1) room = 1;
         const char *line[CROWD_LINES];
         int len[CROWD_LINES];
         bool cut = false;
         int nl = resting ? 0 : crowd_wrap(c->detail, f, tw, line, len, room < CROWD_LINES ? room : CROWD_LINES, &cut);
-        int yb0 = y1 - 2 * CROWD_PAD - title_h - nl * f->line_h;
+        int yb0 = y1 - 2 * CROWD_PAD - title_h - nl * f->line_h - inner;
         uint16_t bg = rgb((int)(pal[0] * a), (int)(pal[1] * a), (int)(pal[2] * a));
         fill_rrect(buf, y0, h, x0, yb0, x1, y1, 16, bg);
         int tx = (int)lroundf(ms->x);
         fill_tri(buf, y0, h, tx - 9, y1 - 1, tx + 9, y1 - 1, tx, y1 + 12, bg);
         int lc[3];                                    // the logo and title in the chat's colour (darker on a light bubble)
         for (int q = 0; q < 3; q++) lc[q] = (int)(cc[q] * (light ? 0.5f : 1) * a);
-        int ty = yb0 + CROWD_PAD;
+        int ty = yb0 + CROWD_PAD + inner;
         if (!host) crowd_logo(buf, y0, h, c->agent, x0 + CROWD_PAD + 11, ty + tf->line_h / 2, lc);
         uint16_t tc = rgb(lc[0], lc[1], lc[2]);
         for (int l = 0; l < tn; l++) {
@@ -1752,6 +1811,47 @@ static void crowd_draw(uint16_t *buf, int y0, int h)
             if (tcut && l == tn - 1) draw_ftext(buf, y0, h, x0 + CROWD_PAD + 30 + ftext_width_n(tf, tline[l], tlen[l]), ly, tf, "...", tc);
         }
         uint16_t fg = rgb((int)(pal[3] * a), (int)(pal[4] * a), (int)(pal[5] * a));
+        pills[i].slot = ms->slot;
+        pills[i].n = np;
+        for (int o = 0; o < np; o++) {                // first choice at the top
+            bool picked = c->picked == o, other = c->picked >= 0 && !picked;
+            int px0, px1, pt, pb, tcol[3];
+            char lab[40];
+#if ASK_STYLE == 1
+            px0 = x0 + CROWD_PAD;
+            px1 = x1 - CROWD_PAD;
+            pt = yb0 + CROWD_PAD + o * (ph + PILL_GAP);
+            pb = pt + ph;
+            float mix = other ? 0.7f : 0;             // tapped: the others fade into the bubble
+            int pc[3];
+            for (int q = 0; q < 3; q++) { pc[q] = (int)(lc[q] + (pal[q] * a - lc[q]) * mix); tcol[q] = (int)((255 + (pal[q] - 255) * mix) * a); }
+            fill_rrect(buf, y0, h, px0, pt, px1, pb, ph / 2, rgb(pc[0], pc[1], pc[2]));
+            strlcpy(lab, c->opt[o], sizeof lab);
+#else
+            static const int green[3] = {80, 210, 110};
+            px0 = 12;                                 // (the whole width, like a terminal's)
+            px1 = W - 12;
+            pt = yb0 - 14 - (np - o) * ph;
+            pb = pt + ph;
+            float ga = a * (other ? 0.35f : 1);
+            uint16_t gl = rgb((int)(green[0] * ga * 0.6f), (int)(green[1] * ga * 0.6f), (int)(green[2] * ga * 0.6f));
+            if (picked) fill_rrect(buf, y0, h, px0, pt, px1, pb, 0, rgb((int)(green[0] * a), (int)(green[1] * a), (int)(green[2] * a)));
+            fill_rrect(buf, y0, h, px0, pb - 1, px1, pb, 0, gl);
+            if (o == 0) fill_rrect(buf, y0, h, px0, pt, px1, pt + 1, 0, gl);
+            for (int q = 0; q < 3; q++) tcol[q] = picked ? (int)(12 * a) : (int)(green[q] * ga);
+            snprintf(lab, sizeof lab, "%d. %.31s", o + 1, c->opt[o]);
+#endif
+            int *r = pills[i].r[o];
+            r[0] = px0; r[1] = pt; r[2] = px1; r[3] = pb;
+            int lw = px1 - px0 - 2 * CROWD_PAD;       // (cut to fit, with "...")
+            if (ftext_width(f, lab) > lw) {
+                int k = (int)strlen(lab);
+                while (k > 0 && ftext_width_n(f, lab, k) + ftext_width(f, "...") > lw) k--;
+                strcpy(lab + k, "...");
+            }
+            int lx = ASK_STYLE == 1 ? (px0 + px1) / 2 - ftext_width(f, lab) / 2 : px0 + 8;
+            draw_ftext(buf, y0, h, lx, pt + (ph - f->line_h) / 2, f, lab, rgb(tcol[0], tcol[1], tcol[2]));
+        }
         for (int l = 0; l < nl; l++) {
             int ly = ty + title_h + l * f->line_h;
             draw_ftext_n(buf, y0, h, x0 + CROWD_PAD, ly, f, line[l], len[l], fg);
@@ -1760,6 +1860,11 @@ static void crowd_draw(uint16_t *buf, int y0, int h)
 
         // its character, growing in from its feet; greyed when stopped
         sprite_draw(buf, y0, h, host ? HOST_WHO : ms->slot, &ms->pose, ms->x, CROWD_FEET - ms->dy, CROWD_PX * k * ms->sc, dimk * fminf(1, k * 1.5f));
+    }
+    if (ask_n > 1) {                                  // others waiting on a choice too, after this one: top left
+        char t[16];
+        snprintf(t, sizeof t, "1 of %d", ask_n);
+        draw_ftext(buf, y0, h, 16, 12, &font_small, t, rgb(150, 150, 162));
     }
     if (crowd_more) {                                 // more chats than room: how many more, bottom right
         char t[8];

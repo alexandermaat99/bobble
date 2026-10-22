@@ -5,14 +5,35 @@ import Foundation
 
 // Claude Code's, in ~/.claude/settings.json
 enum Hooks {
-    static let events = ["UserPromptSubmit", "PreToolUse", "PostToolUse", "Notification", "Stop", "SessionEnd"]
+    static let events = ["UserPromptSubmit", "PreToolUse", "PostToolUse", "PermissionRequest", "Notification", "Stop", "SessionEnd"]
     static let marker = "AGENT_BRIDGE=1"
-    static let command = "\(marker) curl -s -m 1 --data-binary @- http://127.0.0.1:\(HookServer.port)/hook >/dev/null 2>&1 || true"
+    // PermissionRequest waits for an answer tapped on the display and prints what the app says (nothing, if the app
+    // isn't running or nobody taps: Claude Code then asks in the terminal as usual)
+    static func command(_ event: String) -> String {
+        event == "PermissionRequest"
+            ? "\(marker) curl -s -m 90 --data-binary @- http://127.0.0.1:\(HookServer.port)/permission 2>/dev/null || true"
+            : "\(marker) curl -s -m 1 --data-binary @- http://127.0.0.1:\(HookServer.port)/hook >/dev/null 2>&1 || true"
+    }
     static var settingsURL: URL { FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude/settings.json") }
 
     static func installed() -> Bool { installed(at: settingsURL, events) }
-    static func install() throws { try update(settingsURL, events, adding: true) { _ in command } }
-    static func remove() throws { try update(settingsURL, events, adding: false) { _ in command } }
+    private static func asksInstalled() -> Bool {
+        (((load(settingsURL)["hooks"] as? [String: Any])?["PreToolUse"] as? [[String: Any]]) ?? [])
+            .contains { $0["matcher"] as? String == "AskUserQuestion" }
+    }
+    // (and for AskUserQuestion, a second PreToolUse hook that waits for its answer tapped on the display)
+    static func install() throws {
+        try update(settingsURL, events, adding: true, command: command) { e in
+            e == "PreToolUse" ? [["matcher": "AskUserQuestion",
+                                  "hooks": [["type": "command", "command": command("PermissionRequest"), "timeout": 120]]]] : []
+        }
+    }
+    static func remove() throws { try update(settingsURL, events, adding: false, command: command) }
+    // Connected before an event was added (ours on some, not all): brought up to date
+    static func upgrade() {
+        guard !installed() || !asksInstalled(), installed(at: settingsURL, ["Stop"]) else { return }
+        try? install()
+    }
 
     // Ours, or the prototype's script
     private static func isOurs(_ h: [String: Any]) -> Bool {
@@ -36,7 +57,8 @@ enum Hooks {
     }
 
     // Adds (or takes out) our hook for each event in a Claude Code-style file
-    static func update(_ url: URL, _ events: [String], adding: Bool, command: (String) -> String) throws {
+    static func update(_ url: URL, _ events: [String], adding: Bool, command: (String) -> String,
+                       also: (String) -> [[String: Any]] = { _ in [] }) throws {
         var settings = load(url)
         var hooks = settings["hooks"] as? [String: Any] ?? [:]
         for e in events {
@@ -48,7 +70,7 @@ enum Hooks {
                 g["hooks"] = kept
                 return g
             }
-            if adding { groups.append(["hooks": [["type": "command", "command": command(e), "timeout": 5]]]) }
+            if adding { groups.append(["hooks": [["type": "command", "command": command(e), "timeout": e == "PermissionRequest" ? 120 : 5]]]); groups += also(e) }
             hooks[e] = groups.isEmpty ? nil : groups
         }
         settings["hooks"] = hooks.isEmpty ? nil : hooks

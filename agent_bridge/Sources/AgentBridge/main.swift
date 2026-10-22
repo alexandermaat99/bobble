@@ -31,8 +31,9 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self.refreshIcon()
         }
         device.onChange = { [weak self] in self?.refreshIcon() }
-        server = HookServer { [weak self] path, j in
-            if path.hasPrefix("/cursor") { self?.chats.handleCursor(j) }
+        server = HookServer { [weak self] path, j, reply in
+            if let reply { if let self { self.chats.handlePermission(j, reply: reply) } else { reply("") } }
+            else if path.hasPrefix("/cursor") { self?.chats.handleCursor(j) }
             else if path.hasPrefix("/codex") { self?.chats.handle(j, agent: "codex") }
             else { self?.chats.handle(j) }
         }
@@ -53,6 +54,18 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         updater.start()
         refreshIcon()
         Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in self?.chats.check() }   // (interrupts)
+        Hooks.upgrade()                                 // (connected before permission prompts could be answered on the display)
+        // a chat waiting on a choice: has it been tapped on the display? (the board can't call us: we ask)
+        Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            let asking = self.chats.all.values.filter { !$0.options.isEmpty }.map(\.id)
+            guard !asking.isEmpty else { return }
+            for d in [self.device] + self.sims {
+                d.fetchAnswers(asking) { [weak self] got in
+                    for (s, q, c) in got { self?.chats.answer(session: s, qid: q, choice: c) }
+                }
+            }
+        }
     }
 
     // The menu-bar mark: a solid round face with its two resting eyes cut out. A template image, so macOS tints it for

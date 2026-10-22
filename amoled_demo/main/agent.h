@@ -10,6 +10,7 @@
 // (stopped: you interrupted it; its last message stays up, greyed, until the chat's closed or you send it something new)
 typedef enum { AG_IDLE, AG_WORKING, AG_WAITING, AG_DONE, AG_STOPPED } agent_state_t;
 #define AGENT_MAX 6
+#define AGENT_OPTS 4        // answers offered on the display at most
 
 typedef struct {
     agent_state_t state;
@@ -42,6 +43,9 @@ typedef struct {
     int64_t since;          // esp_timer time its state began
     bool bubble;
     char detail[200], title[48], project[32], agent[12], model[24];
+    int nopt;               // waiting on a choice you can make right here ("Yes" / "No", a question's answers): how many
+    char opt[AGENT_OPTS][32];
+    int picked;             // the one tapped (-1: none yet), till the Mac moves the chat on
 } agent_chat_t;
 
 void agent_register(httpd_handle_t server);
@@ -49,6 +53,10 @@ void agent_get(agent_status_t *out);
 int agent_get_chats(agent_chat_t out[AGENT_MAX]);   // every chat not idle, in slot order; how many
 void agent_select_next(void);   // show the next session (a tap on the bubble); back to the most urgent after 30 s
 void agent_select_slot(int slot);   // show this one (a tap on its dot), the same way
+// A waiting chat can come with choices ("options": ["Yes", "No"], and "qid": which question they answer). A tap on
+// one (agent_answer) is kept for the Mac, which collects it with POST /agent/answers {"sessions": [...]} and answers
+// the agent for you.
+void agent_answer(int slot, int choice);
 
 // Pairing with the Mac's app: POST /pair/start shows a 6-digit code on the display (for 2 minutes); the app sends it
 // back with POST /pair/finish {"code"} and gets a key of its own ({"key"}), kept in NVS, for its X-OTA-Token header.
