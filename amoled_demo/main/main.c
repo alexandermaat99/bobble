@@ -763,7 +763,11 @@ static void draw_overlay(uint16_t *buf, int y0, int h)
 }
 
 // ---------------------------------------------------------------- screen sleep
+#ifdef BOBBLE_SIM
+#define SLEEP_AFTER_US (365 * 24 * 3600 * 1000000LL)   // the simulator: never dozes off on its own (Lock still works)
+#else
 #define SLEEP_AFTER_US (60 * 1000000LL)
+#endif
 #define AUTO_LOCK_US (2 * 3600 * 1000000LL)   // asleep this long on battery: lock (radio + motion off, 3 s touch wakes)
 enum { PW_AWAKE, PW_FADING_OUT, PW_ASLEEP, PW_FADING_IN };
 static int power = PW_AWAKE, brightness = 255;
