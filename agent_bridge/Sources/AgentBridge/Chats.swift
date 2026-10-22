@@ -191,6 +191,8 @@ final class Chats {
         let input = j["tool_input"] as? [String: Any] ?? [:]
         let asking = tool == "AskUserQuestion"
         if asking != (event == "PreToolUse") { reply(""); return }   // (a question's answered at PreToolUse, not here)
+        // (Conductor shows a question only once the hooks before it are done: holding one there would hide it)
+        if asking, (j["cwd"] as? String ?? "").contains("/conductor/workspaces/") { reply(""); handle(j); return }
         if let old = all[sid] { letGo(old) }
         var options: [String] = [], decide: (Int) -> [String: Any]
         if asking {
