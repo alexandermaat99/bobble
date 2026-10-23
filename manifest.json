@@ -1,0 +1,14 @@
+{
+  "name": "Bobble",
+  "version": "0.5",
+  "new_install_prompt_erase": true,
+  "builds": [{
+    "chipFamily": "ESP32-S3",
+    "parts": [
+      {"path": "bobble-bootloader.bin", "offset": 0},
+      {"path": "bobble-partitions.bin", "offset": 32768},
+      {"path": "bobble-otadata.bin", "offset": 61440},
+      {"path": "bobble-firmware.bin", "offset": 131072}
+    ]
+  }]
+}
