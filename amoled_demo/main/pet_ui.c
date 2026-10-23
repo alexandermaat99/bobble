@@ -1861,10 +1861,10 @@ static void crowd_draw(uint16_t *buf, int y0, int h)
         // its character, growing in from its feet; greyed when stopped
         sprite_draw(buf, y0, h, host ? HOST_WHO : ms->slot, &ms->pose, ms->x, CROWD_FEET - ms->dy, CROWD_PX * k * ms->sc, dimk * fminf(1, k * 1.5f));
     }
-    if (ask_n > 1) {                                  // others waiting on a choice too, after this one: top left
-        char t[16];
+    if (ask_n > 1) {                                  // others waiting on a choice too, after this one: top middle (the clock
+        char t[16];                                   // has the left corner)
         snprintf(t, sizeof t, "1 of %d", ask_n);
-        draw_ftext(buf, y0, h, 16, 12, &font_small, t, rgb(150, 150, 162));
+        draw_ftext(buf, y0, h, CX - ftext_width(&font_small, t) / 2, 17, &font_small, t, rgb(150, 150, 162));
     }
     if (crowd_more) {                                 // more chats than room: how many more, bottom right
         char t[8];

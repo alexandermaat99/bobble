@@ -1,5 +1,6 @@
 // Now Playing screen: album art fills the round display (dimmed), a progress ring runs around the
-// edge, with the track, controls, and the playing device's volume on top.
+// edge, with the track, controls, and the playing device's volume on top. The square: the cover as a tile at the
+// top, the track under it, the times and a progress bar, and three round buttons.
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -22,6 +23,20 @@
 
 enum { ID_NONE, ID_PREV, ID_PLAY, ID_NEXT, ID_VDOWN, ID_VUP };
 typedef struct { int x0, y0, x1, y1, id; } btn_t;
+#if !SCREEN_ROUND
+#define CTRL_Y 442
+#define BAR_Y 398
+#define BAR_X0 36
+#define BAR_X1 (W - 36)
+#define C_BTN  rgb(64, 64, 70)
+#define C_TRACK rgb(55, 55, 60)
+static const btn_t btns[] = {
+    {CX - 80 - 26, CTRL_Y - 26, CX - 80 + 26, CTRL_Y + 26, ID_PREV},
+    {CX - 34, CTRL_Y - 34, CX + 34, CTRL_Y + 34, ID_PLAY},
+    {CX + 80 - 26, CTRL_Y - 26, CX + 80 + 26, CTRL_Y + 26, ID_NEXT},
+};
+#define NBTN 3
+#else
 // volume up top, track name in the middle (where swipes between pages cross), playback controls below
 #define CTRL_Y 332
 #define VOL_Y 140
@@ -33,6 +48,7 @@ static const btn_t btns[] = {
     {CX + 92, VOL_Y - 25, CX + 156, VOL_Y + 25, ID_VUP},
 };
 #define NBTN 5
+#endif
 
 static spotify_state_t s;
 static float progress;                 // 0..1 for the ring
@@ -80,7 +96,7 @@ void spotify_ui_render_bg(uint16_t *buf, int y0, int y1)
     const uint16_t *art = s.active ? spotify_art(&ver) : NULL;
     if (art) memcpy(buf, art + y0 * W, (y1 - y0) * W * 2);
     else memset(buf, 0, (y1 - y0) * W * 2);
-    if (!s.active || s.duration_ms <= 0) return;
+    if (!SCREEN_ROUND || !s.active || s.duration_ms <= 0) return;   // (the square's progress is a bar, drawn on top)
 
     uint16_t played = C_GREEN, rest = rgb(55, 55, 68);
     float limit = progress * 2 * (float)M_PI;
@@ -106,6 +122,7 @@ void spotify_ui_render_bg(uint16_t *buf, int y0, int y1)
 // ---------------------------------------------------------------- overlay
 static bool pressed(int id) { return down && press_id == id; }
 
+#if SCREEN_ROUND
 // Podcast seek button: a circular arrow with "10" inside (counter-clockwise for back)
 static void draw_seek(uint16_t *buf, int y0, int h, int cx, int cy, bool fwd, uint16_t c)
 {
@@ -132,6 +149,96 @@ static void draw_prev_next(uint16_t *buf, int y0, int h, int cx, int cy, bool ne
     fill_tri(buf, y0, h, cx, cy - 16, cx, cy + 16, cx + 18 * d, cy, c);
     fill_rect(buf, y0, h, next ? cx + 18 : cx - 22, cy - 16, next ? cx + 22 : cx - 18, cy + 16, c);
 }
+#endif
+
+#if !SCREEN_ROUND
+// s cut with ".." to fit max_w px in font f
+static void fitw(char *out, size_t cap, const char *in, const font_t *f, int max_w)
+{
+    strlcpy(out, in, cap);
+    int n = strlen(out);
+    if (ftext_width(f, out) <= max_w) return;
+    while (n > 0 && ftext_width_n(f, out, n) + ftext_width(f, "..") > max_w) n--;
+    while (n > 0 && out[n - 1] == ' ') n--;
+    strlcpy(out + n, "..", cap - n);
+}
+
+static void ftext_cx(uint16_t *buf, int y0, int h, int cx, int y, const font_t *f, const char *str, uint16_t col)
+{
+    draw_ftext(buf, y0, h, cx - ftext_width(f, str) / 2, y, f, str, col);
+}
+
+static void ftext_c(uint16_t *buf, int y0, int h, int y, const font_t *f, const char *str, uint16_t col)
+{
+    ftext_cx(buf, y0, h, CX, y, f, str, col);
+}
+
+static void fmt_time(char *out, size_t cap, int ms)
+{
+    int sec = ms / 1000;
+    snprintf(out, cap, "%d:%02d", sec / 60, sec % 60);
+}
+
+// skip back / forward: a triangle with a bar at its tip
+static void draw_skip(uint16_t *buf, int y0, int h, float cx, float cy, bool next, uint16_t c)
+{
+    static const float back[] = {19, 20, 9, 12, 19, 4}, back_bar[] = {5, 19, 5, 5};
+    static const float fwd[] = {5, 4, 15, 12, 5, 20}, fwd_bar[] = {19, 5, 19, 19};
+    aa_icon(buf, y0, h, cx, cy, 20, next ? fwd : back, 3, true, 2, c);
+    aa_icon(buf, y0, h, cx, cy, 20, next ? fwd_bar : back_bar, 2, false, 2, c);
+}
+
+static void draw_square(uint16_t *buf, int y0, int h)
+{
+    char line[96], l1[96];
+    if (!spotify_art(&(uint32_t){0}))                   // cover still loading: a grey tile where it goes
+        fill_rrect(buf, y0, h, ART_X, ART_Y, ART_X + ART_SZ, ART_Y + ART_SZ, 18, rgb(28, 28, 32));
+
+    strlcpy(line, s.title, sizeof line);
+    ascii(line);
+    fitw(l1, sizeof l1, line, &font_label, W - 72);
+    ftext_c(buf, y0, h, ART_Y + ART_SZ + 14, &font_label, l1, C_WHITE);
+    strlcpy(line, s.artist, sizeof line);
+    ascii(line);
+    fitw(l1, sizeof l1, line, &font_small, W - 72);
+    ftext_c(buf, y0, h, ART_Y + ART_SZ + 42, &font_small, l1, rgb(150, 150, 158));
+
+    // times and the progress bar
+    if (s.note[0]) ftext_c(buf, y0, h, BAR_Y - 26, &font_small, s.note, C_NOTE);
+    if (s.duration_ms > 0) {
+        if (!s.note[0]) {
+            fmt_time(line, sizeof line, (int)(progress * s.duration_ms));
+            draw_ftext(buf, y0, h, BAR_X0, BAR_Y - 26, &font_small, line, rgb(150, 150, 158));
+            fmt_time(line, sizeof line, s.duration_ms);
+            draw_ftext(buf, y0, h, BAR_X1 - ftext_width(&font_small, line), BAR_Y - 26, &font_small, line, rgb(150, 150, 158));
+        }
+        int px = BAR_X0 + (int)(progress * (BAR_X1 - BAR_X0));
+        aa_rrect(buf, y0, h, BAR_X0, BAR_Y, BAR_X1, BAR_Y + 4, 2, C_TRACK);
+        if (px > BAR_X0 + 3) aa_rrect(buf, y0, h, BAR_X0, BAR_Y, px, BAR_Y + 4, 2, C_WHITE);
+    }
+
+    // controls: grey discs either side of a white one
+    for (int i = 0; i < 3; i += 2) {
+        float cx = (btns[i].x0 + btns[i].x1) / 2.0f;
+        aa_disc(buf, y0, h, cx, CTRL_Y, 21, pressed(btns[i].id) ? C_PRESS : C_BTN);
+        if (s.episode) {                                // podcasts: 10 s back / forward
+            ftext_cx(buf, y0, h, (int)cx, CTRL_Y - 10, &font_small, "10", C_WHITE);
+        } else {
+            draw_skip(buf, y0, h, cx, CTRL_Y, i == 2, C_WHITE);
+        }
+    }
+    uint16_t ic = pressed(ID_PLAY) ? C_WHITE : rgb(10, 10, 14);
+    aa_disc(buf, y0, h, CX, CTRL_Y, 29, pressed(ID_PLAY) ? C_PRESS : C_WHITE);
+    if (s.playing) {                                    // pause: two bars
+        static const float l[] = {9, 5, 9, 19}, r[] = {15, 5, 15, 19};
+        aa_icon(buf, y0, h, CX, CTRL_Y, 26, l, 2, false, 2, ic);
+        aa_icon(buf, y0, h, CX, CTRL_Y, 26, r, 2, false, 2, ic);
+    } else {                                            // play (nudged right to look centred)
+        static const float tri[] = {7, 4, 19, 12, 7, 20};
+        aa_icon(buf, y0, h, CX + 1.5f, CTRL_Y, 26, tri, 3, true, 2, ic);
+    }
+}
+#endif
 
 void spotify_ui_draw(uint16_t *buf, int y0, int h)
 {
@@ -149,6 +256,9 @@ void spotify_ui_draw(uint16_t *buf, int y0, int h)
         return;
     }
 
+#if !SCREEN_ROUND
+    draw_square(buf, y0, h);
+#else
     // track
     strlcpy(line, s.title, sizeof line);
     ascii(line);
@@ -196,6 +306,7 @@ void spotify_ui_draw(uint16_t *buf, int y0, int h)
         }
     }
     if (s.note[0]) text_c(buf, y0, h, 394, 2, s.note, C_NOTE);
+#endif
 }
 
 // ---------------------------------------------------------------- input

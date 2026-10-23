@@ -558,6 +558,34 @@ static void touch_cal_update(bool down, int rx, int ry, int64_t now)
     was = down;
 }
 
+#if !SCREEN_ROUND
+// The square, in the settings' style: a blue ring with a soft halo to tap, the words in the Inter fonts, and the steps as
+// a row of dots (done white, this one blue)
+static void ftext_mid(uint16_t *buf, int y0, int h, int cx, int y, const font_t *f, const char *t, uint16_t col)
+{
+    draw_ftext(buf, y0, h, cx - ftext_width(f, t) / 2, y, f, t, col);
+}
+
+static void touch_cal_draw(uint16_t *buf, int y0, int h)
+{
+    const uint16_t white = rgb(255, 255, 255), blue = rgb(10, 132, 255), grey = rgb(150, 150, 158);
+    int tx = cal_pts[cal_idx][0], ty = cal_pts[cal_idx][1];
+    bool centre = cal_idx == 0;
+    int top = centre ? 92 : CY - 70;                  // (the words sit clear of whichever dot is up)
+    ftext_mid(buf, y0, h, CX, top, &font_body, "Touch calibration", white);
+    if (cal_retry && centre) ftext_mid(buf, y0, h, CX, top + 46, &font_label, "That didn't line up. Try again.", rgb(255, 159, 10));
+    else ftext_mid(buf, y0, h, CX, top + 46, &font_label, "Tap the middle of the dot", grey);
+    int dy = centre ? 318 : CY + 34;
+    for (int i = 0; i < N_CAL_PTS; i++)
+        aa_disc(buf, y0, h, CX + (i - (N_CAL_PTS - 1) / 2.0f) * 18, dy, i == cal_idx ? 4.5f : 3.5f,
+                i == cal_idx ? blue : i < cal_idx ? white : rgb(70, 70, 76));
+    ftext_mid(buf, y0, h, CX, dy + 22, &font_small, "Press BOOT to cancel", rgb(100, 100, 108));
+    aa_disc(buf, y0, h, tx, ty, 34, rgb(8, 34, 64));    // halo
+    aa_disc(buf, y0, h, tx, ty, 22, blue);              // ring
+    aa_disc(buf, y0, h, tx, ty, 19, rgb(8, 34, 64));
+    aa_disc(buf, y0, h, tx, ty, 5, white);              // the point to hit
+}
+#else
 static void touch_cal_draw(uint16_t *buf, int y0, int h)
 {
     uint16_t white = rgb(255, 255, 255), accent = rgb(0, 230, 200), grey = rgb(130, 130, 150), dim = rgb(80, 80, 98);
@@ -574,6 +602,7 @@ static void touch_cal_draw(uint16_t *buf, int y0, int h)
     fill_circle(buf, y0, h, tx, ty, 12, 0);
     fill_circle(buf, y0, h, tx, ty, 4, white);
 }
+#endif
 
 // ---------------------------------------------------------------- screens
 // Wi-Fi settings is a card that slides down over the calendar. `sheet` is the card's bottom edge in
@@ -679,7 +708,8 @@ static void page_fg(int p, uint16_t *buf, int y0, int h)
     else if (p == PAGE_LIB) library_ui_draw(buf, y0, h);
     else if (p == PAGE_PET) pet_ui_draw(buf, y0, h);
     else cal_ui_draw(buf, y0, h);
-    if (status_shown(p)) draw_status_bar(buf, y0, h, p == PAGE_CAL && cal_ui_is_face() ? 58 : 18);   // slides with its page
+    if (SCREEN_ROUND && status_shown(p)) draw_status_bar(buf, y0, h, p == PAGE_CAL && cal_ui_is_face() ? 58 : 18);   // slides with its page
+    // (the square's stays put over the sliding pages: drawn by draw_overlay and draw_strip instead)
 }
 
 static int pg_render;              // page being snapshotted (read by both render cores)
@@ -727,7 +757,7 @@ static void draw_overlay(uint16_t *buf, int y0, int h)
         else if (page == PAGE_PET) pet_ui_draw(buf, y0, h);
         else cal_ui_draw(buf, y0, h);
         if (fs == 0) {
-            if (status_shown(page)) draw_status_bar(buf, y0, h, status_bar_top(0));
+            if (SCREEN_ROUND && status_shown(page)) draw_status_bar(buf, y0, h, status_bar_top(0));
             if (snap_buf[0]) {                         // keep the current page's snapshot up to date (round-clipped)
                 for (int r = 0; r < h; r++) {
                     int y = y0 + r;
@@ -740,6 +770,7 @@ static void draw_overlay(uint16_t *buf, int y0, int h)
                 }
                 if (y0 + h >= H) { snap_page[0] = page; snap_time[0] = esp_timer_get_time(); }
             }
+            if (!SCREEN_ROUND) draw_status_bar(buf, y0, h, 0);   // (after the snapshot, which leaves it out)
             // no network to join (or still none after 20 s): say where Wi-Fi is set up; on the eyes, under them
             if ((page != PAGE_PET || agent_known()) && !calendar_loaded() && (wifi_state() == WS_PORTAL || (wifi_state() != WS_CONNECTED && esp_timer_get_time() > 20000000)))
                 text_c(buf, y0, h, page == PAGE_PET ? 380 : 262, 1, "Swipe down from the top for Wi-Fi", rgb(140, 140, 160));
@@ -1131,6 +1162,7 @@ static void draw_strip(uint16_t *buf, int y0, int h)
     int off = (int)lroundf(pg_off);
     cmp_off = off > W ? W : (off < -W ? -W : off);
     split_rows(compose_rows, buf, y0, h);            // both cores copy half the strip each
+    if (!SCREEN_ROUND) draw_status_bar(buf, y0, h, 0);   // the square's status bar doesn't slide
 }
 
 // Send a finished strip to the glass, but only the part inside the round display: the square's
@@ -1176,6 +1208,9 @@ static void render_frame(bool content)
             cmp_off = off > W ? W : (off < -W ? -W : off);
             frame_valid = false;
         }
+#if !SCREEN_ROUND
+        if (rs_slide) { rs_slide = false; content = true; }   // (compose upright, with the status bar on top, then turn)
+#endif
         bool part = part_on && frame_valid && !rs_slide;
         int64_t p0 = esp_timer_get_time();
         for (int y0 = 0; y0 < H && !rs_slide && (content || !frame_valid); y0 += STRIP) {   // draw upright into the frame...
@@ -1350,7 +1385,8 @@ void app_main(void)
             } else if (!touch && !moved && !boot_press && !updating && !meeting) { vTaskDelay(pdMS_TO_TICKS(50)); continue; }
             asleep_from = 0;
             ESP_LOGI(TAG, "wake (%s)", agent ? "agent" : meeting ? "meeting" : touch ? (hw_locked ? "unlocked" : "touch") : moved ? "picked up" : updating ? "update" : "button");
-            if (page != PAGE_PET) { page = PAGE_PET; page_auto = false; cal_ui_enter(); }   // wakes to the eyes (home)
+            if (page != PAGE_PET && SCREEN_ROUND) { page = PAGE_PET; page_auto = false; cal_ui_enter(); }   // wakes to the eyes (home)
+            // (the square wakes where it was left: it shouldn't pull you off a page you chose)
             power_screen_on();
             update_orientation();                      // face the right way straight away, no spin
             ang = ang_target;
@@ -1446,8 +1482,8 @@ void app_main(void)
         bool offline = wifi_state() == WS_PORTAL || (wifi_state() != WS_CONNECTED && now > 20000000);
         pet_ui_set_welcome(agent_known() ? 0 : offline ? 1 : 2);   // (set up already: a dropped Wi-Fi just gets the hint)
         if (pet_ui_wants_wifi() && sheet <= 0) { card_animate(H); wifi_ui_show_phone(); }
-        if (!locked && agent_calls()) {
-            if (page != PAGE_PET && now - last_use > 10000000 && sheet <= 0 && !pg_drag && pg_off == 0 && !card_drag) {
+        if (!locked && agent_calls()) {               // (the square stays on whatever page you're on)
+            if (SCREEN_ROUND && page != PAGE_PET && now - last_use > 10000000 && sheet <= 0 && !pg_drag && pg_off == 0 && !card_drag) {
                 page = PAGE_PET; page_auto = false; force_redraw = true;
             }
             last_use = now;

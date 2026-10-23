@@ -43,6 +43,10 @@ int spotify_episodes(sp_episode_t *out, int max, char *show_id, int id_len);   /
 uint32_t spotify_library_version(void);                  // changes when either list does
 void spotify_set_library_visible(bool visible);           // keep the lists fresh while the page is up
 void spotify_set_poll_fast(bool fast);           // 1 s polling while the Now Playing screen is up
-// Album art scaled to the 466x466 screen and dimmed for a background; NULL if none.
+// Album art scaled to the 466x466 screen and dimmed for a background (the square: a full-screen frame with the
+// cover as a rounded tile at ART_X/ART_Y, ART_SZ px, black around it); NULL if none.
 // The version changes whenever the picture does.
+#define ART_SZ 256
+#define ART_X ((480 - ART_SZ) / 2)
+#define ART_Y 46
 const uint16_t *spotify_art(uint32_t *version);

@@ -31,8 +31,13 @@ enum Hooks {
     static func remove() throws { try update(settingsURL, events, adding: false, command: command) }
     // Connected before an event was added (ours on some, not all): brought up to date
     static func upgrade() {
-        guard !installed() || !asksInstalled(), installed(at: settingsURL, ["Stop"]) else { return }
+        guard !installed() || !asksInstalled() || replyInstalled(), installed(at: settingsURL, ["Stop"]) else { return }
         try? install()
+    }
+    // (a build with voice chat sent PostToolUse and Stop to /reply: back to plain /hook)
+    private static func replyInstalled() -> Bool {
+        (((load(settingsURL)["hooks"] as? [String: Any])?["Stop"] as? [[String: Any]]) ?? [])
+            .contains { (($0["hooks"] as? [[String: Any]]) ?? []).contains { ($0["command"] as? String ?? "").contains("/reply") } }
     }
 
     // Ours, or the prototype's script

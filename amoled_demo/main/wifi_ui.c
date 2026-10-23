@@ -61,6 +61,27 @@ static int64_t press_us, repeat_us;
 #define LOCK_HOLD_US 3000000
 
 // ---------------------------------------------------------------- layout
+#if !SCREEN_ROUND
+// The square's Wi-Fi pages: a "< Settings" link top left and the title in the middle, then rounded groups of rows
+#define LIST_TOP 112
+#define LIST_BOT 404
+#define ROW_H 52
+#define ROW_X0 16
+#define ROW_X1 (W - 16)
+#define NAV_BACK {8, 46, 160, 88}
+static const button_t list_buttons[] = {
+    {16, 414, 170, 456, ID_SCAN, "Scan again"},
+    {180, 414, W - 16, 456, ID_PHONE, "Set up with phone"},
+    {8, 46, 160, 88, ID_MENU, "Settings"},
+};
+static const button_t connected_buttons[] = {
+    {16, 332, W - 16, 384, ID_NETWORKS, "Other networks"},
+    {16, 396, W - 16, 448, ID_FORGET, "Forget this network"},
+    {8, 46, 160, 88, ID_MENU, "Settings"},
+};
+static const button_t connecting_buttons[] = {{16, 380, W - 16, 432, ID_CANCEL, "Cancel"}};
+static const button_t phone_buttons[] = {{8, 46, 160, 88, ID_BACK, "Wi-Fi"}};
+#else
 #define LIST_TOP 92
 #define LIST_BOT 386
 #define ROW_H 50
@@ -79,27 +100,27 @@ static const button_t connected_buttons[] = {
 };
 static const button_t connecting_buttons[] = {{CX - 60, 370, CX + 60, 404, ID_CANCEL, "Cancel"}};
 static const button_t phone_buttons[] = {{CX - 55, 408, CX + 55, 440, ID_BACK, "Back"}};
+#endif
 #define BUB_DX 74      // bubble columns either side of the middle
 #define BUB_Y1 122     // bubble rows
 #define BUB_Y2 256
 #define BUB_R 62
 #if !SCREEN_ROUND
-// The square: a title, four big tiles two by two (icon, name and a line about it), the brightness slider across, then
-// Factory reset and what this board is and runs
-#define TILE_X0 20
-#define TILE_X1 (W - 20)
-#define TILE_MID (W / 2)
-#define TILE_GAP 6                             // (half the gap between tiles)
-#define TILE_Y1 76                             // tile rows: top edges, and their height
-#define TILE_Y2 188
-#define TILE_H 100
+// The square, like the phone's Control Center: a grid of rounded modules four columns wide, three rows high. Wi-Fi
+// and Lock are wide (an icon disc, a name and a line about it), brightness a tall slider and Touch a tall tile beside
+// it, then Factory reset and what this board is and runs, wide, along the bottom. (No tilt calibration on the square.)
+#define CC_COL(c) (20 + (c) * 114)                 // a module's left edge: 98 wide, 16 apart
+#define CC_ROW(r) (78 + (r) * 118)                 // and its top: 104 high, 14 apart
+#define CC_W 98
+#define CC_H 104
+#define CC_R 24
 static const button_t menu_buttons[] = {
-    {TILE_X0, TILE_Y1, TILE_MID - TILE_GAP, TILE_Y1 + TILE_H, ID_WIFI, "Wi-Fi"},
-    {TILE_X0, TILE_Y2, TILE_MID - TILE_GAP, TILE_Y2 + TILE_H, ID_CAL_TOUCH, "Touch"},
-    {TILE_MID + TILE_GAP, TILE_Y2, TILE_X1, TILE_Y2 + TILE_H, ID_CAL_TILT, "Tilt"},
-    {TILE_MID + TILE_GAP, TILE_Y1, TILE_X1, TILE_Y1 + TILE_H, ID_LOCK, "Lock"},
-    {TILE_X0, 304, TILE_X1, 352, ID_BRIGHT, ""},   // brightness slider row
-    {TILE_X0, 374, 200, 422, ID_RESET, "Factory reset"},
+    {CC_COL(0), CC_ROW(0), CC_COL(1) + CC_W, CC_ROW(0) + CC_H, ID_WIFI, "Wi-Fi"},
+    {CC_COL(3), CC_ROW(0), CC_COL(3) + CC_W, CC_ROW(1) + CC_H, ID_CAL_TOUCH, "Touch"},
+    {-100, -100, -100, -100, ID_CAL_TILT, "Tilt"},     // (off the glass: never hit)
+    {CC_COL(0), CC_ROW(1), CC_COL(1) + CC_W, CC_ROW(1) + CC_H, ID_LOCK, "Lock"},
+    {CC_COL(2), CC_ROW(0), CC_COL(2) + CC_W, CC_ROW(1) + CC_H, ID_BRIGHT, ""},   // brightness: drag up and down
+    {CC_COL(0), CC_ROW(2), CC_COL(1) + CC_W, CC_ROW(2) + CC_H, ID_RESET, "Factory reset"},
 };
 #else
 static const button_t menu_buttons[] = {
@@ -115,7 +136,11 @@ static const button_t menu_buttons[] = {
 #define ERASE_Y 262
 static const button_t reset_buttons[] = {
     {CX - BUB_R, ERASE_Y - BUB_R, CX + BUB_R, ERASE_Y + BUB_R, ID_ERASE, "Hold"},
+#if !SCREEN_ROUND
+    {8, 46, 160, 88, ID_MENU, "Settings"},
+#else
     {CX - 55, 340, CX + 55, 376, ID_MENU, "Back"},
+#endif
 };
 
 // keyboard: 5 rows of keys on a 40 px pitch, sized to stay inside the round display
@@ -274,6 +299,7 @@ static void draw_lock(uint16_t *buf, int y0, int h, int x, int y, uint16_t c)
 // ---------------------------------------------------------------- views
 enum { ICON_WIFI, ICON_TOUCH, ICON_TILT, ICON_SUN, ICON_LOCK };
 static void draw_icon(uint16_t *buf, int y0, int h, int kind, int cx, int cy, int r, uint16_t col);
+#if SCREEN_ROUND                                     // (the square's own come after its menu)
 static void draw_list(uint16_t *buf, int y0, int h)
 {
     char line[48];
@@ -384,6 +410,7 @@ static void draw_phone(uint16_t *buf, int y0, int h)
     }
     draw_buttons(buf, y0, h, phone_buttons, 1, 2, ID_NONE);
 }
+#endif
 
 // ---------------------------------------------------------------- icons (drawn per pixel, size = radius)
 
@@ -487,52 +514,359 @@ static void draw_about(uint16_t *buf, int y0, int h, int x1, int y)
     }
 }
 
+// Control Center's line icons, smooth, about 24 px across
+static void cc_arc(uint16_t *buf, int y0, int h, float cx, float cy, float r, float a0, float a1, float w, uint16_t c)
+{
+    float p[2 * 24];                                // (angles in degrees, clockwise from up)
+    int n = 24;
+    for (int i = 0; i < n; i++) {
+        float a = (a0 + (a1 - a0) * i / (n - 1)) * (float)M_PI / 180;
+        p[2 * i] = cx + r * sinf(a);
+        p[2 * i + 1] = cy - r * cosf(a);
+    }
+    aa_path(buf, y0, h, p, n, false, w, c);
+}
+
+static void cc_icon(uint16_t *buf, int y0, int h, int kind, float cx, float cy, uint16_t c, uint16_t bg)
+{
+    switch (kind) {
+    case ICON_WIFI:
+        aa_disc(buf, y0, h, cx, cy + 8, 2.6f, c);
+        cc_arc(buf, y0, h, cx, cy + 8, 8, -45, 45, 2.8f, c);
+        cc_arc(buf, y0, h, cx, cy + 8, 14.5f, -45, 45, 2.8f, c);
+        break;
+    case ICON_TOUCH:
+        cc_arc(buf, y0, h, cx, cy, 10, 0, 360, 2.6f, c);
+        aa_disc(buf, y0, h, cx, cy, 4, c);
+        break;
+    case ICON_TILT: {                               // a phone turned 25 degrees
+        float co = 0.906f, si = 0.423f, q[8], hw = 6.5f, hh = 11;
+        const float u[4] = {-hw, hw, hw, -hw}, v[4] = {-hh, -hh, hh, hh};
+        for (int i = 0; i < 4; i++) { q[2 * i] = cx + co * u[i] - si * v[i]; q[2 * i + 1] = cy + si * u[i] + co * v[i]; }
+        aa_path(buf, y0, h, q, 4, true, 2.6f, c);
+        aa_disc(buf, y0, h, cx - si * 7.5f, cy + co * 7.5f, 1.4f, c);
+        break;
+    }
+    case ICON_LOCK:
+        cc_arc(buf, y0, h, cx, cy - 2, 5.5f, -90, 90, 2.6f, c);
+        aa_rrect(buf, y0, h, cx - 8.5f, cy - 2.5f, cx + 8.5f, cy + 11, 3, c);
+        aa_disc(buf, y0, h, cx, cy + 4, 1.8f, bg);
+        break;
+    case ICON_SUN:
+        aa_disc(buf, y0, h, cx, cy, 5, c);
+        for (int i = 0; i < 8; i++) {
+            float a = i * (float)M_PI / 4, p[4] = {cx + 8.5f * sinf(a), cy - 8.5f * cosf(a), cx + 11.5f * sinf(a), cy - 11.5f * cosf(a)};
+            aa_path(buf, y0, h, p, 2, false, 2.2f, c);
+        }
+        break;
+    }
+}
+
+static void ftext_mid_cc(uint16_t *buf, int y0, int h, int cx, int y, const font_t *f, const char *t, uint16_t col)
+{
+    draw_ftext(buf, y0, h, cx - ftext_width(f, t) / 2, y, f, t, col);
+}
+
+// a bin, for Factory reset
+static void bin_icon(uint16_t *buf, int y0, int h, float cx, float cy, uint16_t c)
+{
+    static const float lid[] = {5, 6.5f, 19, 6.5f}, grip[] = {9.5f, 6.5f, 10, 3.5f, 14, 3.5f, 14.5f, 6.5f};
+    static const float body[] = {7, 9.5f, 8, 20, 16, 20, 17, 9.5f};
+    aa_icon(buf, y0, h, cx, cy, 22, lid, 2, false, 2.2f, c);
+    aa_icon(buf, y0, h, cx, cy, 22, grip, 4, false, 2, c);
+    aa_icon(buf, y0, h, cx, cy, 22, body, 4, false, 2.2f, c);
+}
+
+#define CC_MOD     rgb(36, 36, 40)                   // a module
+#define CC_MOD_ON  rgb(58, 58, 64)                   // ...under the finger
+#define CC_OFF     rgb(70, 70, 76)                   // an icon disc that's off
+#define CC_BLUE    rgb(10, 132, 255)
+#define CC_TEXT2   rgb(150, 150, 158)
+
+// a wide module: an icon disc on the left, its name and a line about it
+static void cc_wide(uint16_t *buf, int y0, int h, const button_t *b, uint16_t disc, const char *name, const char *sub,
+                    uint16_t sub_col, bool on)
+{
+    aa_rrect(buf, y0, h, b->x0, b->y0, b->x1, b->y1, CC_R, on ? CC_MOD_ON : CC_MOD);
+    float cy = (b->y0 + b->y1) / 2.0f;
+    aa_disc(buf, y0, h, b->x0 + 38, cy, 23, disc);
+    int tx = b->x0 + 70, tw = b->x1 - 12 - tx;
+    draw_fit(buf, y0, h, tx, (int)cy - 23, &font_label, name, tw, C_WHITE);
+    draw_fit(buf, y0, h, tx, (int)cy + 2, &font_small, sub, tw, sub_col);
+}
+
+// a tall module: its icon in a disc, its name and a line about it under that
+static void cc_tall(uint16_t *buf, int y0, int h, const button_t *b, int kind, const char *sub, bool on)
+{
+    aa_rrect(buf, y0, h, b->x0, b->y0, b->x1, b->y1, CC_R, on ? CC_MOD_ON : CC_MOD);
+    float cx = (b->x0 + b->x1) / 2.0f, cy = (b->y0 + b->y1) / 2.0f - 22;
+    aa_disc(buf, y0, h, cx, cy, 23, CC_OFF);
+    cc_icon(buf, y0, h, kind, cx, cy, C_WHITE, CC_OFF);
+    ftext_mid_cc(buf, y0, h, (int)cx, (int)cy + 36, &font_label, b->label, C_WHITE);
+    ftext_mid_cc(buf, y0, h, (int)cx, (int)cy + 61, &font_small, sub, CC_TEXT2);
+}
+
 static void draw_menu(uint16_t *buf, int y0, int h)
 {
-    static const int kinds[] = {ICON_WIFI, ICON_TOUCH, ICON_TILT, ICON_LOCK};
-    const font_t *f = &font_label;
-    draw_ftext(buf, y0, h, TILE_X0 + 4, 16, &font_body, "Settings", C_WHITE);
-    for (int i = 0; i < 4; i++) {
-        const button_t *b = &menu_buttons[i];
-        if (b->y1 <= y0 || b->y0 >= y0 + h) continue;
-        bool on = current_id() == b->id;
-        int cy = (b->y0 + b->y1) / 2, tx = b->x0 + 84, tw = b->x1 - 12 - tx;
-        fill_rrect(buf, y0, h, b->x0, b->y0, b->x1, b->y1, 18, on ? C_PRESS : C_PANEL);
-        uint16_t icol = C_ACCENT;                      // Wi-Fi: green when connected, grey when not
-        const char *sub = "Calibrate";
-        if (i == 0) {
-            bool conn = wifi_state() == WS_CONNECTED;
-            icol = conn ? C_GREEN : C_GREY;
-            sub = conn ? wifi_ssid() : wifi_state() == WS_CONNECTING ? "Connecting..." : "Not connected";
-        }
-        if (i == 3) sub = "Hold 3 s";
-        draw_icon(buf, y0, h, kinds[i], b->x0 + 44, cy, 24, on ? C_WHITE : icol);
-        draw_ftext(buf, y0, h, tx, cy - f->line_h + 1, f, b->label, C_WHITE);
-        draw_fit(buf, y0, h, tx, cy + 3, f, sub, tw, on ? rgb(200, 240, 232) : C_GREY);
-        if (i == 3 && on) {                            // holding Lock: a bar fills along the tile's foot
-            int64_t held = esp_timer_get_time() - press_us;
-            float frac = held >= LOCK_HOLD_US ? 1 : held / (float)LOCK_HOLD_US;
-            fill_rrect(buf, y0, h, b->x0 + 16, b->y1 - 12, b->x1 - 16, b->y1 - 7, 2, C_DIM);
-            fill_rrect(buf, y0, h, b->x0 + 16, b->y1 - 12, b->x0 + 16 + (int)((b->x1 - b->x0 - 32) * frac), b->y1 - 7, 2, C_ACCENT);
-        }
-    }
-    const button_t *b = &menu_buttons[4];            // brightness: small sun, track with knob, big sun (as round)
-    int cy = (b->y0 + b->y1) / 2, tx0 = b->x0 + 56, tx1 = b->x1 - 56;
-    int kx = tx0 + (tx1 - tx0) * (screen_brightness_get() - 10) / 245;
-    fill_rrect(buf, y0, h, b->x0, b->y0, b->x1, b->y1, 18, C_PANEL);
-    draw_icon(buf, y0, h, ICON_SUN, b->x0 + 30, cy, 11, C_GREY);
-    draw_icon(buf, y0, h, ICON_SUN, b->x1 - 30, cy, 17, C_WHITE);
-    fill_rrect(buf, y0, h, tx0, cy - 4, tx1, cy + 4, 4, rgb(60, 60, 78));
-    fill_rrect(buf, y0, h, tx0, cy - 4, kx, cy + 4, 4, C_ACCENT);
-    fill_circle(buf, y0, h, kx, cy, current_id() == ID_BRIGHT ? 17 : 14, C_WHITE);
+    // Wi-Fi: blue while connected
+    const button_t *wb = &menu_buttons[0];
+    bool conn = wifi_state() == WS_CONNECTED;
+    const char *sub = conn ? wifi_ssid() : wifi_state() == WS_CONNECTING ? "Connecting..." : "Not connected";
+    cc_wide(buf, y0, h, wb, conn ? CC_BLUE : CC_OFF, "Wi-Fi", sub, CC_TEXT2, current_id() == ID_WIFI);
+    cc_icon(buf, y0, h, ICON_WIFI, wb->x0 + 38, (wb->y0 + wb->y1) / 2.0f - 1, C_WHITE, 0);
 
-    const button_t *r = &menu_buttons[5];
-    bool ron = current_id() == ID_RESET;
-    fill_rrect(buf, y0, h, r->x0, r->y0, r->x1, r->y1, 18, ron ? C_PRESS : C_PANEL);
-    draw_ftext(buf, y0, h, (r->x0 + r->x1 - ftext_width(f, r->label)) / 2, (r->y0 + r->y1 - f->line_h) / 2, f, r->label,
-               ron ? C_WHITE : C_RED);
-    draw_about(buf, y0, h, TILE_X1, 366);
+    // Lock: hold it; the disc turns indigo and a ring fills round it
+    const button_t *lb = &menu_buttons[3];
+    bool lon = current_id() == ID_LOCK;
+    float lcy = (lb->y0 + lb->y1) / 2.0f;
+    cc_wide(buf, y0, h, lb, lon ? rgb(94, 92, 230) : CC_OFF, "Lock", "Hold for 3 s", CC_TEXT2, lon);
+    cc_icon(buf, y0, h, ICON_LOCK, lb->x0 + 38, lcy, C_WHITE, lon ? rgb(94, 92, 230) : CC_OFF);
+    if (lon) {
+        int64_t held = esp_timer_get_time() - press_us;
+        float frac = held >= LOCK_HOLD_US ? 1 : held / (float)LOCK_HOLD_US;
+        cc_arc(buf, y0, h, lb->x0 + 38, lcy, 28, 0, 360 * frac, 3, C_WHITE);
+    }
+
+    cc_tall(buf, y0, h, &menu_buttons[1], ICON_TOUCH, "Calibrate", current_id() == ID_CAL_TOUCH);
+
+    // brightness: a tall module that fills from the bottom, the sun at its foot
+    const button_t *b = &menu_buttons[4];
+    float frac = (screen_brightness_get() - 10) / 245.0f;
+    aa_rrect(buf, y0, h, b->x0, b->y0, b->x1, b->y1, CC_R, CC_MOD);
+    float fy = b->y1 - (b->y1 - b->y0) * frac;
+    if (b->y1 - fy > 2) {                             // the lit part, clipped to the module
+        int ct, cb;
+        gfx_get_clip(&ct, &cb);
+        gfx_clip((int)fy > ct ? (int)fy : ct, cb);
+        aa_rrect(buf, y0, h, b->x0, b->y0, b->x1, b->y1, CC_R, rgb(228, 228, 234));
+        gfx_clip(ct, cb);
+    }
+    float sy = b->y1 - 30;
+    cc_icon(buf, y0, h, ICON_SUN, (b->x0 + b->x1) / 2.0f, sy, sy > fy ? rgb(110, 110, 118) : rgb(200, 200, 206), 0);
+
+    // Factory reset
+    const button_t *rb = &menu_buttons[5];
+    cc_wide(buf, y0, h, rb, rgb(255, 69, 58), "Factory reset", "Erase everything", CC_TEXT2, current_id() == ID_RESET);
+    bin_icon(buf, y0, h, rb->x0 + 38, (rb->y0 + rb->y1) / 2.0f, C_WHITE);
+
+    // which board, and what it runs (not a button)
+    const button_t ib = {CC_COL(2), CC_ROW(2), CC_COL(3) + CC_W, CC_ROW(2) + CC_H, ID_NONE, ""};
+    const esp_app_desc_t *d = esp_app_get_description();
+    char v[48], bl[48];
+    snprintf(v, sizeof v, "Firmware %s", d->version);
+#if defined(BOBBLE_BUILD) && BOBBLE_BUILD
+    snprintf(bl, sizeof bl, "Build %lld", (long long)BOBBLE_BUILD);
+#else
+    snprintf(bl, sizeof bl, "Built %s", ota_build_time());
+#endif
+    aa_rrect(buf, y0, h, ib.x0, ib.y0, ib.x1, ib.y1, CC_R, rgb(40, 40, 44));   // just an outline: it's not a button
+    aa_rrect(buf, y0, h, ib.x0 + 1.5f, ib.y0 + 1.5f, ib.x1 - 1.5f, ib.y1 - 1.5f, CC_R - 1.5f, 0);
+    int tw = ib.x1 - ib.x0 - 36, iy = (ib.y0 + ib.y1) / 2;
+    draw_fit(buf, y0, h, ib.x0 + 18, iy - 33, &font_label, agent_device_name(), tw, C_WHITE);
+    draw_fit(buf, y0, h, ib.x0 + 18, iy - 6, &font_small, v, tw, CC_TEXT2);
+    draw_fit(buf, y0, h, ib.x0 + 18, iy + 13, &font_small, bl, tw, rgb(100, 100, 108));
 }
+
+// ---------------------------------------------------------------- the square's Wi-Fi pages, in the same style
+#define SQ_GROUP rgb(36, 36, 40)
+#define SQ_PRESS rgb(58, 58, 64)
+#define SQ_SEP   rgb(52, 52, 58)
+#define SQ_TEXT2 rgb(150, 150, 158)
+
+static void ftext_mid(uint16_t *buf, int y0, int h, int cx, int cy, const font_t *f, const char *t, uint16_t col)
+{
+    draw_ftext(buf, y0, h, cx - ftext_width(f, t) / 2, cy - f->line_h / 2, f, t, col);
+}
+
+// "< Settings" in blue at the top left, the page's name in the middle
+static void nav(uint16_t *buf, int y0, int h, const button_t *back, const char *title)
+{
+    static const float chev[] = {15, 5, 8, 12, 15, 19};
+    uint16_t c = current_id() == back->id ? rgb(90, 170, 255) : CC_BLUE;
+    aa_icon(buf, y0, h, 24, 67, 22, chev, 3, false, 2.4f, c);
+    draw_ftext(buf, y0, h, 36, 67 - font_label.line_h / 2, &font_label, back->label, c);
+    char t[48];
+    strlcpy(t, title, sizeof t);
+    int room = W - 2 * 150;
+    draw_fit(buf, y0, h, CX - (ftext_width(&font_label, t) < room ? ftext_width(&font_label, t) : room) / 2,
+             67 - font_label.line_h / 2, &font_label, t, room, C_WHITE);
+}
+
+// a row button: a rounded group of its own, its words centred (or in red / blue)
+static void row_button(uint16_t *buf, int y0, int h, const button_t *b, uint16_t col)
+{
+    bool on = current_id() == b->id;
+    aa_rrect(buf, y0, h, b->x0, b->y0, b->x1, b->y1, 14, on ? SQ_PRESS : SQ_GROUP);
+    ftext_mid(buf, y0, h, (b->x0 + b->x1) / 2, (b->y0 + b->y1) / 2, &font_label, b->label, col);
+}
+
+// signal strength as the Wi-Fi fan, as many bands lit as it's strong
+static void fan(uint16_t *buf, int y0, int h, float cx, float cy, int rssi)
+{
+    int level = rssi > -60 ? 3 : rssi > -72 ? 2 : 1;
+    uint16_t on = C_WHITE, off = rgb(80, 80, 88);
+    aa_disc(buf, y0, h, cx, cy + 6, 2.2f, on);
+    cc_arc(buf, y0, h, cx, cy + 6, 6.5f, -45, 45, 2.4f, level >= 2 ? on : off);
+    cc_arc(buf, y0, h, cx, cy + 6, 11.5f, -45, 45, 2.4f, level >= 3 ? on : off);
+}
+
+static void small_lock(uint16_t *buf, int y0, int h, float cx, float cy, uint16_t c, uint16_t bg)
+{
+    cc_arc(buf, y0, h, cx, cy - 2, 3.8f, -90, 90, 1.8f, c);
+    aa_rrect(buf, y0, h, cx - 5.5f, cy - 2, cx + 5.5f, cy + 7, 2, c);
+    (void)bg;
+}
+
+static void draw_list(uint16_t *buf, int y0, int h)
+{
+    nav(buf, y0, h, &list_buttons[2], "Wi-Fi");
+    const char *note = error_msg[0] ? error_msg : wifi_scanning() && net_count == 0 ? "Looking for networks..." :
+                       wifi_state() != WS_CONNECTED ? "Choose a network" : "";
+    if (note[0]) ftext_mid(buf, y0, h, CX, 96, &font_small, note, error_msg[0] ? C_RED : SQ_TEXT2);
+
+    gfx_clip(LIST_TOP, LIST_BOT);
+    if (net_count > 0) {                              // the group the rows sit in
+        int gt = LIST_TOP - scroll, gb = gt + net_count * ROW_H;
+        aa_rrect(buf, y0, h, ROW_X0, gt, ROW_X1, gb, 14, SQ_GROUP);
+    }
+    for (int i = 0; i < net_count; i++) {
+        int ry = LIST_TOP + i * ROW_H - scroll;
+        if (ry + ROW_H <= y0 || ry >= y0 + h || ry + ROW_H <= LIST_TOP || ry >= LIST_BOT) continue;
+        bool connected = wifi_state() == WS_CONNECTED && !strcmp(nets[i].ssid, wifi_ssid());
+        if (current_id() == ID_ROW + i) {             // pressed: the row lights (rounded where it's the group's end)
+            aa_rrect(buf, y0, h, ROW_X0, ry, ROW_X1, ry + ROW_H, 14, SQ_PRESS);
+            if (i > 0) fill_rect(buf, y0, h, ROW_X0, ry, ROW_X1, ry + 14, SQ_PRESS);
+            if (i < net_count - 1) fill_rect(buf, y0, h, ROW_X0, ry + ROW_H - 14, ROW_X1, ry + ROW_H, SQ_PRESS);
+        }
+        float mid = ry + ROW_H / 2.0f;
+        if (connected) {
+            static const float chk[] = {5, 12.5f, 10, 17.5f, 19, 7};
+            aa_icon(buf, y0, h, 36, mid, 18, chk, 3, false, 2.4f, CC_BLUE);
+        }
+        draw_fit(buf, y0, h, 56, (int)mid - font_label.line_h / 2, &font_label, nets[i].ssid, ROW_X1 - 70 - 56, C_WHITE);
+        if (nets[i].secure) small_lock(buf, y0, h, ROW_X1 - 48, mid, SQ_TEXT2, SQ_GROUP);
+        fan(buf, y0, h, ROW_X1 - 22, mid - 4, nets[i].rssi);
+        if (i < net_count - 1) fill_rect(buf, y0, h, 56, ry + ROW_H - 1, ROW_X1, ry + ROW_H, SQ_SEP);
+    }
+    if (net_count == 0 && !wifi_scanning()) ftext_mid(buf, y0, h, CX, 240, &font_label, "No networks found", SQ_TEXT2);
+    if (wifi_scanning() && net_count == 0)
+        for (int i = 0; i < 3; i++)
+            aa_disc(buf, y0, h, CX - 24 + i * 24, 240, ((int)(esp_timer_get_time() / 200000) + i) % 3 == 0 ? 6 : 4, CC_BLUE);
+    gfx_clip(0, H);
+    int ms = max_scroll();
+    if (ms > 0 && dragging) {
+        int track = LIST_BOT - LIST_TOP - 20, th = track * (LIST_BOT - LIST_TOP) / (net_count * ROW_H);
+        int ty = LIST_TOP + 10 + (track - th) * scroll / ms;
+        aa_rrect(buf, y0, h, W - 9, ty, W - 5, ty + th, 2, rgb(110, 110, 118));
+    }
+    if (wifi_ap_active()) {
+        row_button(buf, y0, h, &list_buttons[0], CC_BLUE);
+        row_button(buf, y0, h, &list_buttons[1], CC_BLUE);
+    } else {                                          // (no phone setup to offer: Scan takes the whole row)
+        button_t b = list_buttons[0];
+        b.x1 = list_buttons[1].x1;
+        row_button(buf, y0, h, &b, CC_BLUE);
+    }
+}
+
+static void draw_status(uint16_t *buf, int y0, int h)
+{
+    if (wifi_state() == WS_CONNECTED) {
+        nav(buf, y0, h, &connected_buttons[2], "Wi-Fi");
+        aa_disc(buf, y0, h, CX, 138, 34, CC_BLUE);
+        cc_icon(buf, y0, h, ICON_WIFI, CX, 136, C_WHITE, CC_BLUE);
+        ftext_mid(buf, y0, h, CX, 194, &font_label, "Connected", C_WHITE);
+        const int gt = 216;                           // the network's name and address, in a group
+        aa_rrect(buf, y0, h, ROW_X0, gt, ROW_X1, gt + 2 * 48, 14, SQ_GROUP);
+        fill_rect(buf, y0, h, 32, gt + 48, ROW_X1, gt + 49, SQ_SEP);
+        const char *lab[2] = {"Network", "IP address"}, *val[2] = {wifi_ssid(), wifi_ip()};
+        for (int i = 0; i < 2; i++) {
+            int my = gt + 24 + i * 48;
+            draw_ftext(buf, y0, h, 32, my - font_label.line_h / 2, &font_label, lab[i], C_WHITE);
+            int room = ROW_X1 - 16 - 160, vw = ftext_width(&font_label, val[i]);
+            draw_fit(buf, y0, h, ROW_X1 - 16 - (vw < room ? vw : room), my - font_label.line_h / 2, &font_label, val[i], room, SQ_TEXT2);
+        }
+        row_button(buf, y0, h, &connected_buttons[0], CC_BLUE);
+        row_button(buf, y0, h, &connected_buttons[1], rgb(255, 69, 58));
+    } else {
+        char t[64];
+        ftext_mid(buf, y0, h, CX, 170, &font_label, "Connecting to", SQ_TEXT2);
+        strlcpy(t, wifi_ssid(), sizeof t);
+        ftext_mid(buf, y0, h, CX, 202, &font_body, t, C_WHITE);
+        int phase = (int)(esp_timer_get_time() / 150000);
+        for (int i = 0; i < 3; i++) aa_disc(buf, y0, h, CX - 24 + i * 24, 270 - ((phase + i) % 3 == 0 ? 6 : 0), 5, CC_BLUE);
+        row_button(buf, y0, h, &connecting_buttons[0], rgb(255, 69, 58));
+    }
+}
+
+static void draw_phone(uint16_t *buf, int y0, int h)
+{
+    char line[48];
+    bool joined = wifi_ap_clients() > 0;
+    nav(buf, y0, h, &phone_buttons[0], "Set up with phone");
+    aa_rrect(buf, y0, h, CX - 104, 98, CX + 104, 306, 18, C_WHITE);   // a white card round the code
+    draw_qr(buf, y0, h, 202, 196);
+    ftext_mid(buf, y0, h, CX, 336, &font_label, joined ? "Now pick your network" : "Scan with your phone's camera", C_WHITE);
+    if (joined) ftext_mid(buf, y0, h, CX, 364, &font_small, "on the page that opened, or 192.168.4.1", SQ_TEXT2);
+    else {
+        snprintf(line, sizeof line, "or join %s", wifi_ap_ssid());
+        ftext_mid(buf, y0, h, CX, 364, &font_small, line, SQ_TEXT2);
+        snprintf(line, sizeof line, "Password %s", wifi_ap_pass());
+        ftext_mid(buf, y0, h, CX, 386, &font_small, line, SQ_TEXT2);
+    }
+}
+
+static void draw_reset(uint16_t *buf, int y0, int h)
+{
+    nav(buf, y0, h, &reset_buttons[1], "Factory reset");
+    ftext_mid(buf, y0, h, CX, 116, &font_label, "Erases Wi-Fi, pairing, calendars,", SQ_TEXT2);
+    ftext_mid(buf, y0, h, CX, 142, &font_label, "Spotify and reminders", SQ_TEXT2);
+    ftext_mid(buf, y0, h, CX, 168, &font_label, "for a new owner.", SQ_TEXT2);
+    bool on = current_id() == ID_ERASE;
+    aa_disc(buf, y0, h, CX, ERASE_Y, BUB_R, on ? rgb(200, 50, 44) : rgb(255, 69, 58));
+    if (on) {
+        int64_t held = esp_timer_get_time() - press_us;
+        float frac = held >= LOCK_HOLD_US ? 1 : held / (float)LOCK_HOLD_US;
+        cc_arc(buf, y0, h, CX, ERASE_Y, BUB_R + 8, 0, 360, 4, rgb(70, 70, 76));
+        cc_arc(buf, y0, h, CX, ERASE_Y, BUB_R + 8, 0, 360 * frac, 4, rgb(255, 69, 58));
+    }
+    ftext_mid(buf, y0, h, CX, ERASE_Y, &font_body, "Hold", C_WHITE);
+    ftext_mid(buf, y0, h, CX, 382, &font_small, "Hold for 3 seconds", SQ_TEXT2);
+}
+
+static void draw_keys(uint16_t *buf, int y0, int h)
+{
+    char line[64];
+    snprintf(line, sizeof line, "Password for %s", join_ssid);
+    ftext_mid(buf, y0, h, CX, 30, &font_label, line, C_WHITE);
+    aa_rrect(buf, y0, h, 16, 58, W - 16, 104, 12, SQ_GROUP);
+    if (error_msg[0]) aa_rrect(buf, y0, h, 16, 58, W - 16, 104, 12, rgb(70, 30, 32));
+    int n = strlen(password);
+    if (hide_pw) { memset(line, '*', n > 40 ? 40 : n); line[n > 40 ? 40 : n] = 0; }
+    else strlcpy(line, password, sizeof line);
+    while (line[0] && ftext_width(&font_label, line) > W - 64) memmove(line, line + 1, strlen(line));   // (the end shows)
+    int tx = 30, ty = 81 - font_label.line_h / 2;
+    draw_ftext(buf, y0, h, tx, ty, &font_label, line, C_WHITE);
+    if ((esp_timer_get_time() / 500000) % 2 == 0) {
+        int cx = tx + ftext_width(&font_label, line) + 1;
+        aa_rrect(buf, y0, h, cx, ty + 2, cx + 2, ty + 22, 1, CC_BLUE);
+    }
+    if (error_msg[0]) ftext_mid(buf, y0, h, CX, 116, &font_small, error_msg, C_RED);
+    for (int i = 0; i < key_count; i++) {
+        button_t *k = &keys[i];
+        if (k->y1 <= y0 || k->y0 >= y0 + h) continue;
+        bool pressed = current_id() == k->id, letter = k->id >= ID_KEY, foot = k->id == ID_CANCEL || k->id == ID_SHOW;
+        uint16_t bg = letter ? rgb(80, 80, 86) : rgb(50, 50, 55), fg = C_WHITE;
+        if (k->id == ID_JOIN) bg = CC_BLUE;
+        if (k->id == ID_SHIFT && caps) { bg = rgb(235, 235, 240); fg = rgb(20, 20, 24); }
+        if (foot) bg = SQ_GROUP;
+        if (pressed) bg = letter ? rgb(130, 130, 138) : rgb(90, 90, 98);
+        aa_rrect(buf, y0, h, k->x0 + 2.5f, k->y0 + 3, k->x1 - 2.5f, k->y1 - 3, foot ? (k->y1 - k->y0 - 6) / 2.0f : 7, bg);
+        const font_t *f = letter ? &font_label : &font_small;
+        ftext_mid(buf, y0, h, (k->x0 + k->x1) / 2, (k->y0 + k->y1) / 2, f, k->label, foot ? CC_BLUE : fg);
+    }
+}
+
 #else
 static void draw_menu(uint16_t *buf, int y0, int h)
 {
@@ -565,6 +899,7 @@ static void draw_menu(uint16_t *buf, int y0, int h)
 }
 #endif
 
+#if SCREEN_ROUND
 // Factory reset: says what goes, then a red bubble you hold for 3 s (main.c does the wiping)
 static void draw_reset(uint16_t *buf, int y0, int h)
 {
@@ -581,6 +916,7 @@ static void draw_reset(uint16_t *buf, int y0, int h)
     text_c(buf, y0, h, 388, 2, agent_device_name(), C_GREY);   // (which board this is, and what it runs)
     text_c(buf, y0, h, 412, 2, ota_build_time(), rgb(70, 70, 88));
 }
+#endif
 
 void wifi_ui_draw(uint16_t *buf, int y0, int h)
 {
@@ -698,7 +1034,8 @@ static int hit_test(int x, int y)
         int id = list_hit(x, y);
         if (id) return id;
         id = hit(list_buttons, 3, x, y);
-        return id == ID_PHONE && !wifi_ap_active() ? ID_NONE : id;
+        if (id == ID_PHONE && !wifi_ap_active()) return SCREEN_ROUND ? ID_NONE : ID_SCAN;   // (square: Scan's whole row)
+        return id;
     }
     case V_KEYS: {
         int id = hit_pad(keys, key_count - 2, x, y, false);           // letter keys
@@ -782,8 +1119,13 @@ int wifi_ui_update(int tx, int ty, int64_t now)
     }
     if (down && press_id == ID_BRIGHT) {               // brightness follows the finger along the track
         const button_t *b = &menu_buttons[4];
+#if !SCREEN_ROUND                                    // (the square's slider stands up: its foot is the dimmest)
+        int y = cur_y < b->y0 ? b->y0 : (cur_y > b->y1 ? b->y1 : cur_y);
+        screen_brightness_set(10 + 245 * (b->y1 - y) / (b->y1 - b->y0), false);
+#else
         int tx0 = b->x0 + 56, tx1 = b->x1 - 56, x = cur_x < tx0 ? tx0 : (cur_x > tx1 ? tx1 : cur_x);
         screen_brightness_set(10 + 245 * (x - tx0) / (tx1 - tx0), false);
+#endif
     }
     if (!is_down && down && press_id == ID_BRIGHT) {   // let go of the slider: remember the level
         down = false;

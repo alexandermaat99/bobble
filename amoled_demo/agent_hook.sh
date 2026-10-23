@@ -23,6 +23,7 @@ project=$(j .cwd)
 # the app it's in, for its logo: Conductor runs each chat in a workspace folder of its own
 app=claude
 [[ $project == */conductor/workspaces/* ]] && app=conductor
+[[ $project == $HOME ]] && project=      # a chat started in the home folder: the folder says nothing, let the title name it
 project=${project:t}
 # what the last tool was about to do, as a question: a permission prompt that follows shows it ("Run git push?")
 ask_file="${TMPDIR:-/tmp}/agent_pet_${session//[^A-Za-z0-9-]/}"
@@ -114,6 +115,16 @@ if [[ $event == (UserPromptSubmit|Stop) || ! -s $title_file ]]; then
     [[ -n $title ]] && print -r -- "$title" > "$title_file" 2>/dev/null
 fi
 title=$(cat "$title_file" 2>/dev/null | LC_ALL=C tr -cd '\40-\176')
+# No title from Claude Code (SDK chats have none): name the chat after its first prompt, kept for the session
+fb_file="$ask_file.titlefb"
+if [[ -z $title ]]; then
+    if [[ $event == UserPromptSubmit && ! -s $fb_file ]]; then
+        fb=$(summarize "$(j .prompt)" | LC_ALL=C tr -cd '\40-\176')
+        (( ${#fb} > 32 )) && fb="${${fb[1,32]}% *}"
+        [[ -n $fb ]] && print -r -- "$fb" > "$fb_file" 2>/dev/null
+    fi
+    title=$(cat "$fb_file" 2>/dev/null)
+fi
 
 # Which integration a tool belongs to, as the board knows its logos: mcp__claude_ai_Google_Calendar__list -> googlecalendar
 tool_file="$ask_file.tool"
@@ -181,7 +192,7 @@ case $event in
             detail=${p:+Finished: $p}
         fi
         [[ -n $detail ]] || detail="Finished" ;;
-    SessionEnd) state=idle; rm -f "$ask_file" "$model_file" "$turn_file" "$detail_file" "$ask_file.prompt" "$ask_file.title" "$tool_file" ;;
+    SessionEnd) state=idle; rm -f "$ask_file" "$model_file" "$turn_file" "$detail_file" "$ask_file.prompt" "$ask_file.title" "$ask_file.titlefb" "$tool_file" ;;
     *) exit 0 ;;
 esac
 

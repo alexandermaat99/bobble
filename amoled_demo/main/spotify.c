@@ -375,6 +375,26 @@ static void load_art(const char *url)
     // scale to fill the round screen, darken so text and controls stay readable, and fade the edge of
     // the circle to black so the square cover never shows corners (e.g. mid-swipe). Done once per album.
     uint16_t *dst = art[art_cur == 0 ? 1 : 0];
+#if !SCREEN_ROUND
+    // the square: the cover as it is, a rounded tile at the top on black (corners anti-aliased)
+    memset(dst, 0, W * H * 2);
+    const float rad = 18;
+    for (int y = 0; y < ART_SZ; y++) {
+        int sy = y * out.height / ART_SZ;
+        for (int x = 0; x < ART_SZ; x++) {
+            float cx = fminf(x + 0.5f, ART_SZ - x - 0.5f), cy = fminf(y + 0.5f, ART_SZ - y - 0.5f);
+            int kk = 256;
+            if (cx < rad && cy < rad) {
+                float a = rad - sqrtf((rad - cx) * (rad - cx) + (rad - cy) * (rad - cy)) + 0.5f;
+                if (a <= 0) continue;
+                if (a < 1) kk = (int)(a * 256);
+            }
+            uint16_t c = SWAP16(raw[sy * out.width + x * out.width / ART_SZ]);
+            int r = (c >> 11) * kk >> 8, g = ((c >> 5) & 63) * kk >> 8, bl = (c & 31) * kk >> 8;
+            dst[(ART_Y + y) * W + ART_X + x] = SWAP16((uint16_t)(r << 11 | g << 5 | bl));
+        }
+    }
+#else
     const float fade_in = 165, fade_out = 233;        // radius where the fade starts / reaches black
     for (int y = 0; y < H; y++) {
         int sy = y * out.height / H;
@@ -390,6 +410,7 @@ static void load_art(const char *url)
             dst[y * W + x] = SWAP16((uint16_t)(r << 11 | g << 5 | bl));
         }
     }
+#endif
     art_cur = art_cur == 0 ? 1 : 0;
     art_version++;
     want_prefetch = true;                             // new song: look up the one after it

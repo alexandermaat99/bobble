@@ -1,31 +1,29 @@
 #include <stdio.h>
 #include <math.h>
+#include <time.h>
 #include "gfx.h"
 #include "battery.h"
 #include "statusbar.h"
 #include "wifi_setup.h"
 
 #if !SCREEN_ROUND
-#define SB_TOP 14                     // the square's corner: this far from the top and right edges
-#define SB_RIGHT 14
-// Wi-Fi: a dot and two arcs fanning up from it (45 degrees either side), anti-aliased; as many lit as the signal is
-// strong (the rest dim), all dim while it's not connected. x, y: the dot's centre.
+#define SB_TOP 14                     // the square's corners: this far from the top, and from the sides
+#define SB_SIDE 24
+#define SB_MID (SB_TOP + 12)          // the row the time, Wi-Fi and battery centre on
+// Wi-Fi: a fan of a wedge and two bands (45 degrees either side of up), anti-aliased; as many lit as the signal is
+// strong (the rest dim), all dim while it's not connected. x, y: the fan's point.
 static void draw_wifi(uint16_t *buf, int y0, int h, int x, int y, int bars, uint16_t on, uint16_t off)
 {
-    static const float rad[3] = {0, 7.5f, 13.5f};
-    for (int py = y - 16; py <= y + 3; py++) {
+    static const float r0[3] = {0, 6.5f, 11.5f}, r1[3] = {4.2f, 9.3f, 14.3f};
+    for (int py = y - 16; py <= y + 1; py++) {
         if (py < y0 || py >= y0 + h) continue;
         for (int px = x - 13; px <= x + 13; px++) {
             if (px < 0 || px >= W) continue;
             float dx = px + 0.5f - x, dy = py + 0.5f - y, d = sqrtf(dx * dx + dy * dy);
+            float wedge = (-dy - fabsf(dx)) * 0.7071f + 0.5f;                   // distance inside the 90 degree wedge
             for (int k = 0; k < 3; k++) {
-                float a;
-                if (!k) a = 2.6f - d + 0.5f;                                  // the dot
-                else {
-                    if (dy > 0 || fabsf(dx) > -dy + 0.7f) continue;           // (just the wedge above)
-                    a = 1.6f - fabsf(d - rad[k]) + 0.5f;                      // the arc's band
-                    a = fminf(a, -dy - fabsf(dx) + 1.2f);                     // (soft ends)
-                }
+                float a = fminf(fminf(d - r0[k], r1[k] - d) + 0.5f, wedge);
+                if (!k) a = fminf(r1[0] - d + 0.5f, wedge + 1.2f);              // (the point, a little rounder)
                 if (a <= 0) continue;
                 if (a > 1) a = 1;
                 uint16_t c = k < bars ? on : off, sc = SWAP16(c);             // (back to rgb to fade it)
@@ -35,34 +33,53 @@ static void draw_wifi(uint16_t *buf, int y0, int h, int x, int y, int bars, uint
         }
     }
 }
+
+static void draw_status_clock(uint16_t *buf, int y0, int h)
+{
+    if (SB_TOP + 24 <= y0 || SB_TOP >= y0 + h) return;
+    time_t now = time(NULL);
+    struct tm tm;
+    localtime_r(&now, &tm);
+    if (tm.tm_year < 120) return;                     // (no time yet)
+    char t[8];
+    snprintf(t, sizeof t, "%d:%02d", tm.tm_hour % 12 ? tm.tm_hour % 12 : 12, tm.tm_min);
+    draw_ftext(buf, y0, h, SB_SIDE + 8, SB_MID - font_label.line_h / 2 - 1, &font_label, t, rgb(255, 255, 255));
+}
 #endif
 
 void draw_status_bar(uint16_t *buf, int y0, int h, int top)
 {
+#if !SCREEN_ROUND
+    (void)top;
+    if (SB_TOP + 24 <= y0 || SB_TOP >= y0 + h) return;
+    int pct = battery_percent(), rssi = wifi_rssi(), bars = wifi_state() != WS_CONNECTED ? 0 : rssi > -60 ? 3 : rssi > -72 ? 2 : 1;
+    uint16_t white = rgb(255, 255, 255);
+    float bx1 = W - SB_SIDE, bx0 = bx1 - 27, my = SB_MID;      // the cell: 25 x 13 with a nub on the right
+    if (pct >= 0) {
+        bool chg = battery_charging();
+        uint16_t fill = chg ? rgb(60, 220, 110) : pct <= 15 ? rgb(255, 80, 80) : white;
+        aa_rrect(buf, y0, h, bx0, my - 6.5f, bx0 + 25, my + 6.5f, 4, rgb(120, 120, 128));
+        aa_rrect(buf, y0, h, bx0 + 1.3f, my - 5.2f, bx0 + 23.7f, my + 5.2f, 2.8f, 0);
+        float lvl = 21.0f * (pct > 100 ? 100 : pct < 4 ? 4 : pct) / 100;
+        aa_rrect(buf, y0, h, bx0 + 2.5f, my - 4, bx0 + 2.5f + lvl, my + 4, 1.8f, fill);
+        aa_rrect(buf, y0, h, bx0 + 26, my - 2.5f, bx1, my + 2.5f, 1, rgb(120, 120, 128));
+    } else {
+        bx0 = bx1 + 8;                                        // (no battery: the Wi-Fi takes the corner)
+    }
+    draw_wifi(buf, y0, h, (int)bx0 - 22, (int)my + 7, bars, white, rgb(70, 70, 80));
+    draw_status_clock(buf, y0, h);
+#else
     static const uint16_t bolt[14] = {   // 9 px wide, bit 8 = left column
         0x030, 0x030, 0x060, 0x060, 0x0C0, 0x1FE, 0x1FE, 0x00C, 0x018, 0x018, 0x030, 0x030, 0x060, 0x040,
     };
-#if !SCREEN_ROUND
-    top = SB_TOP;
-#endif
     if (top + 16 <= y0 || top >= y0 + h) return;
     int pct = battery_percent();
-#if !SCREEN_ROUND
-    int rssi = wifi_rssi(), bars = wifi_state() != WS_CONNECTED ? 0 : rssi > -60 ? 3 : rssi > -72 ? 2 : 1;
-    char p0[8] = "";
-    if (pct >= 0) snprintf(p0, sizeof p0, "%d%%", pct > 100 ? 100 : pct);
-    int bat_w = pct >= 0 ? (battery_charging() ? 13 : 0) + 31 + 6 + text_width(p0, 2) : 0;
-    draw_wifi(buf, y0, h, W - SB_RIGHT - bat_w - (bat_w ? 14 : 0) - 13, top + 14, bars, rgb(225, 225, 232), rgb(70, 70, 80));
-#endif
     if (pct < 0) return;
     bool chg = battery_charging();
     uint16_t c = pct <= 15 && !chg ? rgb(255, 95, 95) : rgb(60, 230, 120);
     char p[8];
     snprintf(p, sizeof p, "%d%%", pct > 100 ? 100 : pct);
     int tw = text_width(p, 2), bw = chg ? 13 : 0, x = CX - (bw + 31 + 6 + tw) / 2, by = top;
-#if !SCREEN_ROUND
-    x = W - SB_RIGHT - (bw + 31 + 6 + tw);           // (right-aligned in the corner)
-#endif
     if (chg)
         for (int r = 0; r < 14; r++)
             for (int k = 0; k < 9; k++)
@@ -73,4 +90,5 @@ void draw_status_bar(uint16_t *buf, int y0, int h, int top)
     fill_rect(buf, y0, h, x + 28, by + 5, x + 31, by + 11, c);           // terminal nub
     fill_rect(buf, y0, h, x + 4, by + 5, x + 4 + 20 * pct / 100, by + 11, c);
     draw_text(buf, y0, h, x + 37, by + 1, 2, p, c);
+#endif
 }

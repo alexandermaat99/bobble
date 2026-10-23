@@ -80,6 +80,95 @@ int ftext_width_n(const font_t *f, const char *s, int n)
 
 int ftext_width(const font_t *f, const char *s) { return ftext_width_n(f, s, 1 << 30); }
 
+// ---------------------------------------------------------------- anti-aliased shapes
+static inline void blend_px(uint16_t *px, uint16_t col, float a)
+{
+    if (a <= 0) return;
+    if (a >= 1) { *px = col; return; }
+    uint16_t c = SWAP16(col), d = SWAP16(*px);
+    int k = (int)(a * 256), dr = d >> 11, dg = (d >> 5) & 63, db = d & 31;
+    dr += ((c >> 11) - dr) * k >> 8; dg += (((c >> 5) & 63) - dg) * k >> 8; db += ((c & 31) - db) * k >> 8;
+    *px = SWAP16((uint16_t)((dr << 11) | (dg << 5) | db));
+}
+
+// shades the box [x0, x1) x [ya, yb) by coverage 0.5 - sdf(px, py) (sdf: signed distance in px, < 0 inside)
+#define AA_FILL(X0, YA, X1, YB, SDF) do {                                                     \
+    int lo = row_lo(y0), hi = row_hi(y0, h), ya_ = (int)floorf(YA), yb_ = (int)ceilf(YB);      \
+    int xa_ = (int)floorf(X0), xb_ = (int)ceilf(X1);                                           \
+    if (ya_ < lo) ya_ = lo;                                                                    \
+    if (yb_ > hi) yb_ = hi;                                                                    \
+    if (xa_ < 0) xa_ = 0;                                                                      \
+    if (xb_ > W) xb_ = W;                                                                      \
+    for (int iy = ya_; iy < yb_; iy++) {                                                       \
+        uint16_t *row = buf + (iy - y0) * W;                                                   \
+        float py = iy + 0.5f;                                                                  \
+        for (int ix = xa_; ix < xb_; ix++) {                                                   \
+            float px = ix + 0.5f;                                                              \
+            blend_px(row + ix, col, 0.5f - (SDF));                                             \
+        }                                                                                      \
+    }                                                                                          \
+} while (0)
+
+void aa_disc(uint16_t *buf, int y0, int h, float cx, float cy, float r, uint16_t col)
+{
+    AA_FILL(cx - r - 1, cy - r - 1, cx + r + 1, cy + r + 1, sqrtf((px - cx) * (px - cx) + (py - cy) * (py - cy)) - r);
+}
+
+static inline float rrect_sdf(float px, float py, float x0, float ya, float x1, float yb, float r)
+{
+    float hx = (x1 - x0) / 2 - r, hy = (yb - ya) / 2 - r;
+    float qx = fabsf(px - (x0 + x1) / 2) - hx, qy = fabsf(py - (ya + yb) / 2) - hy;
+    float ox = fmaxf(qx, 0), oy = fmaxf(qy, 0);
+    return sqrtf(ox * ox + oy * oy) + fminf(fmaxf(qx, qy), 0) - r;
+}
+
+void aa_rrect(uint16_t *buf, int y0, int h, float x0, float ya, float x1, float yb, float r, uint16_t col)
+{
+    AA_FILL(x0 - 1, ya - 1, x1 + 1, yb + 1, rrect_sdf(px, py, x0, ya, x1, yb, r));
+}
+
+static inline float seg_dist(float px, float py, float ax, float ay, float bx, float by)
+{
+    float dx = bx - ax, dy = by - ay, l2 = dx * dx + dy * dy;
+    float t = l2 > 0 ? ((px - ax) * dx + (py - ay) * dy) / l2 : 0;
+    t = t < 0 ? 0 : t > 1 ? 1 : t;
+    float ex = px - ax - t * dx, ey = py - ay - t * dy;
+    return sqrtf(ex * ex + ey * ey);
+}
+
+static float path_sdf(float px, float py, const float *p, int n, bool closed, float w)
+{
+    float d = 1e9f;
+    for (int i = 0; i + 1 < n + (closed ? 1 : 0); i++) {
+        int j = (i + 1) % n;
+        d = fminf(d, seg_dist(px, py, p[2 * i], p[2 * i + 1], p[2 * j], p[2 * j + 1]));
+    }
+    return d - w / 2;
+}
+
+void aa_path(uint16_t *buf, int y0, int h, const float *pts, int n, bool closed, float w, uint16_t col)
+{
+    float x0 = 1e9f, ya = 1e9f, x1 = -1e9f, yb = -1e9f;
+    for (int i = 0; i < n; i++) {
+        x0 = fminf(x0, pts[2 * i]); x1 = fmaxf(x1, pts[2 * i]);
+        ya = fminf(ya, pts[2 * i + 1]); yb = fmaxf(yb, pts[2 * i + 1]);
+    }
+    float m = w / 2 + 1;
+    AA_FILL(x0 - m, ya - m, x1 + m, yb + m, path_sdf(px, py, pts, n, closed, w));
+}
+
+void aa_icon(uint16_t *buf, int y0, int h, float cx, float cy, float size, const float *g, int n, bool closed, float w,
+             uint16_t col)
+{
+    float k = size / 24, p[64];
+    if (n > 32) n = 32;
+    for (int i = 0; i < n; i++) {
+        p[2 * i] = cx + (g[2 * i] - 12) * k;
+        p[2 * i + 1] = cy + (g[2 * i + 1] - 12) * k;
+    }
+    aa_path(buf, y0, h, p, n, closed, w, col);
+}
+
 // Each glyph's coverage blends the colour over what's already in the strip (the bubble, or black)
 void draw_ftext_n(uint16_t *buf, int y0, int h, int x, int y, const font_t *f, const char *s, int n, uint16_t col)
 {

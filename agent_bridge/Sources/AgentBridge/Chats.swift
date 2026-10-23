@@ -9,7 +9,8 @@ final class Chat {
     var agent = "claude"            // the app it's in ("claude" = Claude Code, "codex", "cursor", "conductor"): its mark shows
     var runtime = "claude"          // the agent actually running it ("claude", "codex", "cursor"): how to read its log
     var said = ""                   // (Cursor) what the agent last said, for the summary when it stops
-    var project = "", model = "", title = "", tool = "", prompt = ""
+    var project = "", model = "", title = "", tool = "", prompt = "", cwd = ""
+    var home = ""                   // the folder it started in (its project), from its log; cwd moves about with cd
     var state = ChatState.idle
     var detail = ""                 // what the display shows
     var ask = ""                    // what the last tool was about to do, as a question (for a permission prompt after)
@@ -48,8 +49,13 @@ final class Chats {
         let tool = codex ? codexTool(j["tool_name"] as? String ?? "") : j["tool_name"] as? String ?? ""
         let input = j["tool_input"] as? [String: Any] ?? [:]
         let transcript = j["transcript_path"] as? String ?? ""
-        if let cwd = j["cwd"] as? String { chat.project = (cwd as NSString).lastPathComponent }
+        if let cwd = j["cwd"] as? String { chat.cwd = cwd }
         if !transcript.isEmpty { chat.transcript = transcript }
+        if chat.home.isEmpty, !chat.transcript.isEmpty { chat.home = Transcript.startDir(chat.transcript) ?? "" }
+        let dir = chat.home.isEmpty ? chat.cwd : chat.home      // named for where it started, not where it's cd'd to
+        if !dir.isEmpty {
+            chat.project = dir == FileManager.default.homeDirectoryForCurrentUser.path ? "Home" : (dir as NSString).lastPathComponent
+        }
         chat.heard = Date()
         if ["PostToolUse", "UserPromptSubmit", "Stop", "SessionEnd"].contains(event) { letGo(chat) }   // (answered in the terminal)
         if event == "PreToolUse" { chat.inTool = true }
@@ -182,9 +188,9 @@ final class Chats {
     }
 
     // Claude Code's hooks that wait for an answer from the display (HookServer's /permission): PermissionRequest for
-    // a tool ("Yes" / "No"), PreToolUse for AskUserQuestion (its answers, when it's one question with one answer to
-    // pick). Nothing tapped in a minute, or anything else happening in the chat: the hook goes with no decision, and
-    // Claude Code asks in the terminal as usual.
+    // a tool ("Yes" / "No"), PreToolUse for AskUserQuestion (its answers: up to four, one to pick, and several
+    // questions one after another). Nothing tapped within 85 s, or anything else happening in the chat: the hook goes
+    // with no decision, and Claude Code asks in the terminal as usual.
     func handlePermission(_ j: [String: Any], reply: @escaping HookServer.Reply) {
         guard let sid = j["session_id"] as? String, !sid.isEmpty else { reply(""); return }
         let event = j["hook_event_name"] as? String ?? "", tool = j["tool_name"] as? String ?? ""
@@ -194,44 +200,68 @@ final class Chats {
         // (Conductor shows a question only once the hooks before it are done: holding one there would hide it)
         if asking, (j["cwd"] as? String ?? "").contains("/conductor/workspaces/") { reply(""); handle(j); return }
         if let old = all[sid] { letGo(old) }
-        var options: [String] = [], decide: (Int) -> [String: Any]
+        // the choices, one set per step: a question's answers (several questions: one after another), or Yes / No
+        var steps: [(text: String, options: [String])] = []
+        var finish: ([String]) -> [String: Any]
         if asking {
             let qs = input["questions"] as? [[String: Any]] ?? []
-            let q = qs.first ?? [:], text = q["question"] as? String ?? ""
-            options = ((q["options"] as? [[String: Any]]) ?? []).compactMap { $0["label"] as? String }
-            guard qs.count == 1, q["multiSelect"] as? Bool != true, !text.isEmpty, (1...4).contains(options.count) else { reply(""); handle(j); return }
-            decide = { i in
+            for q in qs {
+                let text = q["question"] as? String ?? ""
+                let opts = ((q["options"] as? [[String: Any]]) ?? []).compactMap { $0["label"] as? String }
+                guard q["multiSelect"] as? Bool != true, !text.isEmpty, (1...4).contains(opts.count) else { steps = []; break }
+                steps.append((text, opts))
+            }
+            guard !steps.isEmpty, steps.count == qs.count else { reply(""); handle(j); return }
+            finish = { picked in
                 var answered = input
-                answered["answers"] = [text: options[i]]
+                var answers: [String: String] = [:]
+                for (k, st) in steps.enumerated() { answers[st.text] = picked[k] }
+                answered["answers"] = answers
                 return ["hookEventName": "PreToolUse", "permissionDecision": "allow", "updatedInput": answered]
             }
         } else {
-            options = ["Yes", "No"]
-            decide = { i in
+            steps = [("", ["Yes", "No"])]
+            finish = { picked in
                 ["hookEventName": "PermissionRequest",
-                 "decision": i == 0 ? ["behavior": "allow"] : ["behavior": "deny", "message": "The user said no (on their Bobble display)."]]
+                 "decision": picked[0] == "Yes" ? ["behavior": "allow"] : ["behavior": "deny", "message": "The user said no (on their Bobble display)."]]
             }
         }
         let chat = all[sid] ?? Chat(id: sid)
         all[sid] = chat
-        let qid = String(UUID().uuidString.prefix(8))
-        chat.options = options
-        chat.qid = qid
+        var picked: [String] = []
         chat.release = { reply("") }
-        chat.answer = { [weak self, weak chat] i in
-            guard let self, let chat, i < chat.options.count else { return }
-            let out = (try? JSONSerialization.data(withJSONObject: ["hookSpecificOutput": decide(i)])).map { String(decoding: $0, as: UTF8.self) } ?? ""
+        // shows step k's choices (each step its own id, so the display takes them as new) and lets go of the hook if
+        // nobody taps within 85 s (curl gives up at 90): the terminal asks then
+        func show(_ k: Int) {
+            let qid = String(UUID().uuidString.prefix(8))
+            chat.options = steps[k].options
+            chat.qid = qid
+            DispatchQueue.main.asyncAfter(deadline: .now() + 85) { [weak self, weak chat] in
+                guard let self, let chat, chat.qid == qid else { return }
+                self.letGo(chat)
+                self.onUpdate(chat)                  // (the choices go from the display: it's the terminal's now)
+            }
+        }
+        let pick = { [weak self, weak chat] (label: String) in
+            guard let self, let chat, chat.release != nil else { return }
+            picked.append(label)
+            if picked.count < steps.count {          // the next question
+                show(picked.count)
+                self.set(chat, .waiting, steps[picked.count].text)
+                return
+            }
+            let out = (try? JSONSerialization.data(withJSONObject: ["hookSpecificOutput": finish(picked)])).map { String(decoding: $0, as: UTF8.self) } ?? ""
             chat.release = nil
             reply(out)
             self.letGo(chat)
             self.set(chat, .working, chat.working.isEmpty ? "Thinking" : chat.working)
         }
-        handle(j)                                    // (waiting, with the question)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 60) { [weak self, weak chat] in
-            guard let self, let chat, chat.qid == qid else { return }
-            self.letGo(chat)
-            self.onUpdate(chat)                      // (the choices go from the display: it's the terminal's now)
+        chat.answer = { [weak chat] i in
+            guard let chat, i < chat.options.count else { return }
+            pick(chat.options[i])
         }
+        show(0)
+        handle(j)                                    // (waiting, with the (first) question)
     }
 
     // A choice tapped on the display (Device.fetchAnswers)
@@ -493,6 +523,17 @@ enum Transcript {
         let data = (try? f.readToEnd()) ?? Data()
         return data.split(separator: UInt8(ascii: "\n")).suffix(n)
             .compactMap { (try? JSONSerialization.jsonObject(with: Data($0))) as? [String: Any] }
+    }
+
+    // The folder the chat started in: the first "cwd" in its log
+    static func startDir(_ path: String) -> String? {
+        guard let f = FileHandle(forReadingAtPath: path) else { return nil }
+        defer { try? f.close() }
+        let head = (try? f.read(upToCount: 400_000)) ?? Data()
+        for line in head.split(separator: UInt8(ascii: "\n")) {
+            if let j = (try? JSONSerialization.jsonObject(with: Data(line))) as? [String: Any], let d = j["cwd"] as? String, !d.isEmpty { return d }
+        }
+        return nil
     }
 
     static func lastModel(_ path: String) -> String? {
