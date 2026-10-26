@@ -700,7 +700,7 @@ static void page_bg(int p, uint16_t *buf, int y0, int y1)
 
 // the pet's face stays clear of the battery until it's getting low
 // (the square's corner is clear of everything: always there)
-static bool status_shown(int p) { return !SCREEN_ROUND || p != PAGE_PET || battery_percent() <= 15; }
+static bool status_shown(int p) { return !SCREEN_ROUND || p != PAGE_PET || (battery_percent() <= 15 && !battery_charging()); }
 
 static void page_fg(int p, uint16_t *buf, int y0, int h)
 {
