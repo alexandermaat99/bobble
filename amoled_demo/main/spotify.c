@@ -19,6 +19,8 @@
 #include "gfx.h"
 #include "wifi_setup.h"
 #include "spotify.h"
+#include "chat.h"
+#include "calendar.h"
 #include "agent.h"
 #include "secrets.h"
 
@@ -114,7 +116,9 @@ int spotify_devices(sp_device_t *out, int max)
 }
 
 uint32_t spotify_library_version(void) { return lib_version; }
-void spotify_set_library_visible(bool v) { lib_visible = v; }
+static bool lib_seen;                                 // the Library's been opened since start-up
+void spotify_set_library_visible(bool v) { lib_visible = v; if (v) lib_seen = true; }
+bool spotify_library_visible(void) { return lib_visible; }
 
 // Screen off: check every 30 s instead of every 1-5 s. On waking, check straight away.
 void spotify_set_awake(bool on)
@@ -386,23 +390,44 @@ static uint16_t *decode_jpg(int len, int min_side, esp_jpeg_image_output_t *im)
     return out;
 }
 
+// A cover that didn't come (download, decode or memory): show none rather than the last song's, and let the poll try
+// again in 15 s (art_url already said "got it", so it never retried and the wrong cover stayed up)
+static char art_failed[200];
+static int64_t art_failed_at;
+
+static void art_fail(const char *url, const char *why)
+{
+    ESP_LOGW(TAG, "album art: %s, trying again in 15 s", why);
+    strlcpy(art_failed, url, sizeof art_failed);
+    art_failed_at = esp_timer_get_time();
+    art_url[0] = 0;
+    art_cur = -1;
+    art_version++;
+}
+
+// A new cover to fetch: not the one showing, nor one that just failed
+static bool art_wanted(const char *url)
+{
+    return url && strcmp(url, art_url) && (strcmp(url, art_failed) || esp_timer_get_time() - art_failed_at > 15000000);
+}
+
 static void load_art(const char *url)
 {
     for (int i = 0; i < 2; i++)
         if (!art[i]) art[i] = heap_caps_malloc(W * H * 2, MALLOC_CAP_SPIRAM);
-    if (!jpeg_bufs() || !art[0] || !art[1]) return;
+    if (!jpeg_bufs() || !art[0] || !art[1]) { art_fail(url, "no memory"); return; }
 
     int64_t t0 = esp_timer_get_time();
     bool preloaded = pre_len > 0 && !strcmp(url, pre_url);
     int len;
     if (preloaded) memcpy(jpg, pre_jpg, len = pre_len);
     else len = download(url, jpg, JPG_CAP, false);
-    if (len < 100) { ESP_LOGW(TAG, "art download failed (%d)", len); return; }
+    if (len < 100) { art_fail(url, "download failed"); return; }
 
     int64_t t1 = esp_timer_get_time();
     esp_jpeg_image_output_t out;
     uint16_t *raw = decode_jpg(len, SCREEN_ROUND ? W : ART_SZ, &out);
-    if (!raw) { ESP_LOGW(TAG, "art decode failed"); return; }
+    if (!raw) { art_fail(url, "decode failed"); return; }
     int64_t t2 = esp_timer_get_time();
 
     // scale to fill the round screen, darken so text and controls stay readable, and fade the edge of
@@ -468,6 +493,17 @@ const uint16_t *spotify_thumb(int slot)
 
 static int16_t want[MAX_THUMBS];                      // (under lock) the Library's order, then slot order
 static int n_want;
+
+// Some of the wanted covers still to fetch (the start-up preload's, before the Library's been opened)
+static bool want_pending(void)
+{
+    bool p = false;
+    xSemaphoreTake(lock, portMAX_DELAY);
+    for (int i = 0; i < n_want && !p; i++)
+        p = thumbs && want[i] >= 0 && want[i] < MAX_THUMBS && thumbs[want[i]].url[0] && !thumbs[want[i]].ok && !thumbs[want[i]].tried;
+    xSemaphoreGive(lock);
+    return p;
+}
 
 void spotify_want_thumbs(const int16_t *slots, int n)
 {
@@ -594,7 +630,7 @@ static void load_thumbs(int64_t budget_us)
     int n = n_want;
     memcpy(order, want, n * sizeof *order);
     xSemaphoreGive(lock);
-    for (int k = 0; k < MAX_THUMBS; k++) order[n++] = k;
+    for (int k = 0; k < MAX_THUMBS && lib_seen; k++) order[n++] = k;   // (before it's opened: just the preload's)
     for (int i = 0; i < n; i++) {
         int k = order[i];
         if (k < 0 || k >= MAX_THUMBS) continue;
@@ -754,7 +790,7 @@ static void parse_player(const char *json)
     st = s;
     xSemaphoreGive(lock);
     if (paused_now) save_last_track(&s);
-    if (url && strcmp(url, art_url)) {                // new album: fetch its cover
+    if (art_wanted(url)) {                            // new album: fetch its cover
         strlcpy(art_url, url, sizeof art_url);
         load_art(url);
         jpeg_bufs_free();
@@ -1106,9 +1142,9 @@ static void poll_player(void)
         xSemaphoreGive(lock);
         if (was_playing) save_last_track(&snap);
         wake_session();
-        if (art && strcmp(art, art_url)) {
+        if (art_wanted(art)) {
             strlcpy(art_url, art, sizeof art_url);
-            load_art(art_url);
+            load_art(art);
             jpeg_bufs_free();
         }
     }
@@ -1120,7 +1156,8 @@ static void sp_task(void *arg)
     resp.buf = heap_caps_malloc(resp.cap, MALLOC_CAP_SPIRAM);
     for (;;) {
         sp_cmd_t c;
-        int wait_ms = !awake ? 180000 : fast || lib_visible ? 1000 : 5000;   // screen off: every 3 minutes
+        static bool preloading;                       // (the start-up covers, below: on till they're in)
+        int wait_ms = preloading ? 2000 : !awake ? 180000 : fast || lib_visible ? 1000 : 5000;   // screen off: every 3 minutes
         bool got = xQueueReceive(cmds, &c, pdMS_TO_TICKS(wait_ms)) == pdTRUE;
         if (!st.configured || wifi_state() != WS_CONNECTED || !wifi_time_synced()) continue;
         if (got && c.cmd != SP_POLL) {
@@ -1137,7 +1174,28 @@ static void sp_task(void *arg)
         if (lib_visible && esp_timer_get_time() - lib_loaded_us > 60000000) load_library();   // devices come and go
         poll_player();
         if (want_prefetch && awake && st.active && !uxQueueMessagesWaiting(cmds)) prefetch_next();
-        if (awake) { load_thumbs(lib_visible ? 2000000 : 500000); jpeg_bufs_free(); }   // the Library's covers: quickly while it's up
+        // The Library's first covers, ready before it's opened: once, after start-up's calendar download (or 90 s) and
+        // the first poll, with no voice chat going: the list, then the first 10 playlists' and the first 10
+        // podcasts' covers, a cover or two every 2 s, screen on or off (off is best: nothing's drawing), the buffer
+        // given back after each. The rest wait for the Library to be opened. Kept for good (only a changed list's
+        // covers are fetched again).
+        static bool preloaded;
+        if (!preloaded && !lib_seen && (calendar_loaded() || esp_timer_get_time() > 90000000) && esp_timer_get_time() > 30000000 &&
+            !chat_active() && !uxQueueMessagesWaiting(cmds)) {
+            preloaded = true;
+            if (n_playlists < 0) load_library();
+            int16_t first[20];
+            int n = 0;
+            xSemaphoreTake(lock, portMAX_DELAY);
+            for (int i = 0; i < 10 && i < n_playlists; i++) first[n++] = playlists[i].thumb;
+            for (int i = 0; i < 10 && i < n_shows; i++) first[n++] = shows[i].thumb;
+            xSemaphoreGive(lock);
+            spotify_want_thumbs(first, n);
+            ESP_LOGI(TAG, "library: preloading %d covers", n);
+            preloading = n > 0;
+        }
+        if (preloading && (lib_seen || !want_pending())) preloading = false;
+        if ((awake || preloading) && !chat_active()) { load_thumbs(lib_visible ? 2000000 : 500000); jpeg_bufs_free(); }   // the Library's covers: quickly while it's up
         static int64_t stack_log;
         if (esp_timer_get_time() - stack_log > 600000000) {
             stack_log = esp_timer_get_time();

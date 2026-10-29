@@ -46,7 +46,8 @@ uint32_t spotify_library_version(void);                  // changes when either 
 const uint16_t *spotify_thumb(int slot);
 // The covers the Library wants first, in order (what's on screen, then the rest of that tab); the others follow
 void spotify_want_thumbs(const int16_t *slots, int n);
-void spotify_set_library_visible(bool visible);           // keep the lists fresh while the page is up
+void spotify_set_library_visible(bool visible);
+bool spotify_library_visible(void);           // keep the lists fresh while the page is up
 void spotify_set_poll_fast(bool fast);           // 1 s polling while the Now Playing screen is up
 // Album art scaled to the 466x466 screen and dimmed for a background (the square: a full-screen frame with the
 // cover as a rounded tile at ART_X/ART_Y, ART_SZ px, black around it); NULL if none.

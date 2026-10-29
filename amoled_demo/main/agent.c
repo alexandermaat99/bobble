@@ -249,7 +249,8 @@ static esp_err_t info_get(httpd_req_t *req)
     cJSON_AddStringToObject(j, "name", agent_device_name());
     cJSON_AddNumberToObject(j, "macs", n_macs);
     cJSON_AddNumberToObject(j, "fw", (double)BOBBLE_BUILD);   // which release build (0: an everyday build)
-    if (chat_port()) cJSON_AddNumberToObject(j, "chat", chat_port());   // it can talk: where the Mac connects for that
+    if (chat_port()) cJSON_AddNumberToObject(j, "chat", chat_port());
+    cJSON_AddNumberToObject(j, "rssi", wifi_rssi());   // the Wi-Fi signal now (dBm, 0: not connected)   // it can talk: where the Mac connects for that
 #ifdef BOBBLE_RELEASE
     cJSON_AddBoolToObject(j, "release", true);
 #else

@@ -174,7 +174,8 @@ void sq_display_init(void)
         .data_width = 16,
         .bits_per_pixel = 16,
         .num_fbs = 1,
-        .bounce_buffer_size_px = 480 * 16,              // scanned out from internal RAM (straight from PSRAM it glitches)
+        .bounce_buffer_size_px = 480 * 16,              // scanned out from internal RAM (straight from PSRAM it glitches;
+                                                        // 32 rows each made the picture shake: each refill too long)
         .psram_trans_align = 64,
         .hsync_gpio_num = 46, .vsync_gpio_num = 3, .de_gpio_num = 17, .pclk_gpio_num = 9, .disp_gpio_num = -1,
         // The drawing code makes big-endian pixels (what the round board's SPI panel takes): naming the data lines

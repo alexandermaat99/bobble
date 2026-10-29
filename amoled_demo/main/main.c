@@ -292,6 +292,9 @@ static void tilt_cal_start(void)
     tilt_progress = 0;
 }
 
+void motion_tilt_cal(bool on) { if (on) tilt_cal_start(); else tilt_step = 0; }
+int motion_tilt_step(float *progress) { *progress = tilt_progress; return tilt_step; }
+
 static float dot3(const float *a, const float *b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; }
 
 static bool inv3(const float *m, float *o)
@@ -369,6 +372,8 @@ static void tilt_cal_update(int64_t now)
     for (int i = 0; i < 3; i++) pose_raw[tilt_step - 1][i] = sum[i] / nsum;   // average over the second
     tilt_since = now;
     tilt_progress = 0;
+    ESP_LOGI(TAG, "tilt cal: position %d held (%.2f %.2f %.2f)", tilt_step, pose_raw[tilt_step - 1][0],
+             pose_raw[tilt_step - 1][1], pose_raw[tilt_step - 1][2]);
     if (tilt_step < TILT_POSES) { tilt_step++; tilt_since = 0; return; }
 
     imu_cal_t c = {IMU_CAL_MAGIC};
@@ -648,17 +653,31 @@ static void touch_cal_draw(uint16_t *buf, int y0, int h)
     aa_disc(buf, y0, h, tx, ty, 5, white);              // the point to hit
 }
 
-// A ring round (cx, cy), drawn clockwise from the top for frac of the way round
-static void ring(uint16_t *buf, int y0, int h, float cx, float cy, float r, float frac, float w, uint16_t col)
+// A ring round (cx, cy), w wide: the first frac of it (clockwise from the top) in col, the rest in track. One pass
+// over its box, each pixel's distance and angle (a path of 60 segments costs each pixel 60 of them: frames took long
+// enough that the calibration's "held still" never lasted, and the ring jumped about)
+static void ring(uint16_t *buf, int y0, int h, float cx, float cy, float r, float frac, float w, uint16_t col, uint16_t track)
 {
-    float p[2 * 61];
-    int n = 2 + (int)(59 * (frac > 1 ? 1 : frac));
-    for (int i = 0; i < n; i++) {
-        float a = 2 * (float)M_PI * frac * i / (n - 1);
-        p[2 * i] = cx + r * sinf(a);
-        p[2 * i + 1] = cy - r * cosf(a);
+    float ro = r + w / 2, ri = r - w / 2, lim = frac * 2 * (float)M_PI;
+    int ya = (int)(cy - ro - 1), yb = (int)(cy + ro + 2), xa = (int)(cx - ro - 1), xb = (int)(cx + ro + 2);
+    if (ya < y0) ya = y0;
+    if (yb > y0 + h) yb = y0 + h;
+    for (int y = ya; y < yb; y++) {
+        float dy = y + 0.5f - cy;
+        uint16_t *row = buf + (y - y0) * W;
+        for (int x = xa < 0 ? 0 : xa; x < xb && x < W; x++) {
+            float dx = x + 0.5f - cx, d2 = dx * dx + dy * dy;
+            if (d2 > (ro + 1) * (ro + 1) || d2 < (ri - 1) * (ri - 1)) continue;
+            float d = sqrtf(d2), cov = fminf(ro - d, d - ri) + 0.5f;     // (anti-aliased at both edges)
+            if (cov <= 0) continue;
+            if (cov > 1) cov = 1;
+            float a = atan2f(dx, -dy);                                 // clockwise from the top
+            if (a < 0) a += 2 * (float)M_PI;
+            uint16_t c = a <= lim ? col : track, sc = SWAP16(c), bg = SWAP16(row[x]);
+            int r1 = (sc >> 11) & 31, g1 = (sc >> 5) & 63, b1 = sc & 31, r0 = (bg >> 11) & 31, g0 = (bg >> 5) & 63, b0 = bg & 31;
+            row[x] = SWAP16((uint16_t)(((int)(r0 + (r1 - r0) * cov) << 11) | ((int)(g0 + (g1 - g0) * cov) << 5) | (int)(b0 + (b1 - b0) * cov)));
+        }
     }
-    aa_path(buf, y0, h, p, n, false, w, col);
 }
 
 // Tilt calibration, the same way but quieter: a blue arrow at the table (a grey line) for the four edges, the board seen
@@ -687,8 +706,7 @@ static void tilt_cal_draw(uint16_t *buf, int y0, int h)
                                   "Lay it flat", "Now face down"};
     int i = tilt_step - 1;
     float p = tilt_progress > 1 ? 1 : tilt_progress < 0 ? 0 : tilt_progress;   // held still for a second
-    ring(buf, y0, h, ix, iy, 66, 1, 4, rgb(44, 44, 48));
-    if (p > 0.02f) ring(buf, y0, h, ix, iy, 66, p, 4, blue);
+    ring(buf, y0, h, ix, iy, 66, p > 0.02f ? p : 0, 4, blue, rgb(44, 44, 48));
     if (i < 4) {                                      // an arrow at the table: down, right, up, left
         static const float dir[4][2] = {{0, 1}, {1, 0}, {0, -1}, {-1, 0}};
         float vx = dir[i][0], vy = dir[i][1], px = -vy, py = vx;
@@ -1414,6 +1432,9 @@ static void render_frame(bool content)
 {
     static int prev_sheet;
     frame_sheet = (int)(sheet + 0.5f);
+#if !SCREEN_ROUND
+    status_bar_clock(page != PAGE_CAL || frame_sheet > 0 || pages_sliding());   // (the calendar shows the time big)
+#endif
     if (pages_sliding()) prepare_snapshots();
 #if !SCREEN_ROUND
     card_snap = frame_sheet > 0 && frame_sheet < H && snap_buf[0] && !calibrating && !tilt_step && ota_progress() < 0 && !show_empty;
@@ -1664,7 +1685,7 @@ void app_main(void)
         if (!boot && boot_prev) { boot_down = now; boot_long = false; }
         if (!boot && !boot_long && now - boot_down > 3000000) { boot_long = true; touch_cal_start(); }
         if (boot && !boot_prev && !boot_long && calibrating) calibrating = false;   // BOOT cancels touch calibration
-        else if (boot && !boot_prev && !boot_long && tilt_step) tilt_step = 0;       // ...and tilt calibration
+        else if (boot && !boot_prev && !boot_long && tilt_step) { tilt_step = 0; ESP_LOGI(TAG, "tilt cal: cancelled (BOOT)"); }
         else if (boot && !boot_prev && !boot_long && power == PW_AWAKE) card_animate(frame_sheet >= H / 2 ? 0 : H);
         boot_prev = boot;
 

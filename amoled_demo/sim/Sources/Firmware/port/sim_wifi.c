@@ -101,6 +101,7 @@ wifi_state_t wifi_state(void) { tick(); return state; }
 const char *wifi_ssid(void) { return sta_ssid; }
 const char *wifi_ip(void) { tick(); return state == WS_CONNECTED ? "127.0.0.1" : ""; }
 int wifi_rssi(void) { tick(); return state == WS_CONNECTED ? -48 : 0; }   // (the pretend network's strength)
+int wifi_bars(void) { return wifi_rssi() ? 3 : 0; }
 const char *wifi_ap_ssid(void) { return ap_ssid; }
 const char *wifi_ap_pass(void) { return ap_pass; }
 int wifi_ap_clients(void) { return 0; }

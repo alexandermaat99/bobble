@@ -827,7 +827,8 @@ static void draw_list(uint16_t *buf, int y0, int h)
         }
         draw_fit(buf, y0, h, 56, (int)mid - font_label.line_h / 2, &font_label, nets[i].ssid, ROW_X1 - 70 - 56, C_WHITE);
         if (nets[i].secure) small_lock(buf, y0, h, ROW_X1 - 48, mid, SQ_TEXT2, SQ_GROUP);
-        fan(buf, y0, h, ROW_X1 - 22, mid - 4, connected ? wifi_rssi() : nets[i].rssi);   // (live, like the status bar)
+        int bars = wifi_bars();                       // (the joined one: as the status bar shows it)
+        fan(buf, y0, h, ROW_X1 - 22, mid - 4, connected ? (bars >= 3 ? -50 : bars == 2 ? -66 : -80) : nets[i].rssi);
         if (i < net_count - 1) fill_rect(buf, y0, h, 56, ry + ROW_H - 1, ROW_X1, ry + ROW_H, SQ_SEP);
     }
     if (net_count == 0 && !wifi_scanning()) ftext_mid(buf, y0, h, CX, 240, &font_label, "No networks found", SQ_TEXT2);
