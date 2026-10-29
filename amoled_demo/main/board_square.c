@@ -262,6 +262,12 @@ bool sq_touch_read(int *x, int *y)
 }
 
 // ---------------------------------------------------------------- battery (AXP2101)
+// Charge current: 500 mA fills a 2000 mAh cell in ~4.5 h, and is gentler still on a bigger one. (The charger is linear:
+// what the cell doesn't take is heat in the chip. 1000 mA took it to 61 C even near full, ~0.7 W; from empty it's twice
+// that.) The chip's codes are 25 mA steps to 200 mA (8), then 100 mA steps to 1000 mA (16); its own default is 200 mA.
+#define CHARGE_MA 500
+#define CHARGE_CODE (CHARGE_MA <= 200 ? CHARGE_MA / 25 : CHARGE_MA / 100 + 6)
+
 static bool pmu_reg(uint8_t reg, uint8_t *v)
 {
     if (!pmu_dev) {
@@ -271,6 +277,8 @@ static bool pmu_reg(uint8_t reg, uint8_t *v)
         if (!(pmu_dev = add_dev(0x34))) { ESP_LOGE(TAG, "no power chip found"); return false; }
         uint8_t on[2] = {0x30, 0};                      // ADC channels: battery, USB and system voltage, chip temperature
         if (pmu_reg(0x30, &on[1])) { on[1] |= 0x1D; i2c_master_transmit(pmu_dev, on, 2, 50); }
+        uint8_t icc[2] = {0x62, 0};                     // charge current (bits 4-0)
+        if (pmu_reg(0x62, &icc[1])) { icc[1] = (icc[1] & 0xE0) | CHARGE_CODE; i2c_master_transmit(pmu_dev, icc, 2, 50); }
     }
     return i2c_master_transmit_receive(pmu_dev, &reg, 1, v, 1, 20) == ESP_OK;
 }

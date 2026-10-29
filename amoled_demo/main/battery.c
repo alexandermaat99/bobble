@@ -83,7 +83,7 @@ static int unsaved;
 static int shown = -1;                // % on screen
 // On USB the board reads well above the cell's own voltage (charger): learned from the step at each plug / unplug
 #if SQUARE_HW
-static float usb_offset = 0.05f;      // (the power chip measures the cell itself: charging raises it only a little)
+static float usb_offset = 0.10f;      // (the power chip measures at the cell: ~0.19 ohm x the 500 mA charge current)
 #else
 static float usb_offset = 0.27f;
 #endif
