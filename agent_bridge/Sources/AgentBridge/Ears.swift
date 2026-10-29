@@ -14,6 +14,7 @@ final class Ears {
     private var task: SFSpeechRecognitionTask?
     private var text = ""
     private var changed = Date()
+    private var firstWord: Date?                       // when this utterance's first word came
     private var begun = Date()
     private var timer: Timer?
     private let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16000, channels: 1, interleaved: false)!
@@ -65,6 +66,7 @@ final class Ears {
     }
 
     private func begin() {
+        firstWord = nil
         guard let recognizer, recognizer.isAvailable else { return }
         let r = SFSpeechAudioBufferRecognitionRequest()
         r.shouldReportPartialResults = true
@@ -78,6 +80,7 @@ final class Ears {
             guard let self, let r, self.request === r, let result else { return }
             let t = result.bestTranscription.formattedString
             if t != self.text {
+                if self.text.isEmpty { self.firstWord = Date() }
                 self.text = t
                 self.changed = Date()
                 self.onPartial(t)
@@ -95,7 +98,8 @@ final class Ears {
     private func tick() {
         guard listening else { return }
         let t = text.trimmingCharacters(in: .whitespaces)
-        if !t.isEmpty, Date().timeIntervalSince(changed) > pause {
+        // you've paused; or it's gone on so long without one that something else is talking too (a TV, music): take it
+        if !t.isEmpty, Date().timeIntervalSince(changed) > pause || Date().timeIntervalSince(firstWord ?? Date()) > 20 {
             reset()
             onUtterance(t)
         } else if t.isEmpty, Date().timeIntervalSince(begun) > 50 || request == nil {

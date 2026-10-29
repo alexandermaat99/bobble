@@ -50,6 +50,7 @@ EXT_RAM_BSS_ATTR static int16_t mic_ring[MIC_RING];
 static int mic_r, mic_n;
 static volatile bool awaiting_played;         // speech came in since the last "played"
 static volatile int64_t last_activity;
+static bool paused_music;                     // Spotify was playing when the chat started: we paused it
 
 // ---------------------------------------------------------------- sending
 
@@ -224,7 +225,7 @@ static char *music_text(const char *a)
     else if (!strcmp(a, "previous")) spotify_command(SP_PREV);
     else if (!strcmp(a, "louder")) spotify_command(SP_VOL_UP);
     else if (!strcmp(a, "quieter")) spotify_command(SP_VOL_DOWN);
-    if (strcmp(a, "status")) { snprintf(s, 400, "Done (%s).", a); return s; }
+    if (strcmp(a, "status")) { paused_music = false; snprintf(s, 400, "Done (%s).", a); return s; }   // (yours now: left as it is after)
     if (!sp.active) snprintf(s, 400, "Nothing is playing on Spotify.");
     else snprintf(s, 400, "%s %s%s%s on %s.%s%s", sp.playing ? "Playing" : "Paused:", sp.title, sp.artist[0] ? " by " : "",
                   sp.artist, sp.device, sp.note[0] ? " Note: " : "", sp.note);
@@ -432,6 +433,12 @@ void chat_tap_mic(void)
         return;
     }
     if (!audio_start(mic_frames)) { ST_EDIT(copy_str(st.status, sizeof st.status, "The microphone didn't start")); return; }
+    // music from Spotify would keep the speech recognition hearing words after you've stopped (so your turn never
+    // ends), and talk over Claude: it's paused for the chat, and carries on after
+    spotify_state_t sp;
+    spotify_get(&sp);
+    paused_music = sp.configured && sp.playing;
+    if (paused_music) spotify_command(SP_PLAY_PAUSE);
     audio_set_speaker_mute(st.speaker_muted);
     last_activity = esp_timer_get_time();
     ST_EDIT(st.active = true; st.muted = false; st.state = CS_LISTENING; st.status[0] = 0);
@@ -471,6 +478,7 @@ void chat_close(void)
     ST_EDIT(st.active = false; st.muted = false; st.state = CS_IDLE);
     awaiting_played = false;
     audio_stop();
+    if (paused_music) { paused_music = false; spotify_command(SP_PLAY_PAUSE); }   // (the music we paused, back on)
     xSemaphoreTake(mic_lock, portMAX_DELAY);
     mic_n = 0;
     xSemaphoreGive(mic_lock);

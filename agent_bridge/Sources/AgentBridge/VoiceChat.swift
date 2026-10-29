@@ -73,7 +73,13 @@ final class VoiceChat {
         case "start": begin(on: link)
         case "stop": if link === active { finish() }
         case "mute":
-            if link === active { if j["on"] as? Bool == true { ears.stop() } else if state != .idle { ears.start() } }
+            guard link === active else { return }
+            if j["on"] as? Bool == true {
+                // a tap on the mic just after you've spoken: that's you finished, so it's sent now rather than lost
+                let said = ears.heard.trimmingCharacters(in: .whitespaces)
+                ears.stop()
+                if state == .listening, !said.isEmpty { NSLog("voice chat: sent on mute"); utterance(said) }
+            } else if state != .idle { ears.start() }
         case "model":
             if let i = j["i"] as? Int, Claude.models.indices.contains(i) { model = i; for l in links { sendModels(l) } }
         case "new":
@@ -108,6 +114,7 @@ final class VoiceChat {
 
     // A chat starts (the mic was tapped): listening
     private func begin(on link: ChatLink) {
+        NSLog("voice chat: started on %@", link.device.name)
         if let a = active, a !== link { a.send(["t": "end"]) }   // (one at a time)
         if turn != nil || !mouth.idle || !outgoing.isEmpty { interrupt(record: true) }
         active = link
@@ -160,6 +167,7 @@ final class VoiceChat {
 
     private func utterance(_ t: String) {
         guard state == .listening else { return }      // (heard while Claude was talking and not new: its echo)
+        NSLog("voice chat: you said %@", t)
         send(["t": "heard", "text": t])
         send(["t": "say", "text": ""])
         addUser([["type": "text", "text": cutNote.isEmpty ? t : cutNote + "\n\n" + t]])
