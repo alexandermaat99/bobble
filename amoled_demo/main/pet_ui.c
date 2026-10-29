@@ -1497,14 +1497,14 @@ typedef struct {
     float sc;                                 // its size (1, or REST_SCALE waiting at the side), eased
     bool resting, walking;
 } mascot_t;
-EXT_RAM_BSS_ATTR static mascot_t crowd[CROWD_POOL];
-EXT_RAM_BSS_ATTR static agent_chat_t crowd_chat[AGENT_MAX + 1];   // by slot (and the host's)
+static mascot_t crowd[CROWD_POOL];   // (these: every frame, so internal RAM: PSRAM's shared with the scan-out)
+static agent_chat_t crowd_chat[AGENT_MAX + 1];   // by slot (and the host's)
 static int crowd_more;                        // chats up that don't fit
 static int16_t crowd_q[CROWD_POOL][12];    // what the last frame showed, roughly (anything changed: redraw)
 static uint32_t crowd_sum;
 // The choices over a waiting chat's bubble ("Yes" / "No", a question's answers), as last drawn: where to tap
 #define PILL_GAP 8
-EXT_RAM_BSS_ATTR static struct { int slot, n, r[AGENT_OPTS][4]; } pills[CROWD_POOL];
+static struct { int slot, n, r[AGENT_OPTS][4]; } pills[CROWD_POOL];
 static int ask_n;                             // chats waiting on a choice (the first has the screen; "1 of 3")
 // How the choices look: 1 inside the bubble, over the question, as pills in the chat's colour; 2 a numbered list over
 // the bubble, like a terminal's
@@ -1548,7 +1548,7 @@ static void crowd_update(int64_t now, float dt)
 {
     static bool init;
     if (!init) { init = true; for (int i = 0; i < CROWD_POOL; i++) crowd[i].slot = -1; }
-    EXT_RAM_BSS_ATTR static agent_chat_t all[AGENT_MAX + 1];   // (3 KB: off the main task's stack)
+    static agent_chat_t all[AGENT_MAX + 1];           // (3 KB: off the main task's stack)
     agent_chat_t *pick[AGENT_MAX + 1], *rest[AGENT_MAX];
     int n = agent_get_chats(all), m = 0, r = 0;
     // a chat waiting on a choice takes the whole screen, the one that asked first; the rest step aside till it's

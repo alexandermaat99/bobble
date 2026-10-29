@@ -268,20 +268,24 @@ static bool gt_poll(int *x, int *y)
 // chip keeps only its latest report. A press that came and went is handed over once, then the let-go.
 static portMUX_TYPE t_mux = portMUX_INITIALIZER_UNLOCKED;
 static volatile bool t_down, t_pressed, t_fast = true;   // t_pressed: went down since the last sq_touch_read
+static volatile bool t_paused;                          // not reading the chip (sq_touch_sleep)
 static volatile int t_x, t_y, p_x, p_y;
 
 static void touch_task(void *arg)
 {
+    int ups = 0;                                       // reports in a row with no finger
     for (;;) {
+        if (t_paused) { t_down = t_pressed = false; vTaskDelay(pdMS_TO_TICKS(100)); continue; }
         int x, y;
         bool d = gt_poll(&x, &y);
+        ups = d ? 0 : ups + 1;
         taskENTER_CRITICAL(&t_mux);
         if (d) {
             if (!t_down) { t_pressed = true; p_x = x; p_y = y; }
             t_x = x; t_y = y;
-        }
-        t_down = d;
-        taskEXIT_CRITICAL(&t_mux);
+            t_down = true;
+        } else if (ups >= 3) t_down = false;           // lifted only after 30 ms of none: the chip drops a finger for a
+        taskEXIT_CRITICAL(&t_mux);                      // report now and then (near the edges most), which ended swipes
         vTaskDelay(pdMS_TO_TICKS(t_fast ? 10 : 100));
     }
 }
@@ -295,6 +299,15 @@ void sq_touch_init(void)
 }
 
 void sq_touch_fast(bool on) { t_fast = on; }
+
+// While the PWR button has it off, the touch chip isn't read, so nothing in a bag can wake the board. (Its own sleep
+// mode was tried: woken by a pulse on its interrupt line it didn't answer again on this board, and the only other way
+// back is the reset line it shares with the panel.)
+void sq_touch_sleep(bool on)
+{
+    t_paused = on;
+    ESP_LOGI(TAG, "touch %s", on ? "ignored" : "back");
+}
 
 bool sq_touch_read(int *x, int *y)
 {
@@ -335,6 +348,17 @@ float sq_battery_volts(void)
     if (!pmu_reg(0x00, &st) || !(st & 0x08)) return 0;   // status 1, bit 3: a battery is connected
     if (!pmu_reg(0x34, &hi) || !pmu_reg(0x35, &lo)) return 0;
     return (((hi & 0x3F) << 8) | lo) / 1000.0f;
+}
+
+// The PWR button: the power chip notes each press (interrupt status 2: bit 3 short press, bit 2 long press, bits 1-0
+// its edges); read and clear them. 1: a short press since last time, 2: a long one (held ~1.5 s; ~6 s cuts the power)
+int sq_power_key(void)
+{
+    uint8_t st;
+    if (!pmu_reg(0x49, &st) || !(st & 0x0F)) return 0;
+    uint8_t clr[2] = {0x49, st & 0x0F};               // (write 1 to clear)
+    i2c_master_transmit(pmu_dev, clr, 2, 20);
+    return st & 0x08 ? 1 : st & 0x04 ? 2 : 0;
 }
 
 bool sq_plugged_in(void)

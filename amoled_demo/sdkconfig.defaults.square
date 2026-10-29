@@ -15,12 +15,14 @@ CONFIG_ESP_WIFI_STATIC_TX_BUFFER_NUM=8
 CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=10
 CONFIG_ESP_WIFI_RX_BA_WIN=8
 # More internal RAM back (the panel's strips and bounce buffers take ~110 KB of it):
-# - only small allocations (under 1 KB) go to internal RAM first; buffers, JSON and HTTP bodies go to PSRAM
 # - the mDNS task's stack and its records in PSRAM
-# (Wi-Fi's hot paths stay in internal RAM: run from PSRAM, every packet competed with the panel's scan-out for it,
-# and cover downloads showed broken rows)
-CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=1024
+# (Wi-Fi's hot paths, small allocations (under 16 KB, the default) and what's drawn every frame stay in internal RAM:
+# PSRAM's bandwidth is shared with the panel's scan-out, and every extra bit of traffic there showed as broken rows)
 CONFIG_MDNS_TASK_CREATE_FROM_SPIRAM=y
 CONFIG_MDNS_MEMORY_ALLOC_SPIRAM=y
 # The system event task ran with ~300 bytes of its 2304 to spare (Wi-Fi's handlers log from it)
 CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=3072
+# A bigger TCP window: Spotify's image server answers in 200-500 ms from here, and with 5.7 KB in flight a cover came
+# at ~14 KB/s (a 45 KB album cover took up to 8 s). 32 KB in flight; lwIP's buffers come from PSRAM.
+CONFIG_LWIP_TCP_WND_DEFAULT=32768
+CONFIG_LWIP_TCP_RECVMBOX_SIZE=32

@@ -25,8 +25,10 @@ void sq_backlight(int level);           // 0 (off) .. 255
 void sq_touch_init(void);
 bool sq_touch_read(int *x, int *y);     // a finger is down (screen pixels); a tap between two reads shows once
 void sq_touch_fast(bool on);            // read the chip every 10 ms (screen on), else every 100 ms
+void sq_touch_sleep(bool on);           // stop reading the touch chip (the PWR button's off) / start again
 float sq_battery_volts(void);           // the cell's voltage from the power chip; 0 if no battery
 bool sq_plugged_in(void);               // USB power is present (a computer or a wall charger)
+int sq_power_key(void);                 // the PWR button since last asked: 0 none, 1 short press, 2 long press
 #include "battery.h"
 void sq_power_read(battery_diag_t *d);  // everything the power chip says about charging (a dozen register reads)
 void sq_amp(bool on);                   // the speaker's amplifier (through the expander): off unless something's playing
