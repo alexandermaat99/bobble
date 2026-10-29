@@ -41,7 +41,7 @@ enum {
     ID_NONE = 0, ID_SCAN, ID_PHONE, ID_EXIT, ID_BACK, ID_CANCEL, ID_NETWORKS, ID_FORGET,
     ID_SHIFT, ID_DEL, ID_SYM, ID_SPACE, ID_JOIN, ID_SHOW,
     ID_MENU, ID_WIFI, ID_CAL_TOUCH, ID_CAL_TILT, ID_BRIGHT, ID_LOCK, ID_RESET, ID_ERASE, ID_VOLUME, ID_BATTERY,
-    ID_RENAME, ID_CLEAR,
+    ID_RENAME, ID_CLEAR, ID_LOOK,
     ID_ROW = 100,     // + row index
     ID_KEY = 200,     // + character code
 };
@@ -128,9 +128,10 @@ static const button_t menu_buttons[] = {
     {CC_COL(0), CC_ROW(1), CC_COL(0) + CC_W, CC_ROW(1) + CC_H, ID_CAL_TILT, "Tilt"},
     {-100, -100, -100, -100, ID_LOCK, "Lock"},         // (off the glass: never hit)
     {CC_COL(2), CC_ROW(0), CC_COL(2) + CC_W, CC_ROW(1) + CC_H, ID_BRIGHT, ""},   // brightness: drag up and down
-    {CC_COL(0), CC_ROW(2), CC_COL(1) + CC_W, CC_ROW(2) + CC_H, ID_RESET, "Factory reset"},
+    {CC_COL(0), CC_ROW(2), CC_COL(0) + CC_W, CC_ROW(2) + CC_H, ID_RESET, "Reset"},
     {CC_COL(3), CC_ROW(0), CC_COL(3) + CC_W, CC_ROW(1) + CC_H, ID_VOLUME, ""},   // volume: likewise
     {CC_COL(2), CC_ROW(2), CC_COL(3) + CC_W, CC_ROW(2) + CC_H, ID_BATTERY, "Battery"},
+    {CC_COL(1), CC_ROW(2), CC_COL(1) + CC_W, CC_ROW(2) + CC_H, ID_LOOK, "Look"},   // Classic / Field
 };
 #define BAT_RH 30                                      // the battery page's rows: the charger's, then the About group
 #define BAT_G1 158
@@ -148,6 +149,7 @@ static const button_t menu_buttons[] = {
     {CX - 100, 396, CX + 100, 434, ID_RESET, "Factory reset"},
     {-100, -100, -100, -100, ID_VOLUME, ""},          // (no volume here: off the glass, never hit)
     {-100, -100, -100, -100, ID_BATTERY, ""},         // (nor a battery page)
+    {-100, -100, -100, -100, ID_LOOK, ""},            // (nor looks)
 };
 #endif
 #define ERASE_Y 262
@@ -731,10 +733,21 @@ static void draw_menu(uint16_t *buf, int y0, int h)
     speaker_icon(buf, y0, h, (vb->x0 + vb->x1) / 2.0f + 2, sy, 1.15f, vol == 0 ? -1 : vol < 50 ? 1 : 2,
                  sy > fy ? rgb(110, 110, 118) : rgb(200, 200, 206));
 
-    // Factory reset
+    // Factory reset, a small tile (it opens its own page, which explains and asks for a hold)
     const button_t *rb = &menu_buttons[5];
-    cc_wide(buf, y0, h, rb, rgb(255, 69, 58), "Factory reset", "Erase everything", CC_TEXT2, current_id() == ID_RESET);
-    bin_icon(buf, y0, h, rb->x0 + 38, (rb->y0 + rb->y1) / 2.0f, C_WHITE);
+    cc_small(buf, y0, h, rb, -1, rgb(255, 69, 58), "Reset", current_id() == ID_RESET);
+    bin_icon(buf, y0, h, (rb->x0 + rb->x1) / 2.0f, rb->y0 + 38, C_WHITE);
+
+    // Look: Classic, or Field (four colour squares in an orange disc when it's on)
+    const button_t *lk = &menu_buttons[8];
+    bool fl = ui_field();
+    cc_small(buf, y0, h, lk, -1, fl ? rgb(255, 102, 26) : CC_OFF, fl ? "Field" : "Classic", current_id() == ID_LOOK);
+    static const uint16_t sq[4][3] = {{36, 130, 255}, {38, 208, 124}, {255, 255, 255}, {255, 204, 0}};
+    float lx = (lk->x0 + lk->x1) / 2.0f, ly = lk->y0 + 38;
+    for (int i = 0; i < 4; i++) {
+        float qx = lx - 9 + (i % 2) * 10, qy = ly - 9 + (i / 2) * 10;
+        aa_rrect(buf, y0, h, qx, qy, qx + 8, qy + 8, 1.5f, rgb(sq[i][0], sq[i][1], sq[i][2]));
+    }
 
     // Battery: its level and what the charger's doing (green while charging); opens the charger's numbers
     const button_t *bb = &menu_buttons[7];
@@ -1174,6 +1187,7 @@ static int activate(int id)
     case ID_CAL_TILT: return WIFI_UI_CAL_TILT;
     case ID_RESET: view = V_RESET; break;
     case ID_BATTERY: view = V_BATTERY; break;
+    case ID_LOOK: ui_field_set(!ui_field()); break;
     case ID_RENAME:                                   // the keyboard, with the name as it is
         naming = true;
         strlcpy(password, agent_device_name(), sizeof password);
@@ -1225,6 +1239,7 @@ static int hit_test(int x, int y)
         if (x >= b->x0 && x < b->x1 && y >= b->y0 - 4 && y < b->y1 + 4) return ID_VOLUME;
         if (hit(&menu_buttons[5], 1, x, y)) return ID_RESET;
         if (hit(&menu_buttons[7], 1, x, y)) return ID_BATTERY;
+        if (hit(&menu_buttons[8], 1, x, y)) return ID_LOOK;
         int id = hit_pad(menu_buttons, 4, x, y, false);   // rows sit close together: a row you're on beats a neighbour's margin
         return id ? id : hit(menu_buttons, 4, x, y);
     }

@@ -10,6 +10,7 @@
 #include "gfx.h"
 #include "spotify.h"
 #include "library_ui.h"
+#include "screen.h"
 
 #define C_WHITE  rgb(255, 255, 255)
 #define C_GREY   rgb(150, 150, 168)
@@ -302,10 +303,23 @@ static void button(uint16_t *buf, int y0, int h, box_t b, bool hot, uint16_t bg)
     aa_rrect(buf, y0, h, b.x0, b.y0, b.x1, b.y1, 12, hot ? C_ROW_HI : bg);
 }
 
+// The Field look (Settings > Look): the same page in the calendar's colours and monospace capitals
+#define F_ORANGE rgb(255, 102, 26)
+#define F_GREY   rgb(118, 118, 126)
+#define F_DIM    rgb(56, 56, 62)
+#define F_PANEL  rgb(20, 20, 23)
+static void upper(char *t) { for (; *t; t++) if (*t >= 'a' && *t <= 'z') *t -= 32; }
+
+static void field_box(uint16_t *buf, int y0, int h, box_t b, bool hot, uint16_t rim)
+{
+    aa_rrect(buf, y0, h, b.x0, b.y0, b.x1, b.y1, 6, rim);
+    aa_rrect(buf, y0, h, b.x0 + 2, b.y0 + 2, b.x1 - 2, b.y1 - 2, 4, hot ? rgb(44, 44, 50) : F_PANEL);
+}
+
 static void draw_square(uint16_t *buf, int y0, int h)
 {
     char line[96], sub[64], t[16], l2[96];
-    bool pressed_any = down && !dragging;
+    bool pressed_any = down && !dragging, fl = ui_field();
     if (!s.configured) {
         ftext_mid(buf, y0, h, CX, 214, &font_body, "Library", C_WHITE);
         ftext_mid(buf, y0, h, CX, 256, &font_label, "Connect Spotify in the Bobble app", C_TEXT2);
@@ -313,12 +327,41 @@ static void draw_square(uint16_t *buf, int y0, int h)
     }
     if (view == V_DEVICES || view == V_EPISODES) {     // a back link, and the page's title in the middle
         bool hot = pressed_any && press_id == ID_BACK;
-        uint16_t c = hot ? rgb(20, 140, 64) : C_GREEN;
-        const char *back = view == V_DEVICES ? "Library" : "Shows";
+        uint16_t c = fl ? (hot ? rgb(255, 150, 90) : F_ORANGE) : hot ? rgb(20, 140, 64) : C_GREEN;
+        const char *back = view == V_DEVICES ? (fl ? "LIBRARY" : "Library") : fl ? "SHOWS" : "Shows";
+        const font_t *bf = fl ? &font_mono : &font_label;
         aa_icon(buf, y0, h, 24, 66, 22, ic_chev_l, 3, false, 2.4f, c);
-        draw_ftext(buf, y0, h, 36, 66 - font_label.line_h / 2, &font_label, back, c);
+        draw_ftext(buf, y0, h, 36, 66 - bf->line_h / 2, bf, back, c);
         fitw(line, sizeof line, view == V_DEVICES ? "Play on" : open_show_name, &font_label, W - 2 * 130);
         ftext_mid(buf, y0, h, CX, 66, &font_label, line, C_WHITE);
+    } else if (fl) {
+        // tabs: two words in capitals, the one showing in orange over an orange bar
+        const box_t *act = view == V_SHOWS ? &tab_pod : &tab_pl, *bx[2] = {&tab_pl, &tab_pod};
+        const char *lab[2] = {"PLAYLISTS", "PODCASTS"};
+        fill_rect(buf, y0, h, tab_pl.x0, tab_pl.y1 - 2, tab_pod.x1, tab_pl.y1, F_DIM);
+        for (int i = 0; i < 2; i++) {
+            bool sel = bx[i] == act, hot = pressed_any && press_id == (i ? ID_TAB_POD : ID_TAB_PL);
+            int mx = (bx[i]->x0 + bx[i]->x1) / 2;
+            ftext_mid(buf, y0, h, mx, (bx[i]->y0 + bx[i]->y1) / 2 - 2, &font_mono, lab[i],
+                      sel ? F_ORANGE : hot ? C_WHITE : F_GREY);
+            if (sel) fill_rect(buf, y0, h, bx[i]->x0 + 8, bx[i]->y1 - 4, bx[i]->x1 - 8, bx[i]->y1, F_ORANGE);
+        }
+        // shuffle and the device: outlined boxes, words in capitals (shuffle orange when on, grey for a podcast)
+        bool on = s.shuffle && !s.episode;
+        field_box(buf, y0, h, shuffle_btn, pressed_any && press_id == ID_SHUFFLE, on ? F_ORANGE : F_DIM);
+        int sy = (shuffle_btn.y0 + shuffle_btn.y1) / 2;
+        uint16_t sc = s.episode ? F_DIM : on ? F_ORANGE : C_WHITE;
+        int sw = 20 + 8 + ftext_width(&font_mono, "SHUFFLE"), scx = (shuffle_btn.x0 + shuffle_btn.x1) / 2;
+        shuffle_icon(buf, y0, h, scx - sw / 2 + 10, sy, sc);
+        draw_ftext(buf, y0, h, scx - sw / 2 + 28, sy - font_mono.line_h / 2 + 1, &font_mono, "SHUFFLE", sc);
+        field_box(buf, y0, h, device_btn, pressed_any && press_id == ID_DEVICE, F_DIM);
+        int dy = (device_btn.y0 + device_btn.y1) / 2;
+        speaker_icon(buf, y0, h, device_btn.x0 + 22, dy, 20, F_ORANGE);
+        strlcpy(l2, s.active && s.device[0] ? s.device : "Devices", sizeof l2);
+        upper(l2);
+        fitw(line, sizeof line, l2, &font_mono, device_btn.x1 - device_btn.x0 - 40 - 28);
+        draw_ftext(buf, y0, h, device_btn.x0 + 40, dy - font_mono.line_h / 2 + 1, &font_mono, line, C_WHITE);
+        aa_icon(buf, y0, h, device_btn.x1 - 18, dy, 16, ic_chev_r, 3, false, 2, F_GREY);
     } else {
         // segmented switch
         aa_rrect(buf, y0, h, tab_pl.x0, tab_pl.y0, tab_pod.x1, tab_pod.y1, 10, C_FILL);
@@ -351,7 +394,7 @@ static void draw_square(uint16_t *buf, int y0, int h)
     int n = rows();
     bool loading = (view == V_PLAYLISTS && n_pls < 0) || (view == V_SHOWS && n_shows < 0) ||
                    (view == V_EPISODES && (n_eps < 0 || strcmp(eps_show, open_show)));
-    if (loading) { ftext_mid(buf, y0, h, CX, 280, &font_label, "Loading...", C_TEXT2); return; }
+    if (loading) { ftext_mid(buf, y0, h, CX, 280, fl ? &font_mono : &font_label, fl ? "LOADING..." : "Loading...", fl ? F_GREY : C_TEXT2); return; }
     if (n == 0) {
         const char *msg = view == V_PLAYLISTS ? "No playlists" : view == V_SHOWS ? "No podcasts followed" :
                           view == V_EPISODES ? "No episodes" : "No devices found";
@@ -401,22 +444,24 @@ static void draw_square(uint16_t *buf, int y0, int h)
             strlcpy(sub, devs[i].type, sizeof sub);
             kind = 3;
         }
-        if (hot) fill_rect(buf, y0, h, 0, ry, W, ry + ROW_H, C_ROW_HI);
+        if (hot) fill_rect(buf, y0, h, 0, ry, W, ry + ROW_H, fl ? rgb(30, 30, 34) : C_ROW_HI);
         bool tiled = view != V_EPISODES;
         int tx = tiled ? PAD + SP_THUMB + 14 : PAD, right = W - PAD - (current ? 30 : 0);
-        uint16_t fg = current ? C_GREEN : dim ? rgb(100, 100, 108) : C_WHITE, fg2 = dim ? rgb(80, 80, 88) : C_TEXT2;
+        uint16_t fg = current ? (fl ? F_ORANGE : C_GREEN) : dim ? rgb(100, 100, 108) : C_WHITE, fg2 = dim ? rgb(80, 80, 88) : fl ? F_GREY : C_TEXT2;
+        const font_t *sf = &font_small;
+        if (fl) { upper(sub); sf = &font_mono_s; }      // (Field: the second line in monospace capitals)
         if (tiled) tile(buf, y0, h, PAD, ry + (ROW_H - SP_THUMB) / 2, kind, kind == 3 ? devs[i].type : name, spotify_thumb(thumb));
         if (view == V_EPISODES) {                       // episode titles are long: two lines of small text
             wrap2w(name, &font_small, right - tx, line, l2, sizeof line);
             int tall = l2[0] ? 61 : 42, ty = ry + (ROW_H - tall) / 2;
             draw_ftext(buf, y0, h, tx, ty, &font_small, line, fg);
             if (l2[0]) draw_ftext(buf, y0, h, tx, ty + 19, &font_small, l2, fg);
-            draw_ftext(buf, y0, h, tx, ty + tall - 19, &font_small, sub, fg2);
+            draw_ftext(buf, y0, h, tx, ty + tall - 19, sf, sub, fg2);
         } else {
             fitw(line, sizeof line, name, &font_label, right - tx);
             draw_ftext(buf, y0, h, tx, ry + 10, &font_label, line, fg);
-            fitw(l2, sizeof l2, sub, &font_small, right - tx);
-            draw_ftext(buf, y0, h, tx, ry + 35, &font_small, l2, fg2);
+            fitw(l2, sizeof l2, sub, sf, right - tx);
+            draw_ftext(buf, y0, h, tx, ry + 35, sf, l2, fg2);
         }
         if (current && view == V_DEVICES) {             // the device in use: a check mark
             static const float chk[] = {5, 12.5f, 10, 17.5f, 19, 7};
@@ -424,7 +469,7 @@ static void draw_square(uint16_t *buf, int y0, int h)
         } else if (current) {
             playing_mark(buf, y0, h, W - PAD - 16, ry + ROW_H / 2);
         }
-        if (!hot && i + 1 < n) fill_rect(buf, y0, h, tx, ry + ROW_H - 1, W, ry + ROW_H, C_SEP);   // hairline
+        if (!hot && i + 1 < n) fill_rect(buf, y0, h, tx, ry + ROW_H - 1, W, ry + ROW_H, fl ? rgb(34, 34, 38) : C_SEP);   // hairline
     }
     gfx_clip(0, H);
     int ms = max_scroll();

@@ -10,6 +10,7 @@
 #include "spotify.h"
 #include "spotify_ui.h"
 #include "spotify_logo.h"
+#include "screen.h"
 
 #define C_WHITE  rgb(255, 255, 255)
 #define C_GREY   rgb(170, 170, 185)
@@ -267,12 +268,164 @@ static void draw_square(uint16_t *buf, int y0, int h)
 }
 #endif
 
+#if !SCREEN_ROUND
+// ---------------------------------------------------------------- the Field look (Settings > Look)
+// Teenage Engineering-ish, like the calendar's: the cover where it always is, two tape reels either side of it (the
+// left one empties as the song plays, the right one fills, and they step round once a second while it plays), the
+// artist in orange capitals, the progress as a row of lit segments, and square buttons with an orange play.
+#define F_ORANGE rgb(255, 102, 26)
+#define F_GREY   rgb(118, 118, 126)
+#define F_DIM    rgb(56, 56, 62)
+#define F_PANEL  rgb(20, 20, 23)
+#define REEL_Y   (ART_Y + ART_SZ / 2)
+#define REEL_R   40
+#define REEL_TAPE_S 32.0f                       // how fast the tape runs (px a second at the edge of the tape wound on)
+#define REEL_US  50000                          // the reels turn 20 times a second, and only their boxes are redrawn
+
+static float reel_a[2];                         // the reels' angles (radians), turned while it plays
+static bool reels_moved;
+
+static float reel_tape(float fill) { return 14 + (REEL_R - 18) * (fill < 0 ? 0 : fill > 1 ? 1 : fill); }   // its radius
+
+static void upper(char *t) { for (; *t; t++) if (*t >= 'a' && *t <= 'z') *t -= 32; }
+
+static void field_grid(uint16_t *buf, int y0, int h)   // the dot grid, round the cover
+{
+    for (int y = y0 - y0 % 24 + 12; y < y0 + h; y += 24) {
+        if (y < y0) continue;
+        for (int x = 12; x < W; x += 24) {
+            if (x > ART_X - 4 && x < ART_X + ART_SZ + 4 && y > ART_Y - 4 && y < ART_Y + ART_SZ + 4) continue;
+            buf[(y - y0) * W + x] = rgb(34, 34, 38);
+        }
+    }
+}
+
+// a reel: its rim, the tape wound on it (fill 0..1), and the hub with three notches at angle a (radians)
+static void reel(uint16_t *buf, int y0, int h, float cx, float cy, float fill, float a)
+{
+    if (cy + REEL_R + 2 <= y0 || cy - REEL_R - 2 >= y0 + h) return;
+    aa_disc(buf, y0, h, cx, cy, REEL_R, F_DIM);
+    aa_disc(buf, y0, h, cx, cy, REEL_R - 2, 0);
+    float tr = reel_tape(fill);
+    aa_disc(buf, y0, h, cx, cy, tr, rgb(70, 46, 30));           // the tape: brown
+    aa_disc(buf, y0, h, cx, cy, 12, rgb(235, 235, 240));         // the hub
+    for (int k = 0; k < 3; k++) {
+        float b = a + k * 2 * (float)M_PI / 3, p[4] = {cx + 4 * sinf(b), cy - 4 * cosf(b), cx + 10 * sinf(b), cy - 10 * cosf(b)};
+        aa_path(buf, y0, h, p, 2, false, 3, 0);
+    }
+    aa_disc(buf, y0, h, cx, cy, 2.5f, 0);
+}
+
+static void field_reels(uint16_t *buf, int y0, int h, float p)
+{
+    reel(buf, y0, h, ART_X / 2.0f, REEL_Y, 1 - p, reel_a[0]);
+    reel(buf, y0, h, W - ART_X / 2.0f, REEL_Y, p, reel_a[1] + 0.5f);
+}
+
+// Turn the reels while it plays, like a cassette's: the tape runs at one speed, so the full reel turns slowly and the
+// nearly empty one fast
+static void reels_turn(int64_t now)
+{
+    static int64_t at;
+    if (!ui_field() || !s.active || !s.playing || s.duration_ms <= 0) { at = 0; return; }
+    if (at && now - at < REEL_US) return;
+    float dt = at ? fminf(0.25f, (now - at) / 1e6f) : 0;
+    at = now;
+    reel_a[0] += dt * REEL_TAPE_S / reel_tape(1 - progress);
+    reel_a[1] += dt * REEL_TAPE_S / reel_tape(progress);
+    for (int k = 0; k < 2; k++) if (reel_a[k] > 2 * (float)M_PI) reel_a[k] -= 2 * (float)M_PI;
+    if (dt > 0) reels_moved = true;
+}
+
+int spotify_ui_take_reels(int r[2][4])
+{
+    bool m = reels_moved;
+    reels_moved = false;
+    if (!m) return 0;
+    for (int k = 0; k < 2; k++) {
+        int cx = k ? W - ART_X / 2 : ART_X / 2;
+        r[k][0] = cx - REEL_R - 2; r[k][1] = REEL_Y - REEL_R - 2; r[k][2] = cx + REEL_R + 2; r[k][3] = REEL_Y + REEL_R + 2;
+    }
+    return 2;
+}
+bool spotify_ui_reels_dirty(void) { return reels_moved; }
+
+// a square button: dark with a rim, or (main) orange; pressed: lighter
+static void field_btn(uint16_t *buf, int y0, int h, const btn_t *b, bool main, bool on)
+{
+    uint16_t fill = main ? (on ? rgb(255, 150, 90) : F_ORANGE) : on ? rgb(50, 50, 56) : F_PANEL;
+    aa_rrect(buf, y0, h, b->x0, b->y0, b->x1, b->y1, main ? 12 : 9, main ? fill : F_DIM);
+    if (!main) aa_rrect(buf, y0, h, b->x0 + 2, b->y0 + 2, b->x1 - 2, b->y1 - 2, 7, fill);
+}
+
+static void draw_field_idle(uint16_t *buf, int y0, int h)
+{
+    field_grid(buf, y0, h);
+    field_reels(buf, y0, h, 0);
+    ftext_c(buf, y0, h, 300, &font_mono_l, s.configured ? "NOTHING PLAYING" : "NOT CONNECTED", rgb(235, 235, 240));
+    ftext_c(buf, y0, h, 344, &font_mono_s, s.configured ? "PLAY SOMETHING ON ANY DEVICE" : "CONNECT IT FROM THE BOBBLE APP ON YOUR MAC", F_GREY);
+    if (s.note[0]) ftext_c(buf, y0, h, 380, &font_small, s.note, F_ORANGE);
+}
+
+static void draw_field(uint16_t *buf, int y0, int h)
+{
+    char line[96], l1[96];
+    field_grid(buf, y0, h);
+    if (!spotify_art(&(uint32_t){0}))                   // cover still loading: a dark tile where it goes
+        fill_rrect(buf, y0, h, ART_X, ART_Y, ART_X + ART_SZ, ART_Y + ART_SZ, 18, F_PANEL);
+    field_reels(buf, y0, h, s.duration_ms > 0 ? progress : 0);
+    strlcpy(line, s.title, sizeof line);
+    ascii(line);
+    fitw(l1, sizeof l1, line, &font_label, W - 72);
+    ftext_c(buf, y0, h, ART_Y + ART_SZ + 12, &font_label, l1, C_WHITE);
+    strlcpy(line, s.artist, sizeof line);
+    ascii(line);
+    upper(line);
+    fitw(l1, sizeof l1, line, &font_mono_s, W - 72);
+    ftext_c(buf, y0, h, ART_Y + ART_SZ + 42, &font_mono_s, l1, F_ORANGE);
+    // the progress: segments, lit as far as it's got (the one it's in: orange), and the times over the ends
+    if (s.note[0]) ftext_c(buf, y0, h, BAR_Y - 28, &font_small, s.note, F_ORANGE);
+    if (s.duration_ms > 0) {
+        if (!s.note[0]) {
+            fmt_time(line, sizeof line, (int)(progress * s.duration_ms));
+            draw_ftext(buf, y0, h, BAR_X0, BAR_Y - 26, &font_mono_s, line, F_GREY);
+            fmt_time(line, sizeof line, s.duration_ms);
+            draw_ftext(buf, y0, h, BAR_X1 - ftext_width(&font_mono_s, line), BAR_Y - 26, &font_mono_s, line, F_GREY);
+        }
+        const int n = 48;
+        float sw = (BAR_X1 - BAR_X0) / (float)n;
+        int lit = (int)(progress * n);
+        for (int i = 0; i < n; i++) {
+            float x = BAR_X0 + i * sw;
+            aa_rrect(buf, y0, h, x, BAR_Y - 3, x + sw - 3, BAR_Y + 7, 1.2f, i < lit ? C_WHITE : i == lit ? F_ORANGE : rgb(40, 40, 44));
+        }
+    }
+    // controls: square buttons, the middle one orange
+    for (int i = 0; i < 3; i += 2) {
+        field_btn(buf, y0, h, &btns[i], false, pressed(btns[i].id));
+        float cx = (btns[i].x0 + btns[i].x1) / 2.0f;
+        if (s.episode) ftext_cx(buf, y0, h, (int)cx, CTRL_Y - 10, &font_mono_s, "10", C_WHITE);
+        else draw_skip(buf, y0, h, cx, CTRL_Y, i == 2, C_WHITE);
+    }
+    field_btn(buf, y0, h, &btns[1], true, pressed(ID_PLAY));
+    if (s.playing) {
+        static const float l[] = {9, 5, 9, 19}, r[] = {15, 5, 15, 19};
+        aa_icon(buf, y0, h, CX, CTRL_Y, 26, l, 2, false, 2.4f, 0);
+        aa_icon(buf, y0, h, CX, CTRL_Y, 26, r, 2, false, 2.4f, 0);
+    } else {
+        static const float tri[] = {7, 4, 19, 12, 7, 20};
+        aa_icon(buf, y0, h, CX + 1.5f, CTRL_Y, 26, tri, 3, true, 2.4f, 0);
+    }
+}
+#endif
+
 void spotify_ui_draw(uint16_t *buf, int y0, int h)
 {
     char line[64], l1[48], l2[48];
     if (!s.configured || !s.active) {
 #if !SCREEN_ROUND
-        draw_square_idle(buf, y0, h);
+        if (ui_field()) draw_field_idle(buf, y0, h);
+        else draw_square_idle(buf, y0, h);
         return;
 #endif
         text_c(buf, y0, h, 150, 3, "Spotify", C_GREEN);
@@ -288,7 +441,8 @@ void spotify_ui_draw(uint16_t *buf, int y0, int h)
     }
 
 #if !SCREEN_ROUND
-    draw_square(buf, y0, h);
+    if (ui_field()) draw_field(buf, y0, h);
+    else draw_square(buf, y0, h);
 #else
     // track
     strlcpy(line, s.title, sizeof line);
@@ -361,6 +515,9 @@ void spotify_ui_update(int tx, int ty, int64_t now_us)
     } else {
         progress = 0;
     }
+#if !SCREEN_ROUND
+    reels_turn(now_us);
+#endif
     if (tx >= 0 && !down) {
         down = true;
         press_x = tx; press_y = ty;

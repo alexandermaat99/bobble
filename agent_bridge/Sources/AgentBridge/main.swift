@@ -44,6 +44,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
             s.onChange = { [weak self, weak s] in       // (a simulator that's just started, or restarted, has no chats yet)
                 guard let self, let s, case .found = s.status else { return }
                 for c in self.chats.all.values where c.state != .idle { s.send(chat: c.id, self.chats.payload(c)) }
+                if s.sim?.name == Device.square.name { s.setLook(self.look) }   // (a simulator forgets its settings)
             }
             s.start()
         }
@@ -135,6 +136,17 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         key.toolTip = "Talk with Claude from the chat page on your square Bobble (swipe right from the chats)."
         menu.addItem(key)
         menu.addItem(.separator())
+
+        menu.addItem(header("Display Style"))
+        for (title, l) in [("Apple", "classic"), ("Teenage Engineering", "field")] {
+            let it = action(title, #selector(chooseLook(_:)))
+            it.representedObject = l
+            it.state = look == l ? .on : .off
+            it.toolTip = "How Bobble Square looks. Settings › Look on the display changes it too."
+            menu.addItem(it)
+        }
+        device.fetchLook { l in if let l { UserDefaults.standard.set(l, forKey: "look") } }   // (the board's own Look
+        menu.addItem(.separator())                                                             // tile may have changed it)
 
         menu.addItem(header("Show Chats From"))
         menu.addItem(source("Claude Code", on: Hooks.installed(), #selector(installHooks), #selector(removeHooks)))
@@ -288,6 +300,16 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
             guard c.runModal() == .alertFirstButtonReturn else { return }
         }
         KeyStore.set(k, file: "anthropic-key")
+    }
+
+    // The square's look, "field" or "classic": as the board last said, or as last chosen here
+    private var look: String { UserDefaults.standard.string(forKey: "look") ?? "field" }
+
+    @objc private func chooseLook(_ sender: NSMenuItem) {
+        guard let l = sender.representedObject as? String else { return }
+        UserDefaults.standard.set(l, forKey: "look")
+        device.setLook(l)
+        for s in sims where s.sim?.name == Device.square.name { s.setLook(l) }
     }
 
     @objc private func toggleHide() {

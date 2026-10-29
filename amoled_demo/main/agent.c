@@ -12,6 +12,8 @@
 #include <time.h>
 #include "esp_mac.h"
 #include "wifi_setup.h"
+#include "gfx.h"
+#include "screen.h"
 #include "agent.h"
 #include "chat.h"
 #include "secrets.h"
@@ -251,6 +253,7 @@ static esp_err_t info_get(httpd_req_t *req)
     cJSON_AddNumberToObject(j, "fw", (double)BOBBLE_BUILD);   // which release build (0: an everyday build)
     if (chat_port()) cJSON_AddNumberToObject(j, "chat", chat_port());
     cJSON_AddNumberToObject(j, "rssi", wifi_rssi());   // the Wi-Fi signal now (dBm, 0: not connected)   // it can talk: where the Mac connects for that
+    if (!SCREEN_ROUND) cJSON_AddStringToObject(j, "look", ui_field() ? "field" : "classic");   // (the square's style)
 #ifdef BOBBLE_RELEASE
     cJSON_AddBoolToObject(j, "release", true);
 #else
@@ -294,6 +297,21 @@ void agent_set_name(const char *in)
     dev_name[0] = 0;
     wifi_set_name(agent_device_name());
     ESP_LOGI(TAG, "named \"%s\"", agent_device_name());
+}
+
+// POST /look {"look": "field" | "classic"}: the square's style, from the Mac app (Settings > Look on the board too)
+static esp_err_t look_post(httpd_req_t *req)
+{
+    if (!agent_token_ok(req)) { httpd_resp_set_status(req, "403 Forbidden"); return httpd_resp_sendstr(req, "bad token\n"); }
+    char body[64];
+    if (read_body(req, body, sizeof body) < 0) return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad size");
+    cJSON *j = cJSON_Parse(body), *l = cJSON_GetObjectItem(j, "look");
+    if (cJSON_IsString(l)) {
+        ui_field_set(!strcmp(l->valuestring, "field"));
+        ESP_LOGI(TAG, "look: %s", l->valuestring);
+    }
+    cJSON_Delete(j);
+    return info_get(req);
 }
 
 // POST /agent/answers {"sessions": ["…", …]}: the choices tapped for these chats (the asking Mac's own), as
@@ -421,6 +439,7 @@ void agent_register(httpd_handle_t server)
         {.uri = "/pair/cancel", .method = HTTP_POST, .handler = pair_cancel},
         {.uri = "/info", .method = HTTP_GET, .handler = info_get},
         {.uri = "/name", .method = HTTP_POST, .handler = name_post},
+        {.uri = "/look", .method = HTTP_POST, .handler = look_post},
     };
     for (int i = 0; i < (int)(sizeof u / sizeof u[0]); i++) httpd_register_uri_handler(server, &u[i]);
 }

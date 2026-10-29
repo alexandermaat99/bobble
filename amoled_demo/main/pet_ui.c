@@ -22,6 +22,7 @@
 #include "agent.h"
 #include "icons_ui.h"
 #include "sprites_ui.h"
+#include "screen.h"
 
 #define EYE_GAP 88          // eye centres sit this far either side of the middle
 #define EYE_D   124         // eye diameter
@@ -1750,9 +1751,27 @@ static void crowd_logo(uint16_t *buf, int y0, int h, const char *agent, int x, i
     disc(buf, y0, h, x, y, 7, 0, c, 1);
 }
 
+// The Field look (Settings > Look): the dot grid and a dashed floor, and each bubble a dark panel with a rim in its
+// state's colour (blue working, orange needs you, green done, grey stopped) and the state set into the rim in mono
+// capitals, like a labelled panel; titles in mono capitals
+static const float field_pal[2][6] = {{20, 20, 23, 235, 235, 240}, {20, 20, 23, 150, 150, 160}};
+static const int field_rim[5][3] = {{56, 56, 62}, {36, 130, 255}, {255, 102, 26}, {38, 208, 124}, {118, 118, 126}};
+static const char *const field_tag[5] = {"", "WORKING", "NEEDS YOU", "DONE", "STOPPED"};
+
+static void crowd_field_bg(uint16_t *buf, int y0, int h)
+{
+    for (int y = y0 - y0 % 24 + 12; y < y0 + h; y += 24) {
+        if (y < y0) continue;
+        for (int x = 12; x < W; x += 24) buf[(y - y0) * W + x] = rgb(34, 34, 38);
+    }
+    for (int x = 12; x < W - 12; x += 10) fill_rect(buf, y0, h, x, CROWD_FEET + 3, x + 5, CROWD_FEET + 5, rgb(56, 56, 62));
+}
+
 static void crowd_draw(uint16_t *buf, int y0, int h)
 {
     const font_t *f = &font_label;
+    bool fl = ui_field();
+    if (fl) crowd_field_bg(buf, y0, h);
     for (int pass = 0; pass < 2 * CROWD_POOL; pass++) {   // the waiting line first (behind), then the ones up front
         int i = pass % CROWD_POOL;
         const mascot_t *ms = &crowd[i];
@@ -1771,6 +1790,7 @@ static void crowd_draw(uint16_t *buf, int y0, int h)
         float k = clampf(ms->k, 0, 1), a = k * k;     // (grows in from black)
         int st = c->state >= AG_WORKING && c->state <= AG_STOPPED ? c->state : AG_WORKING;
         const float *pal = host ? (c->state == AG_WAITING ? crowd_pal[AG_WAITING] : quiet) : resting ? crowd_pal[AG_STOPPED] : crowd_pal[st];
+        if (fl) pal = field_pal[!host && (resting || st == AG_STOPPED)];
         bool light = pal[0] > 128;
         float dimk = st == AG_STOPPED && !host ? 0.5f : resting ? 0.6f : 1;
         if (host && !c->bubble) {                     // the host with nothing to say: just itself
@@ -1784,11 +1804,14 @@ static void crowd_draw(uint16_t *buf, int y0, int h)
         int x0 = asking ? 8 : (int)lroundf(ms->x - ms->cw / 2 + 8), x1 = asking ? W - 8 : (int)lroundf(ms->x + ms->cw / 2 - 8);
         int tw = x1 - x0 - 2 * CROWD_PAD;
         int y1 = CROWD_HEAD - 18;
-        const font_t *tf = &font_small;               // the title: small, wrapped beside the logo, all of it (titles are
-        const char *tline[4];                         // under 48 characters: four narrow lines hold any)
+        const font_t *tf = fl ? &font_mono_s : &font_small;   // the title: small, wrapped beside the logo, all of it
+        const char *tline[4];                         // (titles are under 48 characters: four narrow lines hold any)
         int tlen[4];
         bool tcut;
-        int tn = host ? 0 : crowd_wrap(c->title[0] ? c->title : c->project, tf, tw - 30, tline, tlen, 4, &tcut);
+        char tt[sizeof c->title > sizeof c->project ? sizeof c->title : sizeof c->project];
+        strlcpy(tt, c->title[0] ? c->title : c->project, sizeof tt);
+        if (fl) for (char *q = tt; *q; q++) if (*q >= 'a' && *q <= 'z') *q -= 32;
+        int tn = host ? 0 : crowd_wrap(tt, tf, tw - 30, tline, tlen, 4, &tcut);
         int title_h = host ? 0 : (tn ? tn : 1) * tf->line_h + (resting ? 0 : 8);   // (the host: no title; resting: only one)
         // waiting on a choice: one each, stacked, in the bubble over the question (ASK_STYLE 1: pills) or a numbered
         // list over the bubble (2); they take their room from its words
@@ -1803,9 +1826,23 @@ static void crowd_draw(uint16_t *buf, int y0, int h)
         int nl = resting ? 0 : crowd_wrap(c->detail, f, tw, line, len, room < CROWD_LINES ? room : CROWD_LINES, &cut);
         int yb0 = y1 - 2 * CROWD_PAD - title_h - nl * f->line_h - inner;
         uint16_t bg = rgb((int)(pal[0] * a), (int)(pal[1] * a), (int)(pal[2] * a));
-        fill_rrect(buf, y0, h, x0, yb0, x1, y1, 16, bg);
         int tx = (int)lroundf(ms->x);
-        fill_tri(buf, y0, h, tx - 9, y1 - 1, tx + 9, y1 - 1, tx, y1 + 12, bg);
+        if (fl) {                                     // a rim in its state's colour, the state set into it
+            const int *rc = field_rim[host ? 0 : resting ? AG_STOPPED : st];
+            uint16_t rim = rgb((int)(rc[0] * a), (int)(rc[1] * a), (int)(rc[2] * a));
+            fill_rrect(buf, y0, h, x0, yb0, x1, y1, 6, rim);
+            fill_rrect(buf, y0, h, x0 + 2, yb0 + 2, x1 - 2, y1 - 2, 4, bg);
+            fill_tri(buf, y0, h, tx - 10, y1 - 1, tx + 10, y1 - 1, tx, y1 + 13, rim);
+            const char *tag = host ? "" : field_tag[resting ? AG_STOPPED : st];
+            int gw = ftext_width(&font_mono_s, tag);
+            if (gw && gw + 40 < x1 - x0) {
+                fill_rect(buf, y0, h, x1 - 22 - gw, yb0, x1 - 10, yb0 + 2, 0);
+                draw_ftext(buf, y0, h, x1 - 16 - gw, yb0 + 1 - font_mono_s.line_h / 2, &font_mono_s, tag, rim);
+            }
+        } else {
+            fill_rrect(buf, y0, h, x0, yb0, x1, y1, 16, bg);
+            fill_tri(buf, y0, h, tx - 9, y1 - 1, tx + 9, y1 - 1, tx, y1 + 12, bg);
+        }
         int lc[3];                                    // the logo and title in the chat's colour (darker on a light bubble)
         for (int q = 0; q < 3; q++) lc[q] = (int)(cc[q] * (light ? 0.5f : 1) * a);
         int ty = yb0 + CROWD_PAD + inner;
@@ -1831,7 +1868,9 @@ static void crowd_draw(uint16_t *buf, int y0, int h)
             float mix = other ? 0.7f : 0;             // tapped: the others fade into the bubble
             int pc[3];
             for (int q = 0; q < 3; q++) { pc[q] = (int)(lc[q] + (pal[q] * a - lc[q]) * mix); tcol[q] = (int)((255 + (pal[q] - 255) * mix) * a); }
-            fill_rrect(buf, y0, h, px0, pt, px1, pb, ph / 2, rgb(pc[0], pc[1], pc[2]));
+            if (fl)                                   // (Field: orange keys, dark lettering)
+                for (int q = 0; q < 3; q++) { pc[q] = (int)((field_rim[AG_WAITING][q] + (pal[q] - field_rim[AG_WAITING][q]) * mix) * a); tcol[q] = (int)((14 + 136 * mix) * a); }
+            fill_rrect(buf, y0, h, px0, pt, px1, pb, fl ? 4 : ph / 2, rgb(pc[0], pc[1], pc[2]));
             strlcpy(lab, c->opt[o], sizeof lab);
 #else
             static const int green[3] = {80, 210, 110};
@@ -1869,13 +1908,15 @@ static void crowd_draw(uint16_t *buf, int y0, int h)
     }
     if (ask_n > 1) {                                  // others waiting on a choice too, after this one: top middle (the clock
         char t[16];                                   // has the left corner)
-        snprintf(t, sizeof t, "1 of %d", ask_n);
-        draw_ftext(buf, y0, h, CX - ftext_width(&font_small, t) / 2, 17, &font_small, t, rgb(150, 150, 162));
+        snprintf(t, sizeof t, fl ? "1 OF %d" : "1 of %d", ask_n);
+        const font_t *af = fl ? &font_mono_s : &font_small;
+        draw_ftext(buf, y0, h, CX - ftext_width(af, t) / 2, 17, af, t, rgb(150, 150, 162));
     }
     if (crowd_more) {                                 // more chats than room: how many more, bottom right
         char t[8];
         snprintf(t, sizeof t, "+%d", crowd_more);
-        draw_ftext(buf, y0, h, W - 14 - ftext_width(f, t), H - 34, f, t, rgb(120, 120, 132));
+        const font_t *mf = fl ? &font_mono : f;
+        draw_ftext(buf, y0, h, W - 14 - ftext_width(mf, t), H - (fl ? 44 : 34), mf, t, fl ? rgb(255, 102, 26) : rgb(120, 120, 132));
     }
 }
 #endif
