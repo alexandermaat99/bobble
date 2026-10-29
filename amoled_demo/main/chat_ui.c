@@ -32,8 +32,8 @@
 #define ORB_R 42
 #define ORB_GROW 14                                     // how much bigger it gets with the sound
 #define ORB_BOX 96                                      // the orb at its biggest, glow and all (r * 1.65)
-#define CAP_Y 248                                       // the line over the reply: what you said (or what's wrong)
-#define SAID_Y 274
+#define TEXT_TOP 238                                    // what you said (or what's wrong), then the reply, between
+#define TEXT_BOT 368                                    // the orb and the buttons
 #define BTN_Y 406
 #define MIC_R 34
 #define SIDE_R 30
@@ -60,10 +60,12 @@ static float level;                                     // how loud it is (eased
 // What's shown, wrapped to the glass once whenever it changes (draw just copies it out, strip by strip)
 #define LINE_CAP 72
 #define SAID_LINES 3                                    // (the rest of a long reply rolls up as it's spoken)
-EXT_RAM_BSS_ATTR static char heard_l[1][LINE_CAP], said_l[SAID_LINES][LINE_CAP];
+#define HEARD_LINES 5                                   // what you said: all of it while there's no reply, else 3 lines
+EXT_RAM_BSS_ATTR static char heard_l[HEARD_LINES][LINE_CAP], said_l[SAID_LINES][LINE_CAP];
+static int said_top = TEXT_TOP;                         // where the reply starts (under what you said)
 static int n_heard, n_said;
 static const font_t *said_f = &font_body;               // the reply's size: large, or smaller when it's long
-static bool heard_cut;                                  // what you said is longer than its line: "..." before it
+static bool heard_cut;                                  // what you said is longer than its lines: "..." before it
 
 // ---------------------------------------------------------------- text
 
@@ -119,15 +121,28 @@ static void refresh(void)
     chat_get(&cs);
     if (cs.version == seen_version) return;
     seen_version = cs.version;
-    char tmp[4][LINE_CAP];
-    int n = wrap(&font_small, cs.heard, W - 96, tmp, 4);   // (the end of what you said, if it's long)
-    heard_cut = n > 1;
-    n_heard = n > 0;
-    if (n) snprintf(heard_l[0], LINE_CAP, "%s", tmp[n - 1]);
-    // the reply: large if it fits in two lines, else smaller, three lines (the newest, as it's spoken)
+    // what you said, wrapped: all of it (5 lines) till Claude answers, then 3 lines; longer, its end with "..." first
     char all[24][LINE_CAP];
-    said_f = wrap(&font_body, cs.said, W - 56, all, 24) <= 2 ? &font_body : &font_label;
-    n_said = wrap(said_f, cs.said, W - 56, said_l, said_f == &font_body ? 2 : SAID_LINES);
+    int hn = wrap(&font_small, cs.heard, W - 96, all, 24), hmax = cs.said[0] ? 3 : HEARD_LINES;
+    n_heard = hn < hmax ? hn : hmax;
+    heard_cut = hn > hmax;
+    for (int i = 0; i < n_heard; i++) {
+        if (i == 0 && heard_cut) snprintf(heard_l[0], LINE_CAP, "...%s", all[hn - n_heard]);
+        else snprintf(heard_l[i], LINE_CAP, "%s", all[hn - n_heard + i]);
+    }
+    // the reply under it: large if it fits in two lines there, else smaller, as many lines as fit (the newest, as
+    // it's spoken)
+    int lines_above = cs.status[0] ? 1 : n_heard;
+    said_top = TEXT_TOP + lines_above * font_small.line_h + (lines_above ? 10 : 0);
+    int room = TEXT_BOT - said_top;
+    if (wrap(&font_body, cs.said, W - 56, all, 24) <= 2 && 2 * font_body.line_h <= room) {
+        said_f = &font_body;
+        n_said = wrap(said_f, cs.said, W - 56, said_l, 2);
+    } else {
+        said_f = &font_label;
+        int fit = room / font_label.line_h;
+        n_said = wrap(said_f, cs.said, W - 56, said_l, fit < 1 ? 1 : fit > SAID_LINES ? SAID_LINES : fit);
+    }
     dirty = true;
 }
 
@@ -310,18 +325,19 @@ void chat_ui_draw(uint16_t *buf, int y0, int h)
     }
 
     // what you said (or what's wrong), then what Claude's saying, or what's going on
-    if (cs.status[0] || n_heard) {
+    if (cs.status[0]) {
         char t[LINE_CAP + 4];
-        if (cs.status[0]) plain(t, sizeof t, cs.status);
-        else snprintf(t, sizeof t, "%s%s", heard_cut ? "..." : "", heard_l[0]);
-        text_mid(buf, y0, h, CAP_Y, &font_small, t, cs.status[0] ? C_ORANGE : C_LABEL2);
+        plain(t, sizeof t, cs.status);
+        text_mid(buf, y0, h, TEXT_TOP, &font_small, t, C_ORANGE);
+    } else {
+        for (int i = 0; i < n_heard; i++) text_mid(buf, y0, h, TEXT_TOP + i * font_small.line_h, &font_small, heard_l[i], C_LABEL2);
     }
     if (n_said) {
-        for (int i = 0; i < n_said; i++) text_mid(buf, y0, h, SAID_Y + i * said_f->line_h, said_f, said_l[i], C_WHITE);
-    } else {
+        for (int i = 0; i < n_said; i++) text_mid(buf, y0, h, said_top + i * said_f->line_h, said_f, said_l[i], C_WHITE);
+    } else if (said_top + font_label.line_h <= TEXT_BOT) {
         const char *hint = !cs.active ? (cs.mac ? "Tap to talk to Claude" : "Open Bobble on your Mac to talk")
                          : cs.muted ? "You're muted" : cs.state == CS_THINKING ? "Thinking..." : "Listening...";
-        text_mid(buf, y0, h, SAID_Y + 8, &font_label, hint, C_LABEL3);
+        text_mid(buf, y0, h, said_top + (n_heard ? 0 : 8), &font_label, hint, C_LABEL3);
     }
 
     if (BTN_Y + MIC_R + 40 >= y0 && BTN_Y - MIC_R <= y0 + h) {

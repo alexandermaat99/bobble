@@ -33,7 +33,7 @@ typedef struct {
     bool muted;                // the microphones are muted (the chat goes on)
     bool speaker_muted;
     int state;                 // CS_*: what Claude is doing, as the Mac says
-    char heard[200];           // what you said last
+    char heard[600];           // what you said last (all of it: a long sentence lost its end at 200)
     char said[400];            // what Claude is saying (or said last)
     char status[96];           // what it's doing, or what's wrong
     int n_models, model;       // the models to pick from, and the one in use
