@@ -18,7 +18,7 @@ static const char *TAG = "reminders";
 #define MAX_SAVED 16                          // kept in NVS (it's small) so a reboot doesn't blank the list until the Mac's next send
 EXT_RAM_BSS_ATTR static reminder_t rems[MAX_REM];
 static int n_rems;
-static char done_ids[MAX_DONE][96];   // ticked on the board, waiting for the Mac to complete them
+EXT_RAM_BSS_ATTR static char done_ids[MAX_DONE][96];   // ticked on the board, waiting for the Mac to complete them
 static int n_done;
 static SemaphoreHandle_t lock;
 

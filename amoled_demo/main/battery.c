@@ -13,6 +13,8 @@
 #include "driver/usb_serial_jtag.h"
 #include "battery.h"
 #include "board_square.h"
+#include "esp_attr.h"
+#include "esp_heap_caps.h"
 
 static const char *TAG = "battery";
 static adc_oneshot_unit_handle_t adc;
@@ -89,13 +91,13 @@ static int below_max;                 // highest reading while below the shown %
 
 // Flash writes pause both cores' access to PSRAM for a moment, which would show as a hitch if done here on the
 // render loop: keep a copy and let a small background task write it
-static struct { const char *key; uint8_t data[sizeof lg]; size_t len; bool pending, erase; } slots[3];
+EXT_RAM_BSS_ATTR static struct { const char *key; uint8_t data[sizeof lg]; size_t len; bool pending, erase; } slots[3];
 static SemaphoreHandle_t slot_lock;
 static TaskHandle_t writer;
 
 static void writer_task(void *arg)
 {
-    static uint8_t copy[sizeof lg];
+    EXT_RAM_BSS_ATTR static uint8_t copy[sizeof lg];
     for (;;) {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
         for (int i = 0; i < 3; i++) {
@@ -271,7 +273,11 @@ void battery_init(void)
     have_cali = adc_cali_create_scheme_curve_fitting(&cc, &cali) == ESP_OK;
 #endif
     slot_lock = xSemaphoreCreateMutex();
+#if CONFIG_SPIRAM_XIP_FROM_PSRAM   // (stack in PSRAM where code runs from there, as on the square: flash writes don't pause it)
+    xTaskCreateWithCaps(writer_task, "batt_nvs", 4096, NULL, 1, &writer, MALLOC_CAP_SPIRAM);
+#else
     xTaskCreate(writer_task, "batt_nvs", 4096, NULL, 1, &writer);
+#endif
     ok = true;
 }
 

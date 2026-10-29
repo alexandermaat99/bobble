@@ -18,6 +18,7 @@
 #include "esp_timer.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
+#include "esp_attr.h"
 #include "esp_lcd_panel_io.h"
 #include "esp_lcd_panel_ops.h"
 #include "esp_lcd_sh8601.h"
@@ -210,12 +211,12 @@ static float wrap180(float a)
 
 // Point the content's "down" along gravity. Lying flat keeps the current angle; wobbles under 3
 // degrees are ignored, and anything within 5 degrees of straight snaps to it so text stays crisp.
-// Point the content's "down" along gravity. Lying flat keeps the current angle; wobbles under 3
-// degrees are ignored, and anything within 5 degrees of straight snaps to it so text stays crisp.
+// The square turns only in quarter turns (a tilted square would lose its corners), once it's tipped well
+// past 45 degrees, and only after a tilt calibration has mapped how its sensor sits.
 static void update_orientation(void)
 {
 #if SQUARE_HW
-    return;                                           // (the 4" board stays upright: its sensor's mounting isn't mapped yet)
+    if (imu_cal.magic != IMU_CAL_MAGIC) return;      // (uncalibrated: stays upright)
 #endif
     float up[3];
     imu_up(up);
@@ -223,6 +224,10 @@ static void update_orientation(void)
     if (sqrtf(gx * gx + gy * gy) < 0.45f) return;     // too flat to tell
     float a = atan2f(-gx, gy) * 180 / (float)M_PI;    // content down = (-sin a, cos a)
     float nearest = roundf(a / 90) * 90;
+#if SQUARE_HW
+    if (fabsf(wrap180(a - ang_target)) > 60) ang_target = wrap180(nearest);
+    return;
+#endif
     if (fabsf(a - nearest) < 5) a = nearest;
     if (fabsf(wrap180(a - ang_target)) > 3) ang_target = wrap180(a);
 }
@@ -543,7 +548,7 @@ static void touch_cal_update(bool down, int rx, int ry, int64_t now)
 {
     static bool was;
     static int64_t t_down;
-    static struct { int x, y; int64_t t; } smp[64];
+    EXT_RAM_BSS_ATTR static struct { int x, y; int64_t t; } smp[64];
     static int ns;
     if (down && !was) { t_down = now; ns = 0; }
     if (down && ns < 64) { smp[ns].x = rx; smp[ns].y = ry; smp[ns].t = now; ns++; }
@@ -1290,6 +1295,10 @@ static void render_frame(bool content)
         snap_page[0] = page;
         snap_time[0] = esp_timer_get_time();
     }
+    // the card's own picture, only while it slides (460 KB of PSRAM: it's drawn afresh for each slide anyway); none to
+    // be had, it's drawn straight onto each frame instead
+    if (card_snap && !card_img) card_img = heap_caps_malloc(W * H * 2, MALLOC_CAP_SPIRAM);
+    else if (!card_snap && card_img) { free(card_img); card_img = NULL; }
     bool card_moving = card_snap && card_img;
     if (card_moving && !card_cached) {
         for (int y0 = 0; y0 < H; y0 += STRIP) {
@@ -1413,9 +1422,6 @@ void app_main(void)
     if (locked) power = PW_FADING_OUT;                 // restarted while locked: straight back to sleep
     frame = heap_caps_malloc(W * H * 2, MALLOC_CAP_SPIRAM);
     for (int i = 0; i < 3; i++) snap_buf[i] = heap_caps_malloc(W * H * 2, MALLOC_CAP_SPIRAM);
-#if !SCREEN_ROUND
-    card_img = heap_caps_malloc(W * H * 2, MALLOC_CAP_SPIRAM);
-#endif
     for (int i = 0; i < 20; i++) { imu_read(); vTaskDelay(pdMS_TO_TICKS(5)); }
     update_orientation();
     ang = ang_target;                                 // start in the right orientation, no spin

@@ -25,6 +25,8 @@
 #include "reminders.h"
 #include "remote_log.h"
 #include "mdns.h"
+#include "esp_attr.h"
+#include "esp_heap_caps.h"
 
 static const char *TAG = "wifi";
 
@@ -35,7 +37,7 @@ static volatile wifi_state_t state = WS_PORTAL;
 static char sta_ssid[33], ip_str[16] = "", ap_ssid[33], ap_pass[9];
 static volatile int ap_clients, retries;
 static volatile bool ap_running, time_synced, last_auth_failed;
-static wifi_ap_record_t aps[MAX_APS];
+EXT_RAM_BSS_ATTR static wifi_ap_record_t aps[MAX_APS];
 static uint16_t ap_count;
 static volatile bool scanning, retries_paused, suspended;
 static portMUX_TYPE aps_lock = portMUX_INITIALIZER_UNLOCKED;
@@ -47,7 +49,7 @@ static void go_portal(void);
 // ---------------------------------------------------------------- remembered networks, most recent first
 #define MAX_SAVED 5
 typedef struct { char ssid[33], pass[65]; } saved_net_t;
-static saved_net_t saved[MAX_SAVED];
+EXT_RAM_BSS_ATTR static saved_net_t saved[MAX_SAVED];
 static int n_saved;
 static volatile bool picking;         // a scan is under way to choose a remembered network
 static int64_t picked_at;
@@ -193,7 +195,7 @@ void wifi_scan(void)
 
 static void scan_done(void)
 {
-    static wifi_ap_record_t tmp[MAX_APS];
+    EXT_RAM_BSS_ATTR static wifi_ap_record_t tmp[MAX_APS];
     uint16_t n = MAX_APS;
     if (esp_wifi_scan_get_ap_records(&n, tmp) != ESP_OK) n = 0;
     // strongest first, one entry per network name
@@ -496,6 +498,9 @@ static void start_web(void)
 {
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.stack_size = 6144;
+#if CONFIG_SPIRAM_XIP_FROM_PSRAM   // (stack in PSRAM where code runs from there, as on the square: OTA's flash writes don't pause it)
+    cfg.task_caps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
+#endif
     cfg.lru_purge_enable = true;
     cfg.max_uri_handlers = 24;
     if (httpd_start(&httpd, &cfg) != ESP_OK) return;
@@ -602,7 +607,11 @@ void wifi_setup_start(void)
         mdns_txt_item_t txt[] = {{"api", "1"}, {"path", "/agent"}, {"id", agent_device_id()}};
         mdns_service_add(agent_device_name(), "_bobble", "_tcp", 80, txt, 3);
     }
+#if CONFIG_SPIRAM_XIP_FROM_PSRAM
+    xTaskCreateWithCaps(dns_task, "dns", 3072, NULL, 4, NULL, MALLOC_CAP_SPIRAM);
+#else
     xTaskCreate(dns_task, "dns", 3072, NULL, 4, NULL);
+#endif
 }
 
 // Renamed in the app: the adverts say the new name

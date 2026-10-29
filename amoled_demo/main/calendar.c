@@ -75,7 +75,7 @@ static void set_urls(const char *list)
 
 static void load_urls(void)
 {
-    static char list[MAX_CAL * URL_LEN];
+    EXT_RAM_BSS_ATTR static char list[MAX_CAL * URL_LEN];
     size_t len = sizeof list;
     nvs_handle_t h;
     list[0] = 0;
@@ -113,7 +113,8 @@ static esp_err_t cal_get(httpd_req_t *req)
 static esp_err_t cal_post(httpd_req_t *req)
 {
     if (!agent_token_ok(req)) { httpd_resp_set_status(req, "403 Forbidden"); return httpd_resp_sendstr(req, "bad token\n"); }
-    static char body[MAX_CAL * URL_LEN + 256], list[MAX_CAL * URL_LEN];
+    EXT_RAM_BSS_ATTR static char body[MAX_CAL * URL_LEN + 256];
+    EXT_RAM_BSS_ATTR static char list[MAX_CAL * URL_LEN];
     int got = 0;
     if (req->content_len <= 0 || req->content_len >= (int)sizeof body) return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad size");
     while (got < req->content_len) {
@@ -192,7 +193,7 @@ static bool fetch_one(int k, time_t from, time_t to, char *why, size_t why_len)
 
     bool ok = false;
     ical_parser_t *p = NULL;
-    static char buf[2048];
+    EXT_RAM_BSS_ATTR static char buf[2048];
     esp_err_t err = esp_http_client_open(c, 0);
     if (err != ESP_OK) { snprintf(why, why_len, "can't connect (%s)", esp_err_to_name(err)); goto done; }
     esp_http_client_fetch_headers(c);

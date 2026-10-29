@@ -2,6 +2,7 @@
 #include <math.h>
 #include "audio.h"
 #include "board_square.h"
+#include "esp_attr.h"
 
 // Loudness of a stretch of samples as 0..1 (about -55 dBFS to -10 dBFS), eased so it rises quickly and falls slowly
 static void level_update(volatile float *lvl, const int16_t *pcm, int n)
@@ -58,7 +59,7 @@ static volatile float mic_lvl, out_lvl;
 static int16_t *ring;
 static int ring_cap;                     // samples it holds: a few seconds of reply waiting to be played (the Mac keeps 2 s ahead)
 static volatile int ring_r, ring_n;      // read position, how many queued
-static int16_t click[AUDIO_RATE * 60 / 1000], quiet[AUDIO_RATE * 30 / 1000];
+EXT_RAM_BSS_ATTR static int16_t click[AUDIO_RATE * 60 / 1000], quiet[AUDIO_RATE * 30 / 1000];
 static volatile bool click_wanted;       // audio_click() asked for one...
 static int click_at = -1;                // ...and how far into it a chat's frames have got (-1: not playing)
 static bool out_only;                    // just the speaker is open, for ticks (no chat)
