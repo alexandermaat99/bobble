@@ -346,21 +346,29 @@ static void prefetch_next(void)
     ESP_LOGI(TAG, "preloaded next cover (%d bytes, %d ms)", n, (int)((esp_timer_get_time() - t0) / 1000));
 }
 
+// A downloaded JPEG and its decoding (640x640 or smaller), shared by the covers and the Library's thumbnails
+#define JPG_CAP (400 * 1024)
+static uint8_t *jpg;
+static uint16_t *raw;
+
+static bool jpeg_bufs(void)
+{
+    if (!jpg) jpg = heap_caps_malloc(JPG_CAP, MALLOC_CAP_SPIRAM);
+    if (!raw) raw = heap_caps_malloc(640 * 640 * 2, MALLOC_CAP_SPIRAM);
+    return jpg && raw;
+}
+
 static void load_art(const char *url)
 {
-    static uint8_t *jpg;
-    static uint16_t *raw;                             // decoded 640x640 (or smaller)
-    if (!jpg) jpg = heap_caps_malloc(400 * 1024, MALLOC_CAP_SPIRAM);
-    if (!raw) raw = heap_caps_malloc(640 * 640 * 2, MALLOC_CAP_SPIRAM);
     for (int i = 0; i < 2; i++)
         if (!art[i]) art[i] = heap_caps_malloc(W * H * 2, MALLOC_CAP_SPIRAM);
-    if (!jpg || !raw || !art[0] || !art[1]) return;
+    if (!jpeg_bufs() || !art[0] || !art[1]) return;
 
     int64_t t0 = esp_timer_get_time();
     bool preloaded = pre_len > 0 && !strcmp(url, pre_url);
     int len;
     if (preloaded) memcpy(jpg, pre_jpg, len = pre_len);
-    else len = download(url, jpg, 400 * 1024, false);
+    else len = download(url, jpg, JPG_CAP, false);
     if (len < 100) { ESP_LOGW(TAG, "art download failed (%d)", len); return; }
 
     esp_jpeg_image_cfg_t jc = {
@@ -416,6 +424,164 @@ static void load_art(const char *url)
     want_prefetch = true;                             // new song: look up the one after it
     ESP_LOGI(TAG, "album art %dx%d (%d bytes): %s %d ms, decode %d ms, shade %d ms", out.width, out.height, len,
              preloaded ? "preloaded" : "download", (int)((t1 - t0) / 1000), (int)((t2 - t1) / 1000), (int)((esp_timer_get_time() - t2) / 1000));
+}
+
+// ---------------------------------------------------------------- the Library's thumbnails
+// Each playlist's and show's cover, shrunk to SP_THUMB px and kept by its URL, so a reload of the lists (every
+// minute while the page is up) only fetches the new ones. Only the Spotify task writes them; a slot's pixels are in
+// place before it's marked ok, so the screen can read them as they are. (The round screen's rows have no artwork.)
+#define MAX_THUMBS (MAX_PL + MAX_SHOWS)
+#define URL_LEN 200
+typedef struct { char url[URL_LEN]; uint16_t px[SP_THUMB * SP_THUMB]; volatile bool ok; bool tried; } thumb_t;
+static thumb_t *thumbs;                               // MAX_THUMBS of them, in PSRAM
+
+const uint16_t *spotify_thumb(int slot)
+{
+    return thumbs && slot >= 0 && slot < MAX_THUMBS && thumbs[slot].ok ? thumbs[slot].px : NULL;
+}
+
+// The image to shrink: the smallest at least SP_THUMB px across (Spotify lists them largest first; a cover you
+// uploaded yourself has no size given, and is taken as large)
+static void thumb_url(cJSON *imgs, char *out)
+{
+    cJSON *im;
+    int best = 1 << 30;
+    out[0] = 0;
+    cJSON_ArrayForEach(im, imgs) {
+        cJSON *u = cJSON_GetObjectItem(im, "url"), *w = cJSON_GetObjectItem(im, "width");
+        if (!cJSON_IsString(u)) continue;
+        int wd = cJSON_IsNumber(w) && w->valueint > 0 ? w->valueint : 640;
+        if ((wd >= SP_THUMB && wd < best) || !out[0]) { strlcpy(out, u->valuestring, URL_LEN); if (wd >= SP_THUMB) best = wd; }
+    }
+}
+
+// A cover's URL past its host: Spotify hands out the same picture from image-cdn-ak one time and image-cdn-fa
+// the next, so it's this that says whether a cover is one we have
+static const char *url_path(const char *u)
+{
+    const char *p = strstr(u, "://");
+    p = p ? strchr(p + 3, '/') : NULL;
+    return p ? p : u;
+}
+
+// Give each of n covers (url[i], "" for none) its slot, into *slot[i]: the one it already has, or else one no list
+// uses (an empty one first). keep: slots the lists not being replaced still use.
+static void assign_thumbs(int n, const char *const *url, int16_t *const *slot, const bool *keep)
+{
+    if (!thumbs && !SCREEN_ROUND) thumbs = heap_caps_calloc(MAX_THUMBS, sizeof *thumbs, MALLOC_CAP_SPIRAM);
+    bool used[MAX_THUMBS];
+    memcpy(used, keep, sizeof used);
+    for (int i = 0; i < n; i++) {
+        *slot[i] = -1;
+        for (int k = 0; thumbs && url[i][0] && k < MAX_THUMBS; k++)
+            if (thumbs[k].url[0] && !strcmp(url_path(thumbs[k].url), url_path(url[i]))) {
+                *slot[i] = k;
+                used[k] = true;
+                thumbs[k].tried = false;              // (one that failed gets another go)
+                break;
+            }
+    }
+    for (int i = 0; i < n; i++) {
+        if (*slot[i] >= 0 || !thumbs || !url[i][0]) continue;
+        int k = -1;
+        for (int e = 0; e < MAX_THUMBS && k < 0; e++) if (!used[e] && !thumbs[e].url[0]) k = e;
+        for (int e = 0; e < MAX_THUMBS && k < 0; e++) if (!used[e]) k = e;
+        if (k < 0) break;
+        thumbs[k].ok = thumbs[k].tried = false;
+        strlcpy(thumbs[k].url, url[i], URL_LEN);
+        *slot[i] = k;
+        used[k] = true;
+    }
+}
+
+// Download into jpg over a kept-open connection (the covers mostly come from one host): its length, or -1
+static esp_http_client_handle_t img_http;
+static body_t img_body;
+
+static int img_get(const char *url)
+{
+    img_body = (body_t){(char *)jpg, 0, JPG_CAP};
+    if (!img_http) {
+        esp_http_client_config_t cfg = {
+            .url = url, .crt_bundle_attach = esp_crt_bundle_attach, .timeout_ms = 8000,
+            .keep_alive_enable = true, .event_handler = on_http, .user_data = &img_body, .buffer_size = 4096,
+        };
+        if (!(img_http = esp_http_client_init(&cfg))) return -1;
+    }
+    esp_http_client_set_url(img_http, url);
+    if (esp_http_client_perform(img_http) != ESP_OK) {
+        esp_http_client_cleanup(img_http);
+        img_http = NULL;
+        return -1;
+    }
+    return esp_http_client_get_status_code(img_http) == 200 ? img_body.len : -1;
+}
+
+// Decode jpg (len bytes) and shrink its middle square to SP_THUMB px into out, averaging the pixels each one covers
+static bool shrink_thumb(int len, uint16_t *out)
+{
+    esp_jpeg_image_cfg_t jc = {
+        .indata = jpg, .indata_size = len, .outbuf = (uint8_t *)raw, .outbuf_size = 640 * 640 * 2,
+        .out_format = JPEG_IMAGE_FORMAT_RGB565, .out_scale = JPEG_IMAGE_SCALE_0, .flags = {.swap_color_bytes = 1},
+    };
+    esp_jpeg_image_output_t im;
+    if (esp_jpeg_get_image_info(&jc, &im) != ESP_OK || !im.width || !im.height) return false;
+    int sc = 0, side = im.width < im.height ? im.width : im.height;
+    while (sc < 3 && side >> (sc + 1) >= SP_THUMB) sc++;   // let the decoder do most of the shrinking
+    if ((im.width >> sc) * (im.height >> sc) > 640 * 640) return false;
+    jc.out_scale = sc;
+    if (esp_jpeg_decode(&jc, &im) != ESP_OK || !im.width) return false;
+    side = im.width < im.height ? im.width : im.height;
+    int ox = (im.width - side) / 2, oy = (im.height - side) / 2;
+    for (int y = 0; y < SP_THUMB; y++) {
+        int ya = oy + y * side / SP_THUMB, yb = oy + (y + 1) * side / SP_THUMB;
+        if (yb <= ya) yb = ya + 1;
+        for (int x = 0; x < SP_THUMB; x++) {
+            int xa = ox + x * side / SP_THUMB, xb = ox + (x + 1) * side / SP_THUMB, r = 0, g = 0, b = 0, n = 0;
+            if (xb <= xa) xb = xa + 1;
+            for (int sy = ya; sy < yb; sy++)
+                for (int sx = xa; sx < xb; sx++) {
+                    uint16_t c = SWAP16(raw[sy * im.width + sx]);
+                    r += c >> 11; g += (c >> 5) & 63; b += c & 31; n++;
+                }
+            out[y * SP_THUMB + x] = SWAP16((uint16_t)((r / n) << 11 | (g / n) << 5 | (b / n)));
+        }
+    }
+    return true;
+}
+
+// Fetch covers not loaded yet, for up to budget_us, giving way to a waiting command
+static void load_thumbs(int64_t budget_us)
+{
+    static int fetched;                               // since the last time they were all in, for the log
+    static int64_t busy_us;
+    if (!thumbs) return;
+    int64_t t0 = esp_timer_get_time();
+    for (int k = 0; k < MAX_THUMBS; k++) {
+        thumb_t *t = &thumbs[k];
+        if (!t->url[0] || t->ok || t->tried) continue;
+        if (uxQueueMessagesWaiting(cmds) || esp_timer_get_time() - t0 > budget_us || !jpeg_bufs()) {
+            busy_us += esp_timer_get_time() - t0;
+            return;
+        }
+        t->tried = true;
+        fetched++;
+        static uint16_t px[SP_THUMB * SP_THUMB];
+        int len = img_get(t->url);
+        if (len < 100 || !shrink_thumb(len, px)) { ESP_LOGW(TAG, "thumbnail failed (%d): %.80s", len, t->url); continue; }
+        memcpy(t->px, px, sizeof px);
+        __sync_synchronize();                         // (the pixels before the flag)
+        t->ok = true;
+        lib_version++;
+    }
+    if (fetched) {
+        int ok = 0;
+        for (int k = 0; k < MAX_THUMBS; k++) ok += thumbs[k].ok;
+        ESP_LOGI(TAG, "library covers: fetched %d (%d ms), %d in all", fetched,
+                 (int)((busy_us + esp_timer_get_time() - t0) / 1000), ok);
+        fetched = 0;
+        busy_us = 0;
+    }
 }
 
 // ---------------------------------------------------------------- polling
@@ -741,11 +907,13 @@ static void load_library(void)
         cJSON_Delete(j);
     }
     EXT_RAM_BSS_ATTR static sp_playlist_t pl[MAX_PL];
+    EXT_RAM_BSS_ATTR static char img[MAX_THUMBS][URL_LEN];   // each one's cover: the playlists', then the shows'
     int np = 0;
     if (user_id[0]) {
         strlcpy(pl[0].name, "Liked Songs", sizeof pl[0].name);
         snprintf(pl[0].uri, sizeof pl[0].uri, "spotify:user:%s:collection", user_id);
         pl[0].tracks = -1;
+        img[0][0] = 0;                                // (drawn as Spotify's heart tile)
         np = 1;
     }
     bool pl_ok = authed_call(HTTP_METHOD_GET, "/me/playlists?limit=50", NULL, &status) && status == 200;
@@ -759,6 +927,7 @@ static void load_library(void)
             strlcpy(pl[np].name, n->valuestring, sizeof pl[np].name);
             strlcpy(pl[np].uri, u->valuestring, sizeof pl[np].uri);
             pl[np].tracks = cJSON_IsNumber(tot) ? tot->valueint : -1;
+            thumb_url(cJSON_GetObjectItem(it, "images"), img[np]);
             np++;
         }
         cJSON_Delete(j);
@@ -778,11 +947,23 @@ static void load_library(void)
             strlcpy(sh[ns].id, id->valuestring, sizeof sh[ns].id);
             strlcpy(sh[ns].name, n->valuestring, sizeof sh[ns].name);
             strlcpy(sh[ns].publisher, cJSON_IsString(p) ? p->valuestring : "", sizeof sh[ns].publisher);
+            thumb_url(cJSON_GetObjectItem(show, "images"), img[MAX_PL + ns]);
             ns++;
         }
         cJSON_Delete(j);
     } else if (status == 401 || status == 403) {
         set_note("Run spotify_auth.py again for podcasts");
+    }
+    {                                                 // their covers' slots (a list that failed to load keeps its own)
+        static const char *url[MAX_THUMBS];
+        static int16_t *slot[MAX_THUMBS];
+        bool keep[MAX_THUMBS] = {0}, new_pl = pl_ok || n_playlists < 0;
+        int n = 0;
+        if (!new_pl) for (int i = 0; i < n_playlists; i++) if (playlists[i].thumb >= 0) keep[playlists[i].thumb] = true;
+        if (ns < 0) for (int i = 0; i < n_shows; i++) if (shows[i].thumb >= 0) keep[shows[i].thumb] = true;
+        for (int i = 0; new_pl && i < np; i++, n++) { url[n] = SCREEN_ROUND ? "" : img[i]; slot[n] = &pl[i].thumb; }
+        for (int i = 0; i < ns; i++, n++) { url[n] = SCREEN_ROUND ? "" : img[MAX_PL + i]; slot[n] = &sh[i].thumb; }
+        assign_thumbs(n, url, slot, keep);            // (the round screen's rows have no artwork: none)
     }
     EXT_RAM_BSS_ATTR static sp_device_t dv[MAX_DEV];   // off the task stack
     int nd = fetch_devices(dv);
@@ -914,6 +1095,7 @@ static void sp_task(void *arg)
         if (lib_visible && esp_timer_get_time() - lib_loaded_us > 60000000) load_library();   // devices come and go
         poll_player();
         if (want_prefetch && awake && st.active && !uxQueueMessagesWaiting(cmds)) prefetch_next();
+        if (awake) load_thumbs(lib_visible ? 2000000 : 500000);   // the Library's covers: quickly while it's up
         static int64_t stack_log;
         if (esp_timer_get_time() - stack_log > 600000000) {
             stack_log = esp_timer_get_time();

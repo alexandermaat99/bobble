@@ -26,3 +26,5 @@ bool pet_ui_take_rect(int *x0, int *y0, int *x1, int *y1);
 // The same, as up to two separate areas ({x0, y0, x1, y1} each): the eyes and bubble, and the logos along the bottom
 // (far apart: one box round both would be most of the page). 0 = redraw the whole page.
 int pet_ui_take_rects(int r[2][4]);
+// Claude Code's spark (its logo), 45 px across at scale 1, centred on cx, cy, in this colour (the chat page uses it)
+void pet_ui_spark(uint16_t *buf, int y0, int h, int cx, int cy, int r, int g, int b, float scale);

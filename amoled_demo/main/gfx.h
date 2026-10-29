@@ -39,6 +39,8 @@ void fill_tri(uint16_t *buf, int y0, int h, int ax, int ay, int bx, int by, int 
 // Anti-aliased shapes, blended over the strip (float coordinates: pixel centres are at +0.5)
 void aa_disc(uint16_t *buf, int y0, int h, float cx, float cy, float r, uint16_t col);
 void aa_rrect(uint16_t *buf, int y0, int h, float x0, float ya, float x1, float yb, float r, uint16_t col);
+// an n x n picture (px, in the panel's byte order) at x, y with its corners rounded to r
+void aa_image(uint16_t *buf, int y0, int h, int x, int y, int n, const uint16_t *px, float r);
 // a line through n points (x, y pairs) w px wide, with round ends and joins; closed: back to the first point too
 void aa_path(uint16_t *buf, int y0, int h, const float *pts, int n, bool closed, float w, uint16_t col);
 // a line icon on a 24 px grid (n points, as for aa_path; at most 32), drawn size px across, centred on cx, cy

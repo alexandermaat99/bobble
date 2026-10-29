@@ -244,6 +244,20 @@ final class Device {
         request(endpoint, "/ota", image, key: key, timeout: 180) { code, _ in done(code) }
     }
 
+    // ---- voice chat (the square board, and its simulator): where to connect for it (VoiceChat's ChatLink)
+
+    // The board's address and its chat port (GET /info says it, if the board can talk), or nil: can't talk, or away
+    func chatEndpoint(_ done: @escaping (NWEndpoint?) -> Void) {
+        guard let endpoint else { done(nil); return }
+        request(endpoint, "/info", Data(), method: "GET", host: { [weak self] in self?.lastHost = $0 }) { [weak self] code, body in
+            guard code == 200, let body, let j = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any],
+                  let port = (j["chat"] as? NSNumber)?.uint16Value, port > 0, let p = NWEndpoint.Port(rawValue: port),
+                  let host = self?.lastHost else { done(nil); return }
+            done(.hostPort(host: host, port: p))
+        }
+    }
+    private var lastHost: NWEndpoint.Host?
+
     // ---- calendars: kept on the display (their private .ics links); this just shows and replaces the list
 
     func getCalendars(_ done: @escaping ([String]?) -> Void) {
@@ -292,8 +306,9 @@ final class Device {
     }
 
     // One HTTP request to the display: calls back with the status code (0 if it couldn't be reached) and the body
+    // host: told the address it reached (a Bonjour name resolves to one), for connecting to the board on another port
     private func request(_ endpoint: NWEndpoint, _ path: String, _ body: Data, key: String = "", method: String = "POST",
-                         timeout: Double = 5, _ done: @escaping (Int, Data?) -> Void) {
+                         timeout: Double = 5, host: ((NWEndpoint.Host) -> Void)? = nil, _ done: @escaping (Int, Data?) -> Void) {
         let c = NWConnection(to: endpoint, using: .tcp)
         var finished = false
         func finish(_ code: Int, _ data: Data?) {
@@ -305,6 +320,7 @@ final class Device {
         c.stateUpdateHandler = { state in
             switch state {
             case .ready:
+                if let host, case let .hostPort(h, _)? = c.currentPath?.remoteEndpoint { host(h) }
                 var req = "\(method) \(path) HTTP/1.1\r\nHost: bobble\r\nContent-Type: application/json\r\n"
                 if !key.isEmpty { req += "X-OTA-Token: \(key)\r\n" }
                 req += "Content-Length: \(body.count)\r\nConnection: close\r\n\r\n"

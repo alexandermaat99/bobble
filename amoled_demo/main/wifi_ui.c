@@ -1,5 +1,5 @@
 // Settings card for the 466x466 round AMOLED (and the 480x480 square board, which lays the menu out as tiles and says
-// which firmware it runs): a small menu (Wi-Fi, touch and tilt calibration, lock, reset), plus
+// which firmware it runs): a small menu (Wi-Fi, touch and tilt calibration, lock, brightness, reset; the square also volume), plus
 // the Wi-Fi screens: pick a network from a scrollable list,
 // type the password on an on-screen keyboard, then watch it connect (and show a synced clock).
 // Phone setup through the hotspot / QR code is still available from the list.
@@ -18,6 +18,7 @@
 #include "ota.h"
 #include "screen.h"
 #include "agent.h"
+#include "audio.h"
 #include "esp_app_desc.h"
 
 enum view { V_MENU, V_LIST, V_KEYS, V_STATUS, V_PHONE, V_RESET };
@@ -37,7 +38,7 @@ static enum view view;
 enum {
     ID_NONE = 0, ID_SCAN, ID_PHONE, ID_EXIT, ID_BACK, ID_CANCEL, ID_NETWORKS, ID_FORGET,
     ID_SHIFT, ID_DEL, ID_SYM, ID_SPACE, ID_JOIN, ID_SHOW,
-    ID_MENU, ID_WIFI, ID_CAL_TOUCH, ID_CAL_TILT, ID_BRIGHT, ID_LOCK, ID_RESET, ID_ERASE,
+    ID_MENU, ID_WIFI, ID_CAL_TOUCH, ID_CAL_TILT, ID_BRIGHT, ID_LOCK, ID_RESET, ID_ERASE, ID_VOLUME,
     ID_ROW = 100,     // + row index
     ID_KEY = 200,     // + character code
 };
@@ -59,6 +60,8 @@ static int press_x, press_y, cur_x, cur_y, press_id, scroll, scroll_at_press;
 static bool dragging;
 static int64_t press_us, repeat_us;
 #define LOCK_HOLD_US 3000000
+
+static int64_t lock_tapped_us = -10000000;    // (when Lock was let go too soon: the square says to hold it)
 
 // ---------------------------------------------------------------- layout
 #if !SCREEN_ROUND
@@ -107,8 +110,9 @@ static const button_t phone_buttons[] = {{CX - 55, 408, CX + 55, 440, ID_BACK, "
 #define BUB_R 62
 #if !SCREEN_ROUND
 // The square, like the phone's Control Center: a grid of rounded modules four columns wide, three rows high. Wi-Fi
-// and Lock are wide (an icon disc, a name and a line about it), brightness a tall slider and Touch a tall tile beside
-// it, then Factory reset and what this board is and runs, wide, along the bottom. (No tilt calibration on the square.)
+// is wide (an icon disc, a name and a line about it), Lock and Touch small tiles under it, brightness and volume
+// tall sliders beside them, then Factory reset and what this board is and runs, wide, along the bottom. (No
+// tilt calibration on the square.)
 #define CC_COL(c) (20 + (c) * 114)                 // a module's left edge: 98 wide, 16 apart
 #define CC_ROW(r) (78 + (r) * 118)                 // and its top: 104 high, 14 apart
 #define CC_W 98
@@ -116,11 +120,12 @@ static const button_t phone_buttons[] = {{CX - 55, 408, CX + 55, 440, ID_BACK, "
 #define CC_R 24
 static const button_t menu_buttons[] = {
     {CC_COL(0), CC_ROW(0), CC_COL(1) + CC_W, CC_ROW(0) + CC_H, ID_WIFI, "Wi-Fi"},
-    {CC_COL(3), CC_ROW(0), CC_COL(3) + CC_W, CC_ROW(1) + CC_H, ID_CAL_TOUCH, "Touch"},
+    {CC_COL(1), CC_ROW(1), CC_COL(1) + CC_W, CC_ROW(1) + CC_H, ID_CAL_TOUCH, "Touch"},
     {-100, -100, -100, -100, ID_CAL_TILT, "Tilt"},     // (off the glass: never hit)
-    {CC_COL(0), CC_ROW(1), CC_COL(1) + CC_W, CC_ROW(1) + CC_H, ID_LOCK, "Lock"},
+    {CC_COL(0), CC_ROW(1), CC_COL(0) + CC_W, CC_ROW(1) + CC_H, ID_LOCK, "Lock"},
     {CC_COL(2), CC_ROW(0), CC_COL(2) + CC_W, CC_ROW(1) + CC_H, ID_BRIGHT, ""},   // brightness: drag up and down
     {CC_COL(0), CC_ROW(2), CC_COL(1) + CC_W, CC_ROW(2) + CC_H, ID_RESET, "Factory reset"},
+    {CC_COL(3), CC_ROW(0), CC_COL(3) + CC_W, CC_ROW(1) + CC_H, ID_VOLUME, ""},   // volume: likewise
 };
 #else
 static const button_t menu_buttons[] = {
@@ -131,6 +136,7 @@ static const button_t menu_buttons[] = {
     {CX + BUB_DX - BUB_R, BUB_Y1 - BUB_R, CX + BUB_DX + BUB_R, BUB_Y1 + BUB_R, ID_LOCK, "Lock"},
     {CX - 172, 338, CX + 172, 386, ID_BRIGHT, ""},   // brightness slider row
     {CX - 100, 396, CX + 100, 434, ID_RESET, "Factory reset"},
+    {-100, -100, -100, -100, ID_VOLUME, ""},          // (no volume here: off the glass, never hit)
 };
 #endif
 #define ERASE_Y 262
@@ -235,7 +241,8 @@ bool wifi_ui_wants_status_bar(void) { return view != V_KEYS; }   // the keyboard
 
 bool wifi_ui_swipe_ok(void)
 {
-    return (view == V_MENU || view == V_STATUS || view == V_PHONE || view == V_RESET) && press_id != ID_BRIGHT && press_id != ID_ERASE;
+    return (view == V_MENU || view == V_STATUS || view == V_PHONE || view == V_RESET) && press_id != ID_BRIGHT &&
+           press_id != ID_VOLUME && press_id != ID_ERASE;
 }
 
 void wifi_ui_cancel_touch(void)
@@ -265,11 +272,11 @@ static void fit(char *out, size_t cap, const char *in, int max_chars)
 
 static int current_id(void) { return down && !dragging ? press_id : ID_NONE; }
 
-// While the brightness slider is held only it changes: its box on the card, so only those rows need drawing
+// While a slider is held only it changes: its box on the card, so only those rows need drawing
 bool wifi_ui_slider_rect(int r[4])
 {
-    if (view != V_MENU || !down || press_id != ID_BRIGHT) return false;
-    const button_t *b = &menu_buttons[4];
+    if (view != V_MENU || !down || (press_id != ID_BRIGHT && press_id != ID_VOLUME)) return false;
+    const button_t *b = &menu_buttons[press_id == ID_BRIGHT ? 4 : 6];
     r[0] = b->x0 - 2; r[1] = b->y0 - 2; r[2] = b->x1 + 2; r[3] = b->y1 + 2;
     return true;
 }
@@ -326,7 +333,7 @@ static void draw_list(uint16_t *buf, int y0, int h)
         fit(line, sizeof line, nets[i].ssid, 21);
         draw_text(buf, y0, h, ROW_X0 + 14, ry + ROW_H / 2 - 7, 2, line, connected ? C_GREEN : C_WHITE);
         if (nets[i].secure) draw_lock(buf, y0, h, ROW_X1 - 58, ry + 16, C_GREY);
-        draw_bars(buf, y0, h, ROW_X1 - 38, ry + 16, nets[i].rssi);
+        draw_bars(buf, y0, h, ROW_X1 - 38, ry + 16, connected ? wifi_rssi() : nets[i].rssi);   // (live, like the status bar)
     }
     if (net_count == 0 && !wifi_scanning()) text_c(buf, y0, h, 220, 2, "No networks found", C_GREY);
     if (wifi_scanning() && net_count == 0)
@@ -489,6 +496,35 @@ static void draw_hold_ring(uint16_t *buf, int y0, int h, int cx, int cy, uint16_
 }
 
 #if !SCREEN_ROUND
+// A speaker, k px to a unit (about 22 k across), with as many sound waves as it's loud (0..2; -1: crossed out)
+static void speaker_icon(uint16_t *buf, int y0, int h, float cx, float cy, float k, int waves, uint16_t col)
+{
+    float x = cx - 4 * k;                             // (the cone's mouth)
+    const float body[] = {x - 7 * k, cy - 3.5f * k, x - 3 * k, cy - 3.5f * k, x + 2.5f * k, cy - 8 * k,
+                          x + 2.5f * k, cy + 8 * k, x - 3 * k, cy + 3.5f * k, x - 7 * k, cy + 3.5f * k};
+    aa_path(buf, y0, h, body, 6, true, 1.8f * k, col);
+    fill_rect(buf, y0, h, (int)(x - 7 * k + 1), (int)(cy - 3.5f * k + 1), (int)(x - 3 * k), (int)(cy + 3.5f * k), col);
+    fill_tri(buf, y0, h, (int)(x - 3 * k), (int)(cy - 3.5f * k), (int)(x + 2.5f * k), (int)(cy - 8 * k), (int)(x + 2.5f * k),
+             (int)(cy + 8 * k), col);
+    fill_tri(buf, y0, h, (int)(x - 3 * k), (int)(cy - 3.5f * k), (int)(x + 2.5f * k), (int)(cy + 8 * k), (int)(x - 3 * k),
+             (int)(cy + 3.5f * k), col);
+    if (waves < 0) {
+        const float a[] = {x + 7 * k, cy - 4 * k, x + 15 * k, cy + 4 * k}, b[] = {x + 7 * k, cy + 4 * k, x + 15 * k, cy - 4 * k};
+        aa_path(buf, y0, h, a, 2, false, 1.8f * k, col);
+        aa_path(buf, y0, h, b, 2, false, 1.8f * k, col);
+        return;
+    }
+    for (int w = 1; w <= waves; w++) {                // arcs round the cone's mouth
+        float r = (w == 1 ? 6 : 11) * k, p[2 * 12];
+        for (int i = 0; i < 12; i++) {
+            float an = (-50 + 100 * i / 11.0f) * (float)M_PI / 180;
+            p[2 * i] = x + r * cosf(an);
+            p[2 * i + 1] = cy + r * sinf(an);
+        }
+        aa_path(buf, y0, h, p, 12, false, 1.8f * k, col);
+    }
+}
+
 // Text in font f cut with "..." to fit w
 static void draw_fit(uint16_t *buf, int y0, int h, int x, int y, const font_t *f, const char *s, int w, uint16_t col)
 {
@@ -604,15 +640,29 @@ static void cc_wide(uint16_t *buf, int y0, int h, const button_t *b, uint16_t di
     draw_fit(buf, y0, h, tx, (int)cy + 2, &font_small, sub, tw, sub_col);
 }
 
-// a tall module: its icon in a disc, its name and a line about it under that
-static void cc_tall(uint16_t *buf, int y0, int h, const button_t *b, int kind, const char *sub, bool on)
+// a small module: its icon in a disc, its name under that
+static void cc_small(uint16_t *buf, int y0, int h, const button_t *b, int kind, uint16_t disc, const char *name, bool on)
 {
     aa_rrect(buf, y0, h, b->x0, b->y0, b->x1, b->y1, CC_R, on ? CC_MOD_ON : CC_MOD);
-    float cx = (b->x0 + b->x1) / 2.0f, cy = (b->y0 + b->y1) / 2.0f - 22;
-    aa_disc(buf, y0, h, cx, cy, 23, CC_OFF);
-    cc_icon(buf, y0, h, kind, cx, cy, C_WHITE, CC_OFF);
-    ftext_mid_cc(buf, y0, h, (int)cx, (int)cy + 36, &font_label, b->label, C_WHITE);
-    ftext_mid_cc(buf, y0, h, (int)cx, (int)cy + 61, &font_small, sub, CC_TEXT2);
+    float cx = (b->x0 + b->x1) / 2.0f;
+    aa_disc(buf, y0, h, cx, b->y0 + 38, 23, disc);
+    cc_icon(buf, y0, h, kind, cx, b->y0 + 38, C_WHITE, disc);
+    ftext_mid_cc(buf, y0, h, (int)cx, b->y0 + 69, &font_label, name, C_WHITE);
+}
+
+// a tall slider module, lit from the bottom to frac (0..1): where the lit part starts
+static float cc_slider(uint16_t *buf, int y0, int h, const button_t *b, float frac)
+{
+    aa_rrect(buf, y0, h, b->x0, b->y0, b->x1, b->y1, CC_R, CC_MOD);
+    float fy = b->y1 - (b->y1 - b->y0) * frac;
+    if (b->y1 - fy > 2) {                             // the lit part, clipped to the module
+        int ct, cb;
+        gfx_get_clip(&ct, &cb);
+        gfx_clip((int)fy > ct ? (int)fy : ct, cb);
+        aa_rrect(buf, y0, h, b->x0, b->y0, b->x1, b->y1, CC_R, rgb(228, 228, 234));
+        gfx_clip(ct, cb);
+    }
+    return fy;
 }
 
 static void draw_menu(uint16_t *buf, int y0, int h)
@@ -624,34 +674,32 @@ static void draw_menu(uint16_t *buf, int y0, int h)
     cc_wide(buf, y0, h, wb, conn ? CC_BLUE : CC_OFF, "Wi-Fi", sub, CC_TEXT2, current_id() == ID_WIFI);
     cc_icon(buf, y0, h, ICON_WIFI, wb->x0 + 38, (wb->y0 + wb->y1) / 2.0f - 1, C_WHITE, 0);
 
-    // Lock: hold it; the disc turns indigo and a ring fills round it
+    // Lock: hold it; the disc turns indigo and a ring fills round it (a tap says to hold it)
     const button_t *lb = &menu_buttons[3];
     bool lon = current_id() == ID_LOCK;
-    float lcy = (lb->y0 + lb->y1) / 2.0f;
-    cc_wide(buf, y0, h, lb, lon ? rgb(94, 92, 230) : CC_OFF, "Lock", "Hold for 3 s", CC_TEXT2, lon);
-    cc_icon(buf, y0, h, ICON_LOCK, lb->x0 + 38, lcy, C_WHITE, lon ? rgb(94, 92, 230) : CC_OFF);
+    uint16_t ldisc = lon ? rgb(94, 92, 230) : CC_OFF;
+    cc_small(buf, y0, h, lb, ICON_LOCK, ldisc, esp_timer_get_time() - lock_tapped_us < 2000000 ? "Hold 3 s" : "Lock", lon);
     if (lon) {
         int64_t held = esp_timer_get_time() - press_us;
         float frac = held >= LOCK_HOLD_US ? 1 : held / (float)LOCK_HOLD_US;
-        cc_arc(buf, y0, h, lb->x0 + 38, lcy, 28, 0, 360 * frac, 3, C_WHITE);
+        cc_arc(buf, y0, h, (lb->x0 + lb->x1) / 2.0f, lb->y0 + 38, 28, 0, 360 * frac, 3, C_WHITE);
     }
 
-    cc_tall(buf, y0, h, &menu_buttons[1], ICON_TOUCH, "Calibrate", current_id() == ID_CAL_TOUCH);
+    cc_small(buf, y0, h, &menu_buttons[1], ICON_TOUCH, CC_OFF, "Touch", current_id() == ID_CAL_TOUCH);
 
     // brightness: a tall module that fills from the bottom, the sun at its foot
     const button_t *b = &menu_buttons[4];
-    float frac = (screen_brightness_get() - 10) / 245.0f;
-    aa_rrect(buf, y0, h, b->x0, b->y0, b->x1, b->y1, CC_R, CC_MOD);
-    float fy = b->y1 - (b->y1 - b->y0) * frac;
-    if (b->y1 - fy > 2) {                             // the lit part, clipped to the module
-        int ct, cb;
-        gfx_get_clip(&ct, &cb);
-        gfx_clip((int)fy > ct ? (int)fy : ct, cb);
-        aa_rrect(buf, y0, h, b->x0, b->y0, b->x1, b->y1, CC_R, rgb(228, 228, 234));
-        gfx_clip(ct, cb);
-    }
+    float fy = cc_slider(buf, y0, h, b, (screen_brightness_get() - 10) / 245.0f);
     float sy = b->y1 - 30;
     cc_icon(buf, y0, h, ICON_SUN, (b->x0 + b->x1) / 2.0f, sy, sy > fy ? rgb(110, 110, 118) : rgb(200, 200, 206), 0);
+
+    // volume, the same way, a speaker at its foot (crossed out when silent)
+    const button_t *vb = &menu_buttons[6];
+    int vol = device_volume_get();
+    fy = cc_slider(buf, y0, h, vb, vol / 100.0f);
+    sy = vb->y1 - 30;
+    speaker_icon(buf, y0, h, (vb->x0 + vb->x1) / 2.0f + 2, sy, 1.15f, vol == 0 ? -1 : vol < 50 ? 1 : 2,
+                 sy > fy ? rgb(110, 110, 118) : rgb(200, 200, 206));
 
     // Factory reset
     const button_t *rb = &menu_buttons[5];
@@ -754,7 +802,7 @@ static void draw_list(uint16_t *buf, int y0, int h)
         }
         draw_fit(buf, y0, h, 56, (int)mid - font_label.line_h / 2, &font_label, nets[i].ssid, ROW_X1 - 70 - 56, C_WHITE);
         if (nets[i].secure) small_lock(buf, y0, h, ROW_X1 - 48, mid, SQ_TEXT2, SQ_GROUP);
-        fan(buf, y0, h, ROW_X1 - 22, mid - 4, nets[i].rssi);
+        fan(buf, y0, h, ROW_X1 - 22, mid - 4, connected ? wifi_rssi() : nets[i].rssi);   // (live, like the status bar)
         if (i < net_count - 1) fill_rect(buf, y0, h, 56, ry + ROW_H - 1, ROW_X1, ry + ROW_H, SQ_SEP);
     }
     if (net_count == 0 && !wifi_scanning()) ftext_mid(buf, y0, h, CX, 240, &font_label, "No networks found", SQ_TEXT2);
@@ -1035,6 +1083,8 @@ static int hit_test(int x, int y)
     case V_MENU: {
         const button_t *b = &menu_buttons[4];          // the slider row takes priority over padding around it
         if (x >= b->x0 && x < b->x1 && y >= b->y0 - 4 && y < b->y1 + 4) return ID_BRIGHT;
+        b = &menu_buttons[6];
+        if (x >= b->x0 && x < b->x1 && y >= b->y0 - 4 && y < b->y1 + 4) return ID_VOLUME;
         if (hit(&menu_buttons[5], 1, x, y)) return ID_RESET;
         int id = hit_pad(menu_buttons, 4, x, y, false);   // rows sit close together: a row you're on beats a neighbour's margin
         return id ? id : hit(menu_buttons, 4, x, y);
@@ -1105,7 +1155,7 @@ int wifi_ui_update(int tx, int ty, int64_t now)
         cur_x = tx; cur_y = ty;
         if (abs(ty - press_y) > 14 || abs(tx - press_x) > 14) {
             if (view == V_LIST && press_y >= LIST_TOP && press_y < LIST_BOT) dragging = true;
-            else if (press_id != ID_BRIGHT && hit_test(tx, ty) != press_id) press_id = ID_NONE;   // slid off the key
+            else if (press_id != ID_BRIGHT && press_id != ID_VOLUME && hit_test(tx, ty) != press_id) press_id = ID_NONE;   // slid off the key
         }
         if (dragging) {
             scroll = scroll_at_press - (ty - press_y);
@@ -1136,14 +1186,21 @@ int wifi_ui_update(int tx, int ty, int64_t now)
         screen_brightness_set(10 + 245 * (x - tx0) / (tx1 - tx0), false);
 #endif
     }
-    if (!is_down && down && press_id == ID_BRIGHT) {   // let go of the slider: remember the level
+    if (down && press_id == ID_VOLUME) {               // and so does the volume (the square's)
+        const button_t *b = &menu_buttons[6];
+        int y = cur_y < b->y0 ? b->y0 : (cur_y > b->y1 ? b->y1 : cur_y);
+        device_volume_set(100 * (b->y1 - y) / (b->y1 - b->y0), false);
+    }
+    if (!is_down && down && (press_id == ID_BRIGHT || press_id == ID_VOLUME)) {   // let go of a slider: remember the level
         down = false;
-        screen_brightness_set(screen_brightness_get(), true);
+        if (press_id == ID_BRIGHT) screen_brightness_set(screen_brightness_get(), true);
+        else { device_volume_set(device_volume_get(), true); audio_click(); }   // (a tick at the new level)
         press_id = ID_NONE;
     } else if (!is_down && down) {                    // finger up
         down = false;
         ESP_LOGI("wifi_ui", "touch up at %d,%d, id %d%s", cur_x, cur_y, press_id, dragging ? " (drag)" : "");
         if (!dragging && press_id != ID_NONE && !(press_id == ID_DEL && now - press_us > 500000)) action = activate(press_id);
+        if (press_id == ID_LOCK) lock_tapped_us = now;   // (let go before it locked)
         press_id = ID_NONE;
         dragging = false;
     }

@@ -23,10 +23,10 @@ typedef struct {
 enum { SP_PLAY_PAUSE, SP_NEXT, SP_PREV, SP_VOL_UP, SP_VOL_DOWN, SP_SHUFFLE, SP_PLAY_CONTEXT, SP_TRANSFER, SP_LOAD_LIBRARY,
        SP_LOAD_EPISODES, SP_PLAY_EPISODE, SP_SEEK_BACK, SP_SEEK_FWD, SP_POLL };   // SP_POLL: just look again   // seeks jump 10 s
 
-// Your library, for the Library page
-typedef struct { char name[64]; char uri[96]; int tracks; } sp_playlist_t;
+// Your library, for the Library page. thumb: its cover's slot for spotify_thumb (-1: none)
+typedef struct { char name[64]; char uri[96]; int tracks; int16_t thumb; } sp_playlist_t;
 typedef struct { char id[64]; char name[48]; char type[20]; bool active; } sp_device_t;
-typedef struct { char id[32]; char name[64]; char publisher[48]; } sp_show_t;
+typedef struct { char id[32]; char name[64]; char publisher[48]; int16_t thumb; } sp_show_t;
 typedef struct { char id[32]; char name[96]; char date[12]; int duration_ms, resume_ms; bool played; } sp_episode_t;
 
 void spotify_start(void);
@@ -40,7 +40,10 @@ int spotify_devices(sp_device_t *out, int max);
 int spotify_shows(sp_show_t *out, int max);              // podcasts you follow; -1 until loaded
 int spotify_episodes(sp_episode_t *out, int max, char *show_id, int id_len);   // latest episodes of the last show asked for
 // SP_LOAD_EPISODES takes a show id; SP_PLAY_EPISODE takes "<show id> <episode id> <position ms>"
-uint32_t spotify_library_version(void);                  // changes when either list does
+uint32_t spotify_library_version(void);                  // changes when either list does (or a cover arrives)
+// A playlist's or show's cover, SP_THUMB px square (panel byte order), for the square's Library rows; NULL until loaded
+#define SP_THUMB 46
+const uint16_t *spotify_thumb(int slot);
 void spotify_set_library_visible(bool visible);           // keep the lists fresh while the page is up
 void spotify_set_poll_fast(bool fast);           // 1 s polling while the Now Playing screen is up
 // Album art scaled to the 466x466 screen and dimmed for a background (the square: a full-screen frame with the

@@ -13,6 +13,7 @@
 #include "esp_mac.h"
 #include "wifi_setup.h"
 #include "agent.h"
+#include "chat.h"
 #include "secrets.h"
 
 static const char *TAG = "agent";
@@ -85,6 +86,11 @@ bool agent_token_ok(httpd_req_t *req)
 {
     char token[64] = {0};
     if (httpd_req_get_hdr_value_str(req, "X-OTA-Token", token, sizeof token) != ESP_OK) return false;
+    return agent_key_ok(token);
+}
+
+bool agent_key_ok(const char *token)
+{
 #ifndef BOBBLE_RELEASE
     if (!strcmp(token, OTA_TOKEN)) return true;
 #endif
@@ -242,6 +248,7 @@ static esp_err_t info_get(httpd_req_t *req)
     cJSON_AddStringToObject(j, "name", agent_device_name());
     cJSON_AddNumberToObject(j, "macs", n_macs);
     cJSON_AddNumberToObject(j, "fw", (double)BOBBLE_BUILD);   // which release build (0: an everyday build)
+    if (chat_port()) cJSON_AddNumberToObject(j, "chat", chat_port());   // it can talk: where the Mac connects for that
 #ifdef BOBBLE_RELEASE
     cJSON_AddBoolToObject(j, "release", true);
 #else
