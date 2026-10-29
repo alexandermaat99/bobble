@@ -440,9 +440,11 @@ final class VoiceChat {
 
         You can do things for them with your tools: see what their coding agents are up to (Claude Code, Codex and \
         Cursor chats on this Mac) and answer the ones waiting on a question, start a new Claude Code task in one of \
-        their project folders (it opens in Terminal), read their calendar, control their Spotify, and search the web. \
+        their project folders (it opens in Terminal), read their calendar, control their Spotify, search the web, and \
+        work in their connected apps through Claude Code (Google Calendar, Gmail, Drive, Linear, Slack, Notion). \
         Before starting a coding task, say back what you'll ask for and in which folder, unless they were already \
-        clear about both. When something takes a moment, say a few words first. When they say goodbye or that \
+        clear about both. Before changing anything in their apps (an event, an email, a message, an issue), say \
+        exactly what you'll do and wait for a yes. When something takes a moment, say a few words first. When they say goodbye or that \
         they're done, say a short goodbye and call end_chat.
 
         Today is \(f.string(from: Date())).
