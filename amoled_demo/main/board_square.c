@@ -269,8 +269,8 @@ static bool pmu_reg(uint8_t reg, uint8_t *v)
         if (tried) return false;
         tried = true;
         if (!(pmu_dev = add_dev(0x34))) { ESP_LOGE(TAG, "no power chip found"); return false; }
-        uint8_t on[2] = {0x30, 0};                      // ADC channels: switch on the battery voltage one
-        if (pmu_reg(0x30, &on[1])) { on[1] |= 0x01; i2c_master_transmit(pmu_dev, on, 2, 50); }
+        uint8_t on[2] = {0x30, 0};                      // ADC channels: battery, USB and system voltage, chip temperature
+        if (pmu_reg(0x30, &on[1])) { on[1] |= 0x1D; i2c_master_transmit(pmu_dev, on, 2, 50); }
     }
     return i2c_master_transmit_receive(pmu_dev, &reg, 1, v, 1, 20) == ESP_OK;
 }
@@ -287,5 +287,41 @@ bool sq_plugged_in(void)
 {
     uint8_t st;
     return pmu_reg(0x00, &st) && (st & 0x20);           // status 1, bit 5: USB power is good
+}
+
+static int pmu_adc(uint8_t reg)                         // a 14-bit reading in two registers (high 6 bits first)
+{
+    uint8_t hi, lo;
+    return pmu_reg(reg, &hi) && pmu_reg(reg + 1, &lo) ? ((hi & 0x3F) << 8) | lo : -1;
+}
+
+void sq_power_read(battery_diag_t *d)
+{
+    memset(d, 0, sizeof *d);
+    d->vbat_mv = d->vbus_mv = d->vsys_mv = d->gauge_pct = d->charge_ma = d->full_mv = d->in_limit_ma = -1;
+    d->dir = d->stage = -1;
+    uint8_t st1, st2, v;
+    if (!pmu_reg(0x00, &st1) || !pmu_reg(0x01, &st2)) return;
+    d->chip = true;
+    d->st1 = st1;
+    d->st2 = st2;
+    d->usb = st1 & 0x20;                                // status 1: bit 5 USB power good, bit 3 battery connected
+    d->battery = st1 & 0x08;
+    d->dir = (st2 >> 5) & 3;                            // status 2: bits 6-5 current direction, 2-0 charge stage
+    d->stage = st2 & 7;
+    if (pmu_reg(0x18, &v)) d->charge_on = v & 0x02;     // charger / fuel gauge control: bit 1 charging enabled
+    if (d->battery) d->vbat_mv = pmu_adc(0x34);
+    if (d->usb) d->vbus_mv = pmu_adc(0x38);
+    d->vsys_mv = pmu_adc(0x3A);
+    int t = pmu_adc(0x3C);
+    if (t >= 0) d->chip_c = 22 + (7274 - t) / 20.0f;
+    if (d->battery && pmu_reg(0xA4, &v) && v <= 100) d->gauge_pct = v;
+    if (pmu_reg(0x62, &v)) { v &= 0x1F; d->charge_ma = v <= 8 ? v * 25 : v <= 16 ? (v - 6) * 100 : -1; }
+    static const int full[8] = {-1, 4000, 4100, 4200, 4350, 4400, -1, -1};
+    static const int limit[8] = {100, 500, 900, 1000, 1500, 2000, -1, -1};
+    if (pmu_reg(0x64, &v)) d->full_mv = full[v & 7];
+    if (pmu_reg(0x16, &v)) d->in_limit_ma = limit[v & 7];
+    pmu_reg(0x50, &d->ts);
+    for (int i = 0; i < 3; i++) pmu_reg(0x48 + i, &d->irq[i]);
 }
 #endif

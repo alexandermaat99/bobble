@@ -82,7 +82,11 @@ static int unsaved;
 
 static int shown = -1;                // % on screen
 // On USB the board reads well above the cell's own voltage (charger): learned from the step at each plug / unplug
+#if SQUARE_HW
+static float usb_offset = 0.05f;      // (the power chip measures the cell itself: charging raises it only a little)
+#else
 static float usb_offset = 0.27f;
+#endif
 static bool usb_prev, have_usb_prev;
 static int64_t usb_edge_at, unplugged_at;
 static float usb_edge_v;
@@ -336,10 +340,13 @@ static void sag_sample(float raw, int64_t now)
     }
 }
 
+static void diag_refresh(int64_t now);
+
 void battery_update(void)
 {
     int64_t now = esp_timer_get_time();
     if (!ok || now - last < 500000) return;
+    diag_refresh(now);
     bool first = last == 0;
     last = now;
     float raw = read_once();
@@ -367,6 +374,61 @@ void battery_update(void)
 }
 
 bool battery_charging(void) { return plugged_in(); }
+
+// ---------------------------------------------------------------- diagnostics
+static battery_diag_t diag;
+static portMUX_TYPE diag_mux = portMUX_INITIALIZER_UNLOCKED;
+
+static void diag_refresh(int64_t now)
+{
+    static int64_t at;
+    if (at && now - at < 1000000) return;
+    at = now;
+    battery_diag_t d;
+#if SQUARE_HW
+    sq_power_read(&d);
+#else
+    memset(&d, 0, sizeof d);
+    d.vbus_mv = d.vsys_mv = d.gauge_pct = d.charge_ma = d.full_mv = d.in_limit_ma = d.dir = d.stage = -1;
+    d.usb = plugged_in();
+    d.battery = volts >= 2.5f;
+    d.vbat_mv = d.battery ? (int)(volts * 1000) : -1;
+#endif
+    static battery_diag_t was;
+    if (d.chip && (d.usb != was.usb || d.battery != was.battery || d.dir != was.dir || d.stage != was.stage))
+        ESP_LOGI(TAG, "charger: %s (%s), battery %d mV, USB %d mV, status %02x %02x, TS %02x, irq %02x %02x %02x",
+                 battery_state_text(&d), battery_stage_text(d.stage), d.vbat_mv, d.vbus_mv, d.st1, d.st2, d.ts,
+                 d.irq[0], d.irq[1], d.irq[2]);
+    was = d;
+    taskENTER_CRITICAL(&diag_mux);
+    diag = d;
+    taskEXIT_CRITICAL(&diag_mux);
+}
+
+void battery_diag(battery_diag_t *d)
+{
+    taskENTER_CRITICAL(&diag_mux);
+    *d = diag;
+    taskEXIT_CRITICAL(&diag_mux);
+}
+
+const char *battery_state_text(const battery_diag_t *d)
+{
+    if (!d->battery) return d->usb ? "No battery found" : "No battery";
+    if (!d->usb) return "On battery";
+    if (!d->chip) return "Plugged in";
+    if (battery_charging_now(d)) return "Charging";
+    if (d->stage == 4) return "Charged";
+    return d->charge_on ? "Plugged in, not charging" : "Charging switched off";
+}
+
+bool battery_charging_now(const battery_diag_t *d) { return d->chip ? d->dir == 1 : d->usb && d->battery; }
+
+const char *battery_stage_text(int stage)
+{
+    static const char *s[] = {"Trickle", "Pre-charge", "Constant current", "Constant voltage", "Done", "Stopped"};
+    return stage >= 0 && stage < 6 ? s[stage] : "-";
+}
 
 float battery_read_now(void) { return ok ? read_once() : 0; }
 

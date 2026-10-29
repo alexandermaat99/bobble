@@ -10,6 +10,7 @@
 #include "spotify.h"
 #include "secrets.h"
 #include "agent.h"
+#include "battery.h"
 
 #define RING (16 * 1024)
 static char *ring;
@@ -76,10 +77,32 @@ static esp_err_t post_cmd(httpd_req_t *req)
     return httpd_resp_sendstr(req, "queued\n");
 }
 
+// What the charger says (GET /battery): Settings > Battery's numbers, as JSON
+static esp_err_t get_battery(httpd_req_t *req)
+{
+    if (!token_ok(req)) return ESP_OK;
+    battery_diag_t d;
+    battery_diag(&d);
+    char out[640];
+    snprintf(out, sizeof out,
+             "{\"state\":\"%s\",\"chip\":%s,\"usb\":%s,\"battery\":%s,\"charge_on\":%s,\"current\":\"%s\","
+             "\"stage\":\"%s\",\"battery_mv\":%d,\"usb_mv\":%d,\"system_mv\":%d,\"gauge_pct\":%d,\"shown_pct\":%d,"
+             "\"charge_ma\":%d,\"full_mv\":%d,\"usb_limit_ma\":%d,\"chip_c\":%.1f,"
+             "\"raw\":{\"status1\":\"%02x\",\"status2\":\"%02x\",\"ts\":\"%02x\",\"irq\":\"%02x %02x %02x\"}}\n",
+             battery_state_text(&d), d.chip ? "true" : "false", d.usb ? "true" : "false", d.battery ? "true" : "false",
+             d.charge_on ? "true" : "false", d.dir == 1 ? "charging" : d.dir == 2 ? "discharging" : d.dir == 0 ? "none" : "-",
+             battery_stage_text(d.stage), d.vbat_mv, d.vbus_mv, d.vsys_mv, d.gauge_pct, battery_percent(),
+             d.charge_ma, d.full_mv, d.in_limit_ma, d.chip_c, d.st1, d.st2, d.ts, d.irq[0], d.irq[1], d.irq[2]);
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, out);
+}
+
 void remote_log_register(httpd_handle_t server)
 {
     const httpd_uri_t a = {.uri = "/log", .method = HTTP_GET, .handler = get_log};
     const httpd_uri_t b = {.uri = "/spotify/cmd", .method = HTTP_POST, .handler = post_cmd};
+    const httpd_uri_t c = {.uri = "/battery", .method = HTTP_GET, .handler = get_battery};
     httpd_register_uri_handler(server, &a);
     httpd_register_uri_handler(server, &b);
+    httpd_register_uri_handler(server, &c);
 }
