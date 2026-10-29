@@ -1790,7 +1790,7 @@ void app_main(void)
         bool content = others || pet_dirty || chat_dirty;
         // just the eyes moved: redraw only around them (a full frame still comes every second for the clock and status)
         part_cnt = pet_dirty && !others && ang == last_ang ? pet_ui_take_rects(part_rect) : 0;
-        if (chat_dirty) {                              // the chat page: just the glow round the mic, if that's all
+        if (chat_dirty) {                              // the chat page: just the orb, if that's all
             int r[4];
             part_cnt = chat_ui_take_rect(r) && !others && ang == last_ang ? 1 : 0;
             if (part_cnt) memcpy(part_rect[0], r, sizeof r);
