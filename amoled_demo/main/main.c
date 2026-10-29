@@ -134,7 +134,12 @@ static void display_init(void)
 
 // ---------------------------------------------------------------- orientation (QMI8658 accelerometer)
 // The content is turned clockwise on the glass by `ang` degrees, easing towards `ang_target`.
-static float ang = 0, ang_target = 0;
+#if SQUARE_HW
+#define DEFAULT_ANG 90   // the square's way up when it can't tell (lying flat, starting up flat): how it sits on its stand
+#else
+#define DEFAULT_ANG 0
+#endif
+static float ang = DEFAULT_ANG, ang_target = DEFAULT_ANG;
 static i2c_master_dev_handle_t imu_dev;
 static bool imu_ok;
 static float acc_x, acc_y, acc_z;   // filtered, in g
@@ -1729,7 +1734,14 @@ void app_main(void)
         else if (boot && !boot_prev && !boot_long && power == PW_AWAKE) card_animate(frame_sheet >= H / 2 ? 0 : H);
         boot_prev = boot;
 
-        if (calibrating || tilt_step) ang = ang_target = 0;   // calibrate on an unrotated screen
+        static float ang_before_cal = -1000;           // calibrate on an unrotated screen, then back to how it was
+        if (calibrating || tilt_step) {
+            if (ang_before_cal == -1000) ang_before_cal = ang_target;
+            ang = ang_target = 0;
+        } else if (ang_before_cal != -1000) {
+            ang = ang_target = ang_before_cal;
+            ang_before_cal = -1000;
+        }
         if (tilt_step || calibrating) last_use = now;   // calibrating counts as use
         if (tilt_step) {
             imu_read();
