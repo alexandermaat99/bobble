@@ -1,49 +1,69 @@
 // The chat page: talking with Claude through the square board's speaker and microphones (chat.c does the talking).
+// Styled after the iPhone's call screen and Siri: on black, an orb in Claude's orange that shows what's going on
+// (breathing while it listens, swelling with its voice, pulsing while it thinks, grey while you're muted), the words
+// under it, and round buttons with their names beneath: speaker, mute, end.
 #include <stdio.h>
 #include <string.h>
 #include <math.h>
+#include "esp_attr.h"
 #include "gfx.h"
 #include "chat.h"
 #include "pet_ui.h"
 #include "chat_ui.h"
 
-#define C_WHITE  rgb(255, 255, 255)
-#define C_GREY   rgb(150, 150, 160)
-#define C_DIM    rgb(90, 90, 100)
-#define C_BTN    rgb(44, 44, 50)
-#define C_BTN_DN rgb(78, 78, 86)
-#define C_RED    rgb(255, 69, 58)
-#define C_PANEL  rgb(30, 30, 34)
-#define C_LINE   rgb(54, 54, 60)
-#define C_BLUE   rgb(10, 132, 255)
-static const int claude[3] = {217, 119, 87};          // Claude's orange
-#define C_CLAUDE rgb(217, 119, 87)
+// iOS's dark colours
+#define C_WHITE   rgb(255, 255, 255)
+#define C_LABEL2  rgb(152, 152, 159)                   // secondary label
+#define C_LABEL3  rgb(99, 99, 104)                     // tertiary
+#define C_FILL    rgb(44, 44, 46)                      // a button
+#define C_FILL_DN rgb(72, 72, 76)                      // ...pressed
+#define C_ON_DN   rgb(205, 205, 210)                   // a lit button, pressed
+#define C_INK     rgb(18, 18, 20)                      // a glyph on a lit button
+#define C_RED     rgb(255, 59, 48)
+#define C_RED_DN  rgb(200, 45, 37)
+#define C_ORANGE  rgb(255, 159, 10)                    // a warning
+#define C_BLUE    rgb(10, 132, 255)
+#define C_SHEET   rgb(37, 37, 39)
+#define C_SEP     rgb(60, 60, 64)
+#define C_CLAUDE  rgb(217, 119, 87)
+#define C_CLAUDE_DN rgb(180, 96, 68)
 
-#define BTN_Y 392
-#define MIC_R 48
-#define SIDE_R 32
-#define SIDE_DX 124
-#define HOLD_US 500000                                 // holding the speaker this long opens the menu
+#define ORB_Y 154
+#define ORB_R 42
+#define ORB_GROW 14                                     // how much bigger it gets with the sound
+#define ORB_BOX 96                                      // the orb at its biggest, glow and all (r * 1.65)
+#define CAP_Y 248                                       // the line over the reply: what you said (or what's wrong)
+#define SAID_Y 274
+#define BTN_Y 406
+#define MIC_R 34
+#define SIDE_R 30
+#define SIDE_DX 112
+#define LABEL_Y (BTN_Y + MIC_R + 10)
+#define PILL_Y 50
+#define PILL_H 32
+#define HOLD_US 500000                                  // holding the speaker this long opens the menu
 
-enum { B_NONE, B_MIC, B_SPEAKER, B_CLOSE, B_MENU_ROW = 100 };
+enum { B_NONE, B_MIC, B_SPEAKER, B_CLOSE, B_PILL };
 
-static chat_status_t cs;
+EXT_RAM_BSS_ATTR static chat_status_t cs;              // (PSRAM: internal RAM is short)
 static uint32_t seen_version = 0xFFFFFFFF;
-static bool dirty = true;
+static bool dirty = true;                               // something changed: the whole page again
+static bool anim_dirty;                                 // just the orb moved
 static int pressed = B_NONE;                           // what the finger went down on
 static int64_t pressed_at;
 static bool held;                                       // the speaker was held: the menu opened, the tap doesn't count
 static bool menu;
 static int menu_press = -1;
-static float t_anim;                                    // seconds, for the thinking dots
-static float level;                                     // the halo round the mic (eased)
+static float t_anim;                                    // seconds, for the orb's breathing and pulse
+static float level;                                     // how loud it is (eased): the orb grows with it
 
 // What's shown, wrapped to the glass once whenever it changes (draw just copies it out, strip by strip)
 #define LINE_CAP 72
-#define HEARD_LINES 2
-#define SAID_LINES 3                                    // (40 px each: the rest of a long reply rolls up)
-static char heard_l[HEARD_LINES][LINE_CAP], said_l[SAID_LINES][LINE_CAP];
+#define SAID_LINES 3                                    // (the rest of a long reply rolls up as it's spoken)
+EXT_RAM_BSS_ATTR static char heard_l[1][LINE_CAP], said_l[SAID_LINES][LINE_CAP];
 static int n_heard, n_said;
+static const font_t *said_f = &font_body;               // the reply's size: large, or smaller when it's long
+static bool heard_cut;                                  // what you said is longer than its line: "..." before it
 
 // ---------------------------------------------------------------- text
 
@@ -99,8 +119,15 @@ static void refresh(void)
     chat_get(&cs);
     if (cs.version == seen_version) return;
     seen_version = cs.version;
-    n_heard = wrap(&font_label, cs.heard, W - 80, heard_l, HEARD_LINES);
-    n_said = wrap(&font_body, cs.said, W - 64, said_l, SAID_LINES);
+    char tmp[4][LINE_CAP];
+    int n = wrap(&font_small, cs.heard, W - 96, tmp, 4);   // (the end of what you said, if it's long)
+    heard_cut = n > 1;
+    n_heard = n > 0;
+    if (n) snprintf(heard_l[0], LINE_CAP, "%s", tmp[n - 1]);
+    // the reply: large if it fits in two lines, else smaller, three lines (the newest, as it's spoken)
+    char all[24][LINE_CAP];
+    said_f = wrap(&font_body, cs.said, W - 56, all, 24) <= 2 ? &font_body : &font_label;
+    n_said = wrap(said_f, cs.said, W - 56, said_l, said_f == &font_body ? 2 : SAID_LINES);
     dirty = true;
 }
 
@@ -109,7 +136,7 @@ static void text_mid(uint16_t *buf, int y0, int h, int y, const font_t *f, const
     draw_ftext(buf, y0, h, CX - ftext_width(f, s) / 2, y, f, s, col);
 }
 
-// ---------------------------------------------------------------- the buttons' pictures
+// ---------------------------------------------------------------- the pictures
 
 static void line(uint16_t *buf, int y0, int h, float ax, float ay, float bx, float by, float w, uint16_t col)
 {
@@ -120,151 +147,207 @@ static void line(uint16_t *buf, int y0, int h, float ax, float ay, float bx, flo
 // A slash through a glyph, with a gap cut round it in the button's colour
 static void slash(uint16_t *buf, int y0, int h, float cx, float cy, float s, uint16_t fg, uint16_t bg)
 {
-    line(buf, y0, h, cx - 15 * s, cy - 17 * s, cx + 15 * s, cy + 17 * s, 7 * s, bg);
-    line(buf, y0, h, cx - 15 * s, cy - 17 * s, cx + 15 * s, cy + 17 * s, 3 * s, fg);
+    line(buf, y0, h, cx - 13 * s, cy - 15 * s, cx + 13 * s, cy + 15 * s, 6.5f * s, bg);
+    line(buf, y0, h, cx - 13 * s, cy - 15 * s, cx + 13 * s, cy + 15 * s, 2.6f * s, fg);
 }
 
 static void mic_glyph(uint16_t *buf, int y0, int h, float cx, float cy, float s, uint16_t col)
 {
-    aa_rrect(buf, y0, h, cx - 7 * s, cy - 19 * s, cx + 7 * s, cy + 3 * s, 7 * s, col);   // the capsule
+    aa_rrect(buf, y0, h, cx - 6 * s, cy - 16 * s, cx + 6 * s, cy + 3 * s, 6 * s, col);   // the capsule
     float arc[2 * 13];
     for (int i = 0; i <= 12; i++) {                   // the cradle: half a circle under it
         float a = (float)M_PI * i / 12;
-        arc[2 * i] = cx - 12.5f * s * cosf(a);
-        arc[2 * i + 1] = cy - 5 * s + 12.5f * s * sinf(a);
+        arc[2 * i] = cx - 10.5f * s * cosf(a);
+        arc[2 * i + 1] = cy - 4 * s + 10.5f * s * sinf(a);
     }
-    aa_path(buf, y0, h, arc, 13, false, 2.8f * s, col);
-    line(buf, y0, h, cx, cy + 7.5f * s, cx, cy + 15 * s, 2.8f * s, col);               // stand
-    line(buf, y0, h, cx - 7 * s, cy + 15 * s, cx + 7 * s, cy + 15 * s, 2.8f * s, col);  // foot
+    aa_path(buf, y0, h, arc, 13, false, 2.3f * s, col);
+    line(buf, y0, h, cx, cy + 6.5f * s, cx, cy + 12 * s, 2.3f * s, col);              // stand
 }
 
 static void speaker_glyph(uint16_t *buf, int y0, int h, float cx, float cy, float s, uint16_t col)
 {
-    float bx = cx - 6 * s;                             // (the whole thing sits a little left of centre)
-    aa_rrect(buf, y0, h, bx - 12 * s, cy - 5 * s, bx - 5 * s, cy + 5 * s, 1.5f * s, col);
-    fill_tri(buf, y0, h, bx - 6 * s, cy - 5 * s, bx + 3 * s, cy - 12 * s, bx + 3 * s, cy + 12 * s, col);
-    fill_tri(buf, y0, h, bx - 6 * s, cy - 5 * s, bx + 3 * s, cy + 12 * s, bx - 6 * s, cy + 5 * s, col);
-    float cone[8] = {bx - 6 * s, cy - 5 * s, bx + 3 * s, cy - 12 * s, bx + 3 * s, cy + 12 * s, bx - 6 * s, cy + 5 * s};
-    aa_path(buf, y0, h, cone, 4, true, 1.6f * s, col);   // (smooths the triangles' edges)
+    float bx = cx - 5 * s;                             // (the whole thing sits a little left of centre)
+    aa_rrect(buf, y0, h, bx - 10 * s, cy - 4.5f * s, bx - 3 * s, cy + 4.5f * s, 1.5f * s, col);
+    fill_tri(buf, y0, h, bx - 4 * s, cy - 4.5f * s, bx + 4 * s, cy - 11 * s, bx + 4 * s, cy + 11 * s, col);
+    fill_tri(buf, y0, h, bx - 4 * s, cy - 4.5f * s, bx + 4 * s, cy + 11 * s, bx - 4 * s, cy + 4.5f * s, col);
+    float cone[8] = {bx - 4 * s, cy - 4.5f * s, bx + 4 * s, cy - 11 * s, bx + 4 * s, cy + 11 * s, bx - 4 * s, cy + 4.5f * s};
+    aa_path(buf, y0, h, cone, 4, true, 1.4f * s, col);   // (smooths the triangles' edges)
     for (int k = 0; k < 2; k++) {                      // two waves
-        float r = (k ? 15 : 9) * s, pts[2 * 9];
+        float r = (k ? 13 : 7.5f) * s, pts[2 * 9];
         for (int i = 0; i <= 8; i++) {
-            float a = -0.8f + 1.6f * i / 8;
-            pts[2 * i] = bx + 3 * s + r * cosf(a);
+            float a = -0.85f + 1.7f * i / 8;
+            pts[2 * i] = bx + 4 * s + r * cosf(a);
             pts[2 * i + 1] = cy + r * sinf(a);
         }
-        aa_path(buf, y0, h, pts, 9, false, 2.6f * s, col);
+        aa_path(buf, y0, h, pts, 9, false, 2.2f * s, col);
     }
 }
 
-// ---------------------------------------------------------------- the menu (hold the speaker)
+// The orb: a sphere in Claude's orange, lit from above (a soft highlight that drifts round, faster while it thinks),
+// with a glow fading out round it. Drawn a pixel at a time over its box (black behind it). r: its size now; lit: 1
+// in a chat, dimmer before one; grey while you're muted.
+static void draw_orb(uint16_t *buf, int y0, int h, float r, float lit, bool grey, float spin)
+{
+    static const float warm[4][3] = {{247, 176, 140}, {205, 104, 72}, {255, 226, 206}, {217, 119, 87}};   // centre, rim, shine, glow
+    static const float cool[4][3] = {{150, 150, 157}, {78, 78, 84}, {205, 205, 212}, {110, 110, 118}};
+    const float (*c)[3] = grey ? cool : warm;
+    int ya = ORB_Y - ORB_BOX > y0 ? ORB_Y - ORB_BOX : y0, yb = ORB_Y + ORB_BOX < y0 + h ? ORB_Y + ORB_BOX : y0 + h;
+    float glow_r = r * 1.65f, hx = CX - r * 0.28f + r * 0.12f * cosf(spin), hy = ORB_Y - r * 0.34f + r * 0.08f * sinf(spin);
+    for (int y = ya; y < yb; y++) {
+        float dy = y + 0.5f - ORB_Y;
+        if (fabsf(dy) >= glow_r) continue;
+        uint16_t *row = buf + (y - y0) * W;
+        for (int x = CX - (int)glow_r - 1; x <= CX + (int)glow_r + 1; x++) {
+            float dx = x + 0.5f - CX, d2 = dx * dx + dy * dy;
+            if (d2 >= glow_r * glow_r) continue;
+            float d = sqrtf(d2), out[3];
+            float g = 1 - (d - r) / (glow_r - r);       // the glow: fading to nothing
+            g = g < 0 ? 0 : (g > 1 ? 1 : g);
+            g = g * g * 0.42f;
+            float in = r - d + 0.5f;                    // inside the sphere (anti-aliased at its edge)
+            in = in < 0 ? 0 : (in > 1 ? 1 : in);
+            float t = d / r, k = t * t;                 // centre to rim
+            float sx = x + 0.5f - hx, sy = y + 0.5f - hy, sh = 1 - sqrtf(sx * sx + sy * sy) / (r * 0.75f);
+            sh = sh < 0 ? 0 : sh * sh * 0.85f;          // the shine
+            for (int i = 0; i < 3; i++) {
+                float body = c[0][i] + (c[1][i] - c[0][i]) * k;
+                body += (c[2][i] - body) * sh;
+                out[i] = (body * in + c[3][i] * g * (1 - in)) * lit;
+            }
+            row[x] = rgb((int)out[0], (int)out[1], (int)out[2]);
+        }
+    }
+}
 
-#define MENU_W 320
-#define ROW_H 54
-static int menu_rows(void) { return cs.n_models + 1; }   // the models, then New chat
-static int menu_top(void) { return 230 - (menu_rows() * ROW_H + 40) / 2; }
+// A round button with its name under it: dark, or lit (white, a dark glyph) when it's on
+static void button(uint16_t *buf, int y0, int h, float cx, float rad, uint16_t bg, const char *label)
+{
+    aa_disc(buf, y0, h, cx, BTN_Y, rad, bg);
+    draw_ftext(buf, y0, h, (int)cx - ftext_width(&font_small, label) / 2, LABEL_Y, &font_small, label, C_LABEL2);
+}
+
+// ---------------------------------------------------------------- the menu (tap the model, or hold the speaker)
+
+#define MENU_W 300
+#define ROW_H 50
+#define MENU_HEAD 38
+static int menu_rows(void) { return cs.n_models + 1; }   // the models, then New Chat
+static int menu_top(void) { return 236 - (menu_rows() * ROW_H + MENU_HEAD) / 2; }
 
 static int menu_hit(int x, int y)
 {
-    int top = menu_top() + 40;
+    int top = menu_top() + MENU_HEAD;
     if (x < CX - MENU_W / 2 || x >= CX + MENU_W / 2 || y < top) return -2;   // outside: close
     int r = (y - top) / ROW_H;
     return r < menu_rows() ? r : -2;
 }
 
+// The page behind it, dimmed to a third (a modal sheet's backdrop)
+static void dim(uint16_t *buf, int h)
+{
+    for (int i = 0; i < W * h; i++) {
+        uint16_t c = SWAP16(buf[i]);
+        c = (c >> 2) & 0x39E7;                         // each channel a quarter...
+        c += (c >> 1) & 0x39E7;                        // ...and a bit more
+        buf[i] = SWAP16(c);
+    }
+}
+
 static void draw_menu(uint16_t *buf, int y0, int h)
 {
-    int top = menu_top(), bot = top + 40 + menu_rows() * ROW_H, x0 = CX - MENU_W / 2, x1 = CX + MENU_W / 2;
-    aa_rrect(buf, y0, h, x0, top, x1, bot, 18, C_PANEL);
-    draw_ftext(buf, y0, h, x0 + 22, top + 12, &font_small, "MODEL", C_GREY);
+    dim(buf, h);
+    int top = menu_top(), bot = top + MENU_HEAD + menu_rows() * ROW_H, x0 = CX - MENU_W / 2, x1 = CX + MENU_W / 2;
+    aa_rrect(buf, y0, h, x0, top, x1, bot, 14, C_SHEET);
+    draw_ftext(buf, y0, h, x0 + 18, top + 12, &font_small, "Model", C_LABEL2);
     for (int i = 0; i < menu_rows(); i++) {
-        int ry = top + 40 + i * ROW_H;
-        if (i == menu_press) aa_rrect(buf, y0, h, x0 + 6, ry + 3, x1 - 6, ry + ROW_H - 3, 12, C_BTN_DN);
-        if (i > 0) fill_rect(buf, y0, h, x0 + 22, ry, x1 - 22, ry + 1, C_LINE);
-        int ty = ry + (ROW_H - font_body.line_h) / 2;
+        int ry = top + MENU_HEAD + i * ROW_H;
+        bool last = i == menu_rows() - 1;
+        if (i == menu_press) aa_rrect(buf, y0, h, x0, ry, x1, ry + ROW_H, last ? 14 : 0, C_FILL_DN);
+        if (i == menu_press && last) fill_rect(buf, y0, h, x0, ry, x1, ry + 14, C_FILL_DN);   // (square at the top)
+        fill_rect(buf, y0, h, x0 + (last ? 0 : 18), ry, x1, ry + 1, last ? rgb(52, 52, 56) : C_SEP);
+        int ty = ry + (ROW_H - font_label.line_h) / 2;
         if (i < cs.n_models) {
-            draw_ftext(buf, y0, h, x0 + 22, ty, &font_body, cs.models[i], C_WHITE);
+            draw_ftext(buf, y0, h, x0 + 18, ty, &font_label, cs.models[i], C_WHITE);
             if (i == cs.model) {                       // a tick
-                float p[6] = {x1 - 48, ry + 27, x1 - 40, ry + 35, x1 - 26, ry + 19};
-                aa_path(buf, y0, h, p, 3, false, 3.2f, C_BLUE);
+                float p[6] = {x1 - 38, ry + 25, x1 - 32, ry + 31, x1 - 21, ry + 19};
+                aa_path(buf, y0, h, p, 3, false, 2.6f, C_BLUE);
             }
         } else {
-            draw_ftext(buf, y0, h, x0 + 22, ty, &font_body, "New chat", C_BLUE);
+            draw_ftext(buf, y0, h, x0 + 18, ty, &font_label, "New Chat", C_BLUE);
+            float px = x1 - 30, py = ry + ROW_H / 2.0f;   // a plus
+            line(buf, y0, h, px - 7, py, px + 7, py, 2.4f, C_BLUE);
+            line(buf, y0, h, px, py - 7, px, py + 7, 2.4f, C_BLUE);
         }
     }
 }
 
 // ---------------------------------------------------------------- drawing
 
+static float orb_size(void)
+{
+    if (!cs.active || cs.muted) return ORB_R;
+    if (cs.state == CS_THINKING) return ORB_R + 3 * sinf(t_anim * 6);
+    if (cs.state == CS_SPEAKING) return ORB_R + ORB_GROW * level;
+    return ORB_R + 2 * sinf(t_anim * 2.2f) + (ORB_GROW - 2) * level;   // listening: breathing, and growing with your voice
+}
+
 void chat_ui_draw(uint16_t *buf, int y0, int h)
 {
-    // the model, top centre, with Claude's spark
-    if (cs.n_models && 48 < y0 + h && 90 > y0) {
-        char m[40];
-        snprintf(m, sizeof m, "%s", cs.models[cs.model]);
-        int tw = ftext_width(&font_label, m), x = CX - (tw + 30) / 2;
-        pet_ui_spark(buf, y0, h, x + 10, 68, claude[0], claude[1], claude[2], 0.45f);
-        draw_ftext(buf, y0, h, x + 30, 68 - font_label.line_h / 2, &font_label, m, C_GREY);
+    // the orb first (its glow goes behind the pill)
+    draw_orb(buf, y0, h, orb_size(), cs.active ? 1 : 0.6f, cs.active && cs.muted,
+             t_anim * (cs.state == CS_THINKING ? 3.0f : 0.6f));
+
+    // the model, in a pill at the top (tap it for the menu)
+    if (cs.n_models && PILL_Y + PILL_H > y0 && PILL_Y < y0 + h) {
+        const char *m = cs.models[cs.model];
+        int tw = ftext_width(&font_small, m), pw = 22 + 8 + tw + 8 + 12 + 16, px = CX - pw / 2;
+        aa_rrect(buf, y0, h, px, PILL_Y, px + pw, PILL_Y + PILL_H, PILL_H / 2.0f, pressed == B_PILL ? C_FILL_DN : rgb(28, 28, 30));
+        pet_ui_spark(buf, y0, h, px + 16 + 4, PILL_Y + PILL_H / 2, 217, 119, 87, 0.32f);
+        draw_ftext(buf, y0, h, px + 36, PILL_Y + (PILL_H - font_small.line_h) / 2, &font_small, m, C_WHITE);
+        float vx = px + 36 + tw + 12, vy = PILL_Y + PILL_H / 2.0f;   // a chevron: it opens
+        float v[6] = {vx - 4, vy - 2, vx, vy + 2, vx + 4, vy - 2};
+        aa_path(buf, y0, h, v, 3, false, 1.8f, C_LABEL2);
     }
 
-    // the conversation: what you said (grey), then what Claude's saying (white)
-    if (!cs.active && !cs.said[0]) {
-        pet_ui_spark(buf, y0, h, CX, 190, claude[0], claude[1], claude[2], 1.6f);
-        const char *hint = !cs.mac ? "Open Bobble on your Mac to talk" : "Tap the mic to talk to Claude";
-        text_mid(buf, y0, h, 262, &font_label, hint, C_GREY);
+    // what you said (or what's wrong), then what Claude's saying, or what's going on
+    if (cs.status[0] || n_heard) {
+        char t[LINE_CAP + 4];
+        if (cs.status[0]) plain(t, sizeof t, cs.status);
+        else snprintf(t, sizeof t, "%s%s", heard_cut ? "..." : "", heard_l[0]);
+        text_mid(buf, y0, h, CAP_Y, &font_small, t, cs.status[0] ? C_ORANGE : C_LABEL2);
+    }
+    if (n_said) {
+        for (int i = 0; i < n_said; i++) text_mid(buf, y0, h, SAID_Y + i * said_f->line_h, said_f, said_l[i], C_WHITE);
     } else {
-        int y = 104;
-        for (int i = 0; i < n_heard; i++, y += font_label.line_h) text_mid(buf, y0, h, y, &font_label, heard_l[i], C_GREY);
-        if (n_heard) y += 14;
-        for (int i = 0; i < n_said; i++, y += font_body.line_h) text_mid(buf, y0, h, y, &font_body, said_l[i], C_WHITE);
+        const char *hint = !cs.active ? (cs.mac ? "Tap to talk to Claude" : "Open Bobble on your Mac to talk")
+                         : cs.muted ? "You're muted" : cs.state == CS_THINKING ? "Thinking..." : "Listening...";
+        text_mid(buf, y0, h, SAID_Y + 8, &font_label, hint, C_LABEL3);
     }
 
-    // the line over the buttons: what's going on
-    const char *note = cs.status[0] ? cs.status
-                     : !cs.active ? ""
-                     : cs.muted ? "You're muted"
-                     : cs.state == CS_THINKING ? "Thinking"
-                     : cs.state == CS_LISTENING ? "Listening" : "";
-    if (*note) {
-        char n[96];
-        plain(n, sizeof n, note);
-        text_mid(buf, y0, h, 294, &font_small, n, cs.status[0] ? rgb(255, 159, 10) : C_DIM);
-    }
-
-    if (BTN_Y + MIC_R + 40 < y0 || BTN_Y - MIC_R - 40 > y0 + h) { if (menu) draw_menu(buf, y0, h); return; }
-
-    // the mic: grey before a chat, Claude's orange while it listens (a halo that grows with your voice, or with
-    // Claude's while it speaks), white with a slash when muted
-    bool live = cs.active && !cs.muted;
-    if (cs.active && level > 0.02f) {
-        float k = 0.18f + 0.3f * level;
-        aa_disc(buf, y0, h, CX, BTN_Y, MIC_R + 6 + 26 * level, rgb(claude[0] * k, claude[1] * k, claude[2] * k));
-    }
-    if (cs.active && cs.state == CS_THINKING && !cs.muted)   // three dots going round while it thinks
-        for (int i = 0; i < 3; i++) {
-            float a = t_anim * 3.2f + i * 2.094f;
-            aa_disc(buf, y0, h, CX + (MIC_R + 14) * cosf(a), BTN_Y + (MIC_R + 14) * sinf(a), 4, C_CLAUDE);
+    if (BTN_Y + MIC_R + 40 >= y0 && BTN_Y - MIC_R <= y0 + h) {
+        // speaker (left), in a chat: lit when Claude's muted
+        float sx = CX - SIDE_DX;
+        bool sp = cs.speaker_muted;
+        if (cs.active) {
+            button(buf, y0, h, sx, SIDE_R, sp ? (pressed == B_SPEAKER ? C_ON_DN : C_WHITE) : pressed == B_SPEAKER ? C_FILL_DN : C_FILL, "speaker");
+            speaker_glyph(buf, y0, h, sx + 2, BTN_Y, 0.95f, sp ? C_INK : C_WHITE);
+            if (sp) slash(buf, y0, h, sx, BTN_Y, 0.95f, C_INK, pressed == B_SPEAKER ? C_ON_DN : C_WHITE);
         }
-    uint16_t mic_bg = cs.muted ? C_WHITE : live ? C_CLAUDE : pressed == B_MIC ? C_BTN_DN : C_BTN;
-    if (pressed == B_MIC && (live || cs.muted)) mic_bg = cs.muted ? rgb(210, 210, 214) : rgb(190, 100, 72);
-    aa_disc(buf, y0, h, CX, BTN_Y, MIC_R, mic_bg);
-    mic_glyph(buf, y0, h, CX, BTN_Y + 2, 1.35f, cs.muted ? rgb(20, 20, 24) : C_WHITE);
-    if (cs.muted) slash(buf, y0, h, CX, BTN_Y + 1, 1.35f, rgb(20, 20, 24), C_WHITE);
 
-    // the speaker (white with a slash when Claude's muted)
-    float sx = CX + SIDE_DX;
-    uint16_t sp_bg = cs.speaker_muted ? (pressed == B_SPEAKER ? rgb(210, 210, 214) : C_WHITE) : pressed == B_SPEAKER ? C_BTN_DN : C_BTN;
-    aa_disc(buf, y0, h, sx, BTN_Y, SIDE_R, sp_bg);
-    uint16_t sp_fg = cs.speaker_muted ? rgb(20, 20, 24) : C_WHITE;
-    speaker_glyph(buf, y0, h, sx + 2, BTN_Y, 0.9f, sp_fg);
-    if (cs.speaker_muted) slash(buf, y0, h, sx, BTN_Y, 0.9f, sp_fg, sp_bg);
+        // the mic (middle): Claude's orange to start a chat; in one, dark, or lit with a slash when you're muted
+        uint16_t mb = !cs.active ? (pressed == B_MIC ? C_CLAUDE_DN : C_CLAUDE)
+                    : cs.muted ? (pressed == B_MIC ? C_ON_DN : C_WHITE) : pressed == B_MIC ? C_FILL_DN : C_FILL;
+        button(buf, y0, h, CX, MIC_R, mb, !cs.active ? "talk" : cs.muted ? "unmute" : "mute");
+        mic_glyph(buf, y0, h, CX, BTN_Y + 1, 1.15f, cs.active && cs.muted ? C_INK : C_WHITE);
+        if (cs.active && cs.muted) slash(buf, y0, h, CX, BTN_Y, 1.15f, C_INK, pressed == B_MIC ? C_ON_DN : C_WHITE);
 
-    // the X: ends the chat
-    if (cs.active) {
-        float xx = CX - SIDE_DX;
-        aa_disc(buf, y0, h, xx, BTN_Y, SIDE_R, pressed == B_CLOSE ? rgb(200, 50, 42) : C_RED);
-        line(buf, y0, h, xx - 9, BTN_Y - 9, xx + 9, BTN_Y + 9, 3.4f, C_WHITE);
-        line(buf, y0, h, xx - 9, BTN_Y + 9, xx + 9, BTN_Y - 9, 3.4f, C_WHITE);
+        // end (right), in a chat
+        if (cs.active) {
+            float ex = CX + SIDE_DX;
+            button(buf, y0, h, ex, SIDE_R, pressed == B_CLOSE ? C_RED_DN : C_RED, "end");
+            line(buf, y0, h, ex - 8, BTN_Y - 8, ex + 8, BTN_Y + 8, 3, C_WHITE);
+            line(buf, y0, h, ex - 8, BTN_Y + 8, ex + 8, BTN_Y - 8, 3, C_WHITE);
+        }
     }
     if (menu) draw_menu(buf, y0, h);
 }
@@ -273,13 +356,13 @@ void chat_ui_draw(uint16_t *buf, int y0, int h)
 
 static int hit(int x, int y)
 {
-    float dy = y - BTN_Y, dm = hypotf(x - CX, dy), ds = hypotf(x - (CX + SIDE_DX), dy), dc = hypotf(x - (CX - SIDE_DX), dy);
+    float dy = y - BTN_Y, dm = hypotf(x - CX, dy), ds = hypotf(x - (CX - SIDE_DX), dy), dc = hypotf(x - (CX + SIDE_DX), dy);
     if (dm < MIC_R + 14) return B_MIC;
-    if (ds < SIDE_R + 16) return B_SPEAKER;
+    if (cs.active && ds < SIDE_R + 16) return B_SPEAKER;
     if (cs.active && dc < SIDE_R + 16) return B_CLOSE;
+    if (cs.n_models && y >= PILL_Y - 8 && y < PILL_Y + PILL_H + 8 && x > CX - 110 && x < CX + 110) return B_PILL;
     return B_NONE;
 }
-
 void chat_ui_cancel_touch(void)
 {
     if (pressed || menu_press >= 0) dirty = true;
@@ -330,24 +413,34 @@ void chat_ui_update(int tx, int ty, int64_t now)
             if (pressed == B_MIC) chat_tap_mic();
             else if (pressed == B_SPEAKER) chat_toggle_speaker();
             else if (pressed == B_CLOSE) chat_close();
+            else if (pressed == B_PILL) menu = true;
             pressed = B_NONE;
             dirty = true;
         }
     }
     was_down = down;
 
-    // the halo follows the sound; the dots go round while it thinks
+    // the orb follows the sound, breathes and pulses. At most 15 times a second, and only its box is redrawn for it
+    // (chat_ui_take_rect): whole frames at full speed beside the echo canceller were more than PSRAM could keep up
+    // with, and the panel showed broken rows.
+    static int64_t anim_at;
+    if (now - anim_at < 66000) return;
+    anim_at = now;
     float target = chat_level();
     float nl = level + (target - level) * (dt > 0 ? fminf(1, dt * 14) : 1);
-    if (fabsf(nl - level) > 0.004f || (level > 0 && target == 0)) { level = nl < 0.003f ? 0 : nl; dirty = true; }
-    if (cs.active && cs.state == CS_THINKING) { t_anim += dt; dirty = true; }
+    if (fabsf(nl - level) > 0.004f || (level > 0 && target == 0)) { level = nl < 0.003f ? 0 : nl; anim_dirty = true; }
+    if (cs.active && !cs.muted) { t_anim += 0.066f; anim_dirty = true; }   // (breathing, pulsing, the sheen going round)
 }
 
-bool chat_ui_dirty(void)
+bool chat_ui_dirty(void) { return dirty || anim_dirty; }
+
+int chat_ui_take_rect(int r[4])
 {
-    bool d = dirty;
-    dirty = false;
-    return d;
+    bool whole = dirty;
+    dirty = anim_dirty = false;
+    if (whole) return 0;
+    r[0] = CX - ORB_BOX; r[1] = ORB_Y - ORB_BOX; r[2] = CX + ORB_BOX; r[3] = ORB_Y + ORB_BOX;
+    return 1;
 }
 
-bool chat_ui_animating(void) { return cs.active && (level > 0 || cs.state == CS_THINKING); }
+bool chat_ui_animating(void) { return cs.active && !cs.muted; }

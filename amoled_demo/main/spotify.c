@@ -347,15 +347,43 @@ static void prefetch_next(void)
 }
 
 // A downloaded JPEG and its decoding (640x640 or smaller), shared by the covers and the Library's thumbnails
-#define JPG_CAP (400 * 1024)
+#define JPG_CAP (256 * 1024)                      // (a 640 px cover is ~150 KB; the ones used are smaller)
 static uint8_t *jpg;
-static uint16_t *raw;
 
 static bool jpeg_bufs(void)
 {
     if (!jpg) jpg = heap_caps_malloc(JPG_CAP, MALLOC_CAP_SPIRAM);
-    if (!raw) raw = heap_caps_malloc(640 * 640 * 2, MALLOC_CAP_SPIRAM);
-    return jpg && raw;
+    return jpg;
+}
+
+// ...and given back as soon as a cover's done: the calendar, the Library's covers and a voice chat need the PSRAM the
+// rest of the time
+static void jpeg_bufs_free(void)
+{
+    heap_caps_free(jpg);
+    jpg = NULL;
+}
+
+// Decode jpg (len bytes), shrunk by the decoder as far as it can while staying at least min_side px across, into a
+// buffer just big enough for it (the caller frees it). A fixed 640 x 640 buffer was 800 KB in one piece, which PSRAM
+// often doesn't have: then no cover loaded at all.
+static uint16_t *decode_jpg(int len, int min_side, esp_jpeg_image_output_t *im)
+{
+    esp_jpeg_image_cfg_t jc = {
+        .indata = jpg, .indata_size = len, .out_format = JPEG_IMAGE_FORMAT_RGB565, .out_scale = JPEG_IMAGE_SCALE_0,
+        .flags = {.swap_color_bytes = 1},
+    };
+    if (esp_jpeg_get_image_info(&jc, im) != ESP_OK || !im->width || !im->height) return NULL;
+    int sc = 0, side = im->width < im->height ? im->width : im->height;
+    while (sc < 3 && side >> (sc + 1) >= min_side) sc++;
+    size_t bytes = (size_t)(((im->width + 15) >> sc) + 2) * (((im->height + 15) >> sc) + 2) * 2;   // (room for the decoder's rounding)
+    uint16_t *out = heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM);
+    if (!out) return NULL;
+    jc.outbuf = (uint8_t *)out;
+    jc.outbuf_size = bytes;
+    jc.out_scale = sc;
+    if (esp_jpeg_decode(&jc, im) != ESP_OK || !im->width) { heap_caps_free(out); return NULL; }
+    return out;
 }
 
 static void load_art(const char *url)
@@ -371,13 +399,10 @@ static void load_art(const char *url)
     else len = download(url, jpg, JPG_CAP, false);
     if (len < 100) { ESP_LOGW(TAG, "art download failed (%d)", len); return; }
 
-    esp_jpeg_image_cfg_t jc = {
-        .indata = jpg, .indata_size = len, .outbuf = (uint8_t *)raw, .outbuf_size = 640 * 640 * 2,
-        .out_format = JPEG_IMAGE_FORMAT_RGB565, .out_scale = JPEG_IMAGE_SCALE_0, .flags = {.swap_color_bytes = 1},
-    };
     int64_t t1 = esp_timer_get_time();
     esp_jpeg_image_output_t out;
-    if (esp_jpeg_decode(&jc, &out) != ESP_OK || !out.width) { ESP_LOGW(TAG, "art decode failed"); return; }
+    uint16_t *raw = decode_jpg(len, SCREEN_ROUND ? W : ART_SZ, &out);
+    if (!raw) { ESP_LOGW(TAG, "art decode failed"); return; }
     int64_t t2 = esp_timer_get_time();
 
     // scale to fill the round screen, darken so text and controls stay readable, and fade the edge of
@@ -419,6 +444,7 @@ static void load_art(const char *url)
         }
     }
 #endif
+    heap_caps_free(raw);
     art_cur = art_cur == 0 ? 1 : 0;
     art_version++;
     want_prefetch = true;                             // new song: look up the one after it
@@ -520,18 +546,10 @@ static int img_get(const char *url)
 // Decode jpg (len bytes) and shrink its middle square to SP_THUMB px into out, averaging the pixels each one covers
 static bool shrink_thumb(int len, uint16_t *out)
 {
-    esp_jpeg_image_cfg_t jc = {
-        .indata = jpg, .indata_size = len, .outbuf = (uint8_t *)raw, .outbuf_size = 640 * 640 * 2,
-        .out_format = JPEG_IMAGE_FORMAT_RGB565, .out_scale = JPEG_IMAGE_SCALE_0, .flags = {.swap_color_bytes = 1},
-    };
     esp_jpeg_image_output_t im;
-    if (esp_jpeg_get_image_info(&jc, &im) != ESP_OK || !im.width || !im.height) return false;
-    int sc = 0, side = im.width < im.height ? im.width : im.height;
-    while (sc < 3 && side >> (sc + 1) >= SP_THUMB) sc++;   // let the decoder do most of the shrinking
-    if ((im.width >> sc) * (im.height >> sc) > 640 * 640) return false;
-    jc.out_scale = sc;
-    if (esp_jpeg_decode(&jc, &im) != ESP_OK || !im.width) return false;
-    side = im.width < im.height ? im.width : im.height;
+    uint16_t *raw = decode_jpg(len, SP_THUMB, &im);    // (the decoder does most of the shrinking)
+    if (!raw) return false;
+    int side = im.width < im.height ? im.width : im.height;
     int ox = (im.width - side) / 2, oy = (im.height - side) / 2;
     for (int y = 0; y < SP_THUMB; y++) {
         int ya = oy + y * side / SP_THUMB, yb = oy + (y + 1) * side / SP_THUMB;
@@ -547,6 +565,7 @@ static bool shrink_thumb(int len, uint16_t *out)
             out[y * SP_THUMB + x] = SWAP16((uint16_t)((r / n) << 11 | (g / n) << 5 | (b / n)));
         }
     }
+    heap_caps_free(raw);
     return true;
 }
 
@@ -717,6 +736,7 @@ static void parse_player(const char *json)
     if (url && strcmp(url, art_url)) {                // new album: fetch its cover
         strlcpy(art_url, url, sizeof art_url);
         load_art(url);
+        jpeg_bufs_free();
     }
     cJSON_Delete(j);
 }
@@ -1068,6 +1088,7 @@ static void poll_player(void)
         if (art && strcmp(art, art_url)) {
             strlcpy(art_url, art, sizeof art_url);
             load_art(art_url);
+            jpeg_bufs_free();
         }
     }
 }
@@ -1095,7 +1116,7 @@ static void sp_task(void *arg)
         if (lib_visible && esp_timer_get_time() - lib_loaded_us > 60000000) load_library();   // devices come and go
         poll_player();
         if (want_prefetch && awake && st.active && !uxQueueMessagesWaiting(cmds)) prefetch_next();
-        if (awake) load_thumbs(lib_visible ? 2000000 : 500000);   // the Library's covers: quickly while it's up
+        if (awake) { load_thumbs(lib_visible ? 2000000 : 500000); jpeg_bufs_free(); }   // the Library's covers: quickly while it's up
         static int64_t stack_log;
         if (esp_timer_get_time() - stack_log > 600000000) {
             stack_log = esp_timer_get_time();

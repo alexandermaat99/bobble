@@ -48,7 +48,7 @@ static const char *TAG = "audio";
 static esp_codec_dev_handle_t in_dev, out_dev;
 static aec_handle_t *aec;
 static int chunk;                        // samples per AEC frame
-static int16_t *raw, *mic, *ref, *clean, *play;
+static int16_t *raw, *mic, *ref, *clean;
 static TaskHandle_t task;
 static SemaphoreHandle_t wake, opened, ring_lock;
 static volatile bool want, running, speaker_mute;
@@ -56,7 +56,7 @@ static volatile bool open_ok;
 static audio_mic_cb mic_cb;
 static volatile float mic_lvl, out_lvl;
 static int16_t *ring;
-static int ring_cap;                     // samples it holds: up to 15 s of reply waiting to be played (less if PSRAM is short)
+static int ring_cap;                     // samples it holds: a few seconds of reply waiting to be played (the Mac keeps 2 s ahead)
 static volatile int ring_r, ring_n;      // read position, how many queued
 static int16_t click[AUDIO_RATE * 60 / 1000], quiet[AUDIO_RATE * 30 / 1000];
 static volatile bool click_wanted;       // audio_click() asked for one...
@@ -85,11 +85,22 @@ static void follow_volume(void)
     vol_set = v;
 }
 
+static i2s_chan_handle_t tx, rx;
+
+// Gives back the I2S channels (and their DMA buffers) after a setup that didn't work, so the next try can start clean
+static void hw_undo(void)
+{
+    if (tx) { i2s_channel_disable(tx); i2s_del_channel(tx); tx = NULL; }
+    if (rx) { i2s_channel_disable(rx); i2s_del_channel(rx); rx = NULL; }
+}
+
 static bool hw_init(void)
 {
-    i2s_chan_handle_t tx, rx;
-    i2s_chan_config_t cc = {.id = I2S_NUM_0, .role = I2S_ROLE_MASTER, .dma_desc_num = 6, .dma_frame_num = 240,
+    // DMA buffers in internal RAM (all I2S can use), which is short here: 6 x 8 ms each way (the microphones' side has
+    // to hold a 32 ms frame while the last one's echo-cancelled), about 9 KB
+    i2s_chan_config_t cc = {.id = I2S_NUM_0, .role = I2S_ROLE_MASTER, .dma_desc_num = 6, .dma_frame_num = 128,
                             .auto_clear_after_cb = true};
+    ESP_LOGI(TAG, "starting: %u bytes of internal DMA memory free", (unsigned)heap_caps_get_free_size(MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL));
     if (i2s_new_channel(&cc, &tx, &rx) != ESP_OK) return false;
     i2s_std_config_t std = {
         .clk_cfg = {.sample_rate_hz = AUDIO_RATE, .clk_src = I2S_CLK_SRC_DEFAULT, .mclk_multiple = I2S_MCLK_MULTIPLE_256},
@@ -133,28 +144,51 @@ static bool hw_init(void)
     dc.dev_type = ESP_CODEC_DEV_TYPE_IN;
     dc.codec_if = in_codec;
     in_dev = esp_codec_dev_new(&dc);
-    if (!out_dev || !in_dev) return false;
+    return out_dev && in_dev;
+}
 
+// The echo canceller and the reply's buffer: made when a chat starts and freed when it ends. PSRAM is mostly the
+// screen's frames, and the calendar needs a lot of what's left while it reads a big calendar (holding these for good
+// left it with no room: every event was dropped).
+static bool session_alloc(void)
+{
+    size_t before = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
     aec_config_t ac = {.mic_num = 1, .ref_num = 1, .out_num = 1, .filter_length = 4, .sample_rate = AUDIO_RATE,
                        .caps = MALLOC_CAP_SPIRAM, .mode = AEC_MODE_FD_LOW_COST, .nlp_level = AEC_NLP_LEVEL_AGGR};
-    aec = aec_create_from_config(&ac);
+    if (!aec) aec = aec_create_from_config(&ac);
     if (!aec) return false;
     chunk = aec_get_chunksize(aec);
-    raw = heap_caps_aligned_alloc(16, chunk * 2 * sizeof(int16_t), MALLOC_CAP_SPIRAM);
-    mic = heap_caps_aligned_alloc(16, chunk * sizeof(int16_t), MALLOC_CAP_SPIRAM);
-    ref = heap_caps_aligned_alloc(16, chunk * sizeof(int16_t), MALLOC_CAP_SPIRAM);
-    clean = heap_caps_aligned_alloc(16, chunk * sizeof(int16_t), MALLOC_CAP_SPIRAM);
-    play = heap_caps_aligned_alloc(16, chunk * sizeof(int16_t), MALLOC_CAP_SPIRAM);
-    static const int secs[] = {15, 8, 4};          // (PSRAM is mostly frames: take what fits rather than no speech at all)
-    for (int i = 0; i < 3 && !ring; i++) {
-        ring_cap = AUDIO_RATE * secs[i];
-        ring = heap_caps_malloc(ring_cap * sizeof(int16_t), MALLOC_CAP_SPIRAM);
+    if (!raw) {                                       // (small, and the same every time: kept)
+        raw = heap_caps_aligned_alloc(16, chunk * 2 * sizeof(int16_t), MALLOC_CAP_SPIRAM);
+        mic = heap_caps_aligned_alloc(16, chunk * sizeof(int16_t), MALLOC_CAP_SPIRAM);
+        ref = heap_caps_aligned_alloc(16, chunk * sizeof(int16_t), MALLOC_CAP_SPIRAM);
+        clean = heap_caps_aligned_alloc(16, chunk * sizeof(int16_t), MALLOC_CAP_SPIRAM);
     }
-    if (!ring) ring_cap = 0;
-    else if (ring_cap < AUDIO_RATE * 15) ESP_LOGW(TAG, "room for %d s of reply only", ring_cap / AUDIO_RATE);
-    if (!raw || !mic || !ref || !clean || !play) return false;
-    ESP_LOGI(TAG, "ready: %s, %d-sample frames", aec_get_config_string(aec), chunk);
+    int16_t *r = NULL;
+    int cap = 0;
+    static const int secs[] = {5, 3};               // (the Mac sends 2 s ahead: 5 s is plenty, 3 s will do)
+    for (int i = 0; i < 2 && !r; i++) r = heap_caps_malloc((cap = AUDIO_RATE * secs[i]) * sizeof(int16_t), MALLOC_CAP_SPIRAM);
+    xSemaphoreTake(ring_lock, portMAX_DELAY);
+    ring = r;
+    ring_cap = r ? cap : 0;
+    ring_r = ring_n = 0;
+    xSemaphoreGive(ring_lock);
+    if (!raw || !mic || !ref || !clean || !ring) return false;
+    ESP_LOGI(TAG, "on: %d-sample frames, %u KB of PSRAM for the echo canceller and the reply (%u KB left)", chunk,
+             (unsigned)((before - heap_caps_get_free_size(MALLOC_CAP_SPIRAM)) / 1024),
+             (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024));
     return true;
+}
+
+static void session_free(void)
+{
+    if (aec) { aec_destroy(aec); aec = NULL; }
+    xSemaphoreTake(ring_lock, portMAX_DELAY);
+    int16_t *r = ring;
+    ring = NULL;
+    ring_cap = ring_n = 0;
+    xSemaphoreGive(ring_lock);
+    heap_caps_free(r);
 }
 
 static bool devs_open(void)
@@ -174,7 +208,7 @@ static bool devs_open(void)
 static void ring_take(int16_t *out, int n)
 {
     xSemaphoreTake(ring_lock, portMAX_DELAY);
-    int k = ring_n < n ? ring_n : n;
+    int k = !ring ? 0 : ring_n < n ? ring_n : n;
     for (int i = 0; i < k; i++) out[i] = ring[(ring_r + i) % ring_cap];
     if (k) ring_r = (ring_r + k) % ring_cap;          // (no ring at all: ring_cap 0, nothing taken)
     ring_n -= k;
@@ -202,6 +236,36 @@ static void tick_alone(void)
     esp_codec_dev_write(out_dev, quiet, sizeof quiet);       // (so the tick's tail isn't cut off when it closes)
 }
 
+// During a chat, the speaker has a task of its own: small pieces, one after another, so its buffer never runs dry
+// while the echo canceller works through a 32 ms frame (doing both in one loop left a gap every frame: a crackle all
+// through the voice). A tick from the volume slider is mixed in.
+#define PLAY_N 128                               // 8 ms a piece
+static SemaphoreHandle_t play_wake;
+static volatile bool play_parked = true;        // the speaker task is waiting (not writing): safe to close the codec
+
+static void play_task(void *arg)
+{
+    static int16_t piece[PLAY_N];
+    for (;;) {
+        if (!running) {
+            play_parked = true;
+            xSemaphoreTake(play_wake, portMAX_DELAY);
+            continue;
+        }
+        play_parked = false;
+        follow_volume();
+        ring_take(piece, PLAY_N);
+        level_update(&out_lvl, piece, PLAY_N);
+        if (click_wanted) { click_wanted = false; click_at = device_volume_get() > 0 ? 0 : -1; }
+        for (int i = 0, n = sizeof click / sizeof click[0]; click_at >= 0 && i < PLAY_N; i++, click_at++) {   // a tick over it
+            if (click_at >= n) { click_at = -1; break; }
+            int v = piece[i] + click[click_at];
+            piece[i] = v > 32767 ? 32767 : (v < -32768 ? -32768 : v);
+        }
+        esp_codec_dev_write(out_dev, piece, sizeof piece);   // (waits for room: that's what keeps it in time)
+    }
+}
+
 static void audio_task(void *arg)
 {
     for (;;) {
@@ -210,13 +274,14 @@ static void audio_task(void *arg)
                 if (out_only) { esp_codec_dev_close(out_dev); out_only = false; }   // (a chat opens both)
                 open_ok = devs_open();
                 running = open_ok;
-                if (running) sq_amp(true);
+                if (running) { sq_amp(true); xSemaphoreGive(play_wake); }
                 else want = false;
             } else {
+                running = false;
+                for (int i = 0; i < 50 && !play_parked; i++) vTaskDelay(pdMS_TO_TICKS(2));   // (its last piece)
                 sq_amp(false);
                 esp_codec_dev_close(in_dev);
                 esp_codec_dev_close(out_dev);
-                running = false;
                 mic_lvl = out_lvl = 0;
             }
             xSemaphoreGive(opened);
@@ -230,21 +295,11 @@ static void audio_task(void *arg)
             }
             continue;
         }
-        follow_volume();
         if (esp_codec_dev_read(in_dev, raw, chunk * 2 * sizeof(int16_t)) != ESP_CODEC_DEV_OK) { vTaskDelay(1); continue; }
         for (int i = 0; i < chunk; i++) { mic[i] = raw[2 * i]; ref[i] = raw[2 * i + 1]; }
         aec_process(aec, mic, ref, clean);
         level_update(&mic_lvl, clean, chunk);
         if (mic_cb) mic_cb(clean, chunk);
-        ring_take(play, chunk);
-        level_update(&out_lvl, play, chunk);
-        if (click_wanted) { click_wanted = false; click_at = device_volume_get() > 0 ? 0 : -1; }
-        for (int i = 0, n = sizeof click / sizeof click[0]; click_at >= 0 && i < chunk; i++, click_at++) {   // a tick over it
-            if (click_at >= n) { click_at = -1; break; }
-            int v = play[i] + click[click_at];
-            play[i] = v > 32767 ? 32767 : (v < -32768 ? -32768 : v);
-        }
-        esp_codec_dev_write(out_dev, play, chunk * sizeof(int16_t));
     }
 }
 
@@ -252,14 +307,14 @@ bool audio_available(void) { return true; }
 
 static bool task_up(void)
 {
-    static bool failed;
     if (task) return true;
-    if (failed) return false;
-    if (!hw_init()) { failed = true; ESP_LOGE(TAG, "the speaker and microphones didn't come up"); return false; }
+    if (!hw_init()) { ESP_LOGE(TAG, "the speaker and microphones didn't come up"); hw_undo(); return false; }   // (next tap tries again)
     make_click();
     wake = xSemaphoreCreateBinary();
     opened = xSemaphoreCreateBinary();
     ring_lock = xSemaphoreCreateMutex();
+    play_wake = xSemaphoreCreateBinary();
+    xTaskCreatePinnedToCoreWithCaps(play_task, "speaker", 3072, NULL, 10, NULL, 1, MALLOC_CAP_SPIRAM);
     // (above the drawing, which uses both cores in bursts: a late frame here is a click in the speaker; its stack in
     // PSRAM, as the square runs its code from there anyway: internal RAM is short)
     xTaskCreatePinnedToCoreWithCaps(audio_task, "audio", 6144, NULL, 9, &task, 1, MALLOC_CAP_SPIRAM);
@@ -278,12 +333,12 @@ bool audio_start(audio_mic_cb cb)
     if (!task_up()) return false;
     mic_cb = cb;
     if (running) return true;
-    audio_flush();
+    if (!session_alloc()) { ESP_LOGE(TAG, "not enough memory for a chat"); session_free(); return false; }
     xSemaphoreTake(opened, 0);
     want = true;
     xSemaphoreGive(wake);
     xSemaphoreTake(opened, pdMS_TO_TICKS(1500));
-    if (!open_ok) ESP_LOGE(TAG, "couldn't open the codecs");
+    if (!open_ok) { ESP_LOGE(TAG, "couldn't open the codecs"); if (!running) session_free(); }
     return open_ok;
 }
 
@@ -293,13 +348,14 @@ void audio_stop(void)
     xSemaphoreTake(opened, 0);
     want = false;
     xSemaphoreTake(opened, pdMS_TO_TICKS(500));
-    audio_flush();
+    if (!running) session_free();                     // (the audio task has let go of them)
 }
 
 void audio_play(const int16_t *pcm, int n)
 {
-    if (!ring) return;
+    if (!ring_lock) return;
     xSemaphoreTake(ring_lock, portMAX_DELAY);
+    if (!ring) n = 0;
     int room = ring_cap - ring_n;
     if (n > room) n = room;                           // (the Mac keeps well ahead of this: nothing to lose normally)
     int w = (ring_r + ring_n) % ring_cap;

@@ -207,6 +207,7 @@ static bool fetch_one(int k, time_t from, time_t to, char *why, size_t why_len)
     }
     ical_finish(p);
     if (n < 0 || !esp_http_client_is_complete_data_received(c)) { snprintf(why, why_len, "download interrupted"); goto done; }
+    if (!ical_complete(p)) { snprintf(why, why_len, "out of memory"); goto done; }   // (keeps the last good copy)
 
     EXT_RAM_BSS_ATTR static ical_item_t fresh[MAX_PER_CAL];
     int count = ical_expand(p, from, to, fresh, MAX_PER_CAL);

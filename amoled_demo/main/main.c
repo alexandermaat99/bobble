@@ -1785,11 +1785,16 @@ void app_main(void)
         if (pet_dirty) pet_moved = now;
         else if (pet_moved && now - pet_moved > 250000) { pet_moved = 0; force_redraw = true; }
         int64_t full_every = page == PAGE_PET && sheet <= 0 ? 10000000 : 1000000;
-        bool others = force_redraw || pg_drag || pg_off != 0 || ota_progress() >= 0 || cal_ui_animating() || music_dirty || lib_dirty || chat_dirty ||
+        bool others = force_redraw || pg_drag || pg_off != 0 || ota_progress() >= 0 || cal_ui_animating() || music_dirty || lib_dirty ||
                       ((down || prev_down) && page != PAGE_PET) || card_drag || target >= 0 || sheet > 0 || now - last_full >= full_every;
-        bool content = others || pet_dirty;
+        bool content = others || pet_dirty || chat_dirty;
         // just the eyes moved: redraw only around them (a full frame still comes every second for the clock and status)
         part_cnt = pet_dirty && !others && ang == last_ang ? pet_ui_take_rects(part_rect) : 0;
+        if (chat_dirty) {                              // the chat page: just the orb, if that's all
+            int r[4];
+            part_cnt = chat_ui_take_rect(r) && !others && ang == last_ang ? 1 : 0;
+            if (part_cnt) memcpy(part_rect[0], r, sizeof r);
+        }
         part_on = part_cnt > 0;
         if (pet_dirty && !part_on) pet_ui_take_rect(NULL, NULL, NULL, NULL);
         // dragging the brightness slider on the open card: just its rows (the whole card made the slider lag)
@@ -1820,8 +1825,9 @@ void app_main(void)
         if (now - log_t > 5000000) {
             ESP_LOGI(TAG, "page %d: redraws lib %d music %d slide %d rot %d, pg_off %d", page, why_lib, why_music, why_slide, why_rot, (int)pg_off);
             why_lib = why_music = why_slide = why_rot = 0;
-            ESP_LOGI(TAG, "%s %d frames/s, angle %d, battery %.2f V (%d%%%s, curve from %d runs%s), free internal %u, calendar: %s", sheet >= H ? "wifi" : "calendar",
+            ESP_LOGI(TAG, "%s %d frames/s, angle %d, battery %.2f V (%d%%%s, curve from %d runs%s), free internal %u, psram %u KB (largest %u KB), calendar: %s", sheet >= H ? "wifi" : "calendar",
                      frames / 5, (int)ang, battery_volts(), battery_percent(), battery_charging() ? ", charging" : "", battery_learned_runs(), battery_logging() ? ", logging" : "", (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                     (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024), (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM) / 1024),
                      calendar_loaded() ? "loaded" : calendar_error());
             if (frames > part_n) ESP_LOGI(TAG, "render %d ms/full frame, %d eyes-only frames at %d ms (all frames: draw %d ms, turn+send %d ms)",
                                           (int)(render_us / (frames - part_n) / 1000), part_n, part_n ? (int)(part_us / part_n / 1000) : 0,
