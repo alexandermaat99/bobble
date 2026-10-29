@@ -51,7 +51,8 @@ void aa_icon(uint16_t *buf, int y0, int h, float cx, float cy, float size, const
 typedef struct { uint32_t off; uint8_t w, h; int8_t x, y; uint16_t adv4; } glyph_t;   // adv4: advance in 1/4 px
 typedef struct { const glyph_t *g; const uint8_t *bits; uint8_t line_h, ascent; } font_t;
 extern const font_t font_big, font_body, font_label, font_small;
-extern const font_t font_clock;   // (digits and ":" only: the square's big clock, in font_clock.c)
+extern const font_t font_clock;
+extern const font_t font_mono_s, font_mono, font_mono_l;   // (the Field look: Space Mono Bold, 13 / 17 / 24 px, font_mono.c)   // (digits and ":" only: the square's big clock, in font_clock.c)
 int ftext_width(const font_t *f, const char *s);
 int ftext_width_n(const font_t *f, const char *s, int n);   // just the first n characters
 void draw_ftext(uint16_t *buf, int y0, int h, int x, int y, const font_t *f, const char *s, uint16_t col);

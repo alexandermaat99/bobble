@@ -5,11 +5,13 @@
 #include <stdio.h>
 #include <string.h>
 #include <math.h>
+#include <stdlib.h>
 #include "esp_attr.h"
 #include "gfx.h"
 #include "chat.h"
 #include "pet_ui.h"
 #include "chat_ui.h"
+#include "screen.h"
 
 // iOS's dark colours
 #define C_WHITE   rgb(255, 255, 255)
@@ -241,6 +243,152 @@ static void button(uint16_t *buf, int y0, int h, float cx, float rad, uint16_t b
     draw_ftext(buf, y0, h, (int)cx - ftext_width(&font_small, label) / 2, LABEL_Y, &font_small, label, C_LABEL2);
 }
 
+#if !SCREEN_ROUND
+// ---------------------------------------------------------------- the Field look (Settings > Look)
+// Teenage Engineering-ish, like the other pages': the dot grid, a level meter of lit segments where the orb was (blue
+// while it listens, orange while Claude speaks, a yellow scanner while it thinks, a flat line when it's idle or
+// muted), square keys in the OP-1's colours and their names in mono capitals.
+#define F_BLUE      rgb(36, 130, 255)
+#define F_BLUE_DN   rgb(110, 170, 255)
+#define F_ORANGE    rgb(255, 102, 26)
+#define F_ORANGE_DN rgb(255, 150, 90)
+#define F_YELLOW    rgb(255, 204, 0)
+#define F_YELLOW_DN rgb(255, 224, 110)
+#define F_RED       rgb(255, 59, 48)
+#define F_RED_DN    rgb(255, 120, 110)
+#define F_GREY      rgb(118, 118, 126)
+#define F_DIM       rgb(56, 56, 62)
+#define F_PANEL     rgb(20, 20, 23)
+#define F_PANEL_DN  rgb(50, 50, 56)
+#define M_COLS 15                                       // the meter: columns of segments, lit outwards from the middle row
+#define M_HALF 6                                        // (segments either side of it)
+#define M_SW 8
+#define M_SH 6
+#define M_GAP 4
+#define M_BX 100                                        // its corner brackets: this far from the middle
+#define M_BY 70
+
+static void upper(char *t) { for (; *t; t++) if (*t >= 'a' && *t <= 'z') *t -= 32; }
+
+static void field_grid(uint16_t *buf, int y0, int h)   // the dot grid (none inside the meter's brackets)
+{
+    for (int y = y0 - y0 % 24 + 12; y < y0 + h; y += 24) {
+        if (y < y0) continue;
+        for (int x = 12; x < W; x += 24) {
+            if (abs(x - CX) <= M_BX && abs(y - ORB_Y) <= M_BY) continue;
+            buf[(y - y0) * W + x] = rgb(34, 34, 38);
+        }
+    }
+}
+
+static void draw_meter(uint16_t *buf, int y0, int h)
+{
+    if (ORB_Y + M_BY + 2 <= y0 || ORB_Y - M_BY - 2 >= y0 + h) return;
+    for (int q = 0; q < 4; q++) {                       // the brackets
+        int bx = CX + (q & 1 ? M_BX : -M_BX), by = ORB_Y + (q & 2 ? M_BY : -M_BY), sx = q & 1 ? -1 : 1, sy = q & 2 ? -1 : 1;
+        fill_rect(buf, y0, h, sx > 0 ? bx : bx - 13, by - (sy > 0 ? 0 : 1), sx > 0 ? bx + 14 : bx + 1, by + (sy > 0 ? 2 : 1), F_DIM);
+        fill_rect(buf, y0, h, bx - (sx > 0 ? 0 : 1), sy > 0 ? by : by - 13, bx + (sx > 0 ? 2 : 1), sy > 0 ? by + 14 : by + 1, F_DIM);
+    }
+    bool speaking = cs.active && cs.state == CS_SPEAKING, thinking = cs.active && cs.state == CS_THINKING;
+    uint16_t on = !cs.active ? F_ORANGE : cs.muted ? F_GREY : thinking ? F_YELLOW : speaking ? F_ORANGE : F_BLUE;
+    uint16_t off = rgb(30, 30, 34);
+    int x0 = CX - (M_COLS * (M_SW + M_GAP) - M_GAP) / 2, scan = (int)(t_anim * 12) % (2 * M_COLS - 2);
+    if (scan >= M_COLS) scan = 2 * M_COLS - 2 - scan;
+    float loud = fminf(1, 0.12f + level * 1.6f);
+    for (int c = 0; c < M_COLS; c++) {
+        int n = 0;                                      // segments lit each side of the middle
+        if (!cs.active || cs.muted) n = 0;
+        else if (thinking) n = M_HALF - 2 * abs(c - scan);
+        else {
+            float e = 1 - fabsf(c - (M_COLS - 1) / 2.0f) / (M_COLS * 0.75f);
+            float w = 0.45f + 0.55f * fabsf(sinf(c * 1.3f + t_anim * (speaking ? 7 : 4)));
+            n = lroundf(M_HALF * loud * e * w);
+        }
+        int x = x0 + c * (M_SW + M_GAP);
+        for (int k = -M_HALF; k <= M_HALF; k++) {
+            int y = ORB_Y - M_SH / 2 + k * (M_SH + M_GAP);
+            fill_rect(buf, y0, h, x, y, x + M_SW, y + M_SH, abs(k) <= n ? on : off);
+        }
+    }
+}
+
+// a square key with its name under it: dark with a rim, or a solid colour
+static void field_key(uint16_t *buf, int y0, int h, float cx, float rad, uint16_t fill, bool rim, const char *label)
+{
+    aa_rrect(buf, y0, h, cx - rad, BTN_Y - rad, cx + rad, BTN_Y + rad, 11, rim ? F_DIM : fill);
+    if (rim) aa_rrect(buf, y0, h, cx - rad + 2, BTN_Y - rad + 2, cx + rad - 2, BTN_Y + rad - 2, 9, fill);
+    char t[16];
+    snprintf(t, sizeof t, "%s", label);
+    upper(t);
+    draw_ftext(buf, y0, h, (int)cx - ftext_width(&font_mono_s, t) / 2, LABEL_Y, &font_mono_s, t, F_GREY);
+}
+
+static void draw_field(uint16_t *buf, int y0, int h)
+{
+    field_grid(buf, y0, h);
+    draw_meter(buf, y0, h);
+
+    // the model, in a box at the top (tap it for the menu)
+    if (cs.n_models && PILL_Y + PILL_H > y0 && PILL_Y < y0 + h) {
+        char m[40];
+        plain(m, sizeof m, cs.models[cs.model]);
+        upper(m);
+        int tw = ftext_width(&font_mono_s, m), pw = tw + 60, px = CX - pw / 2;
+        aa_rrect(buf, y0, h, px, PILL_Y, px + pw, PILL_Y + PILL_H, 6, F_DIM);
+        aa_rrect(buf, y0, h, px + 1.5f, PILL_Y + 1.5f, px + pw - 1.5f, PILL_Y + PILL_H - 1.5f, 4.5f, pressed == B_PILL ? F_PANEL_DN : F_PANEL);
+        fill_rect(buf, y0, h, px + 13, PILL_Y + PILL_H / 2 - 4, px + 21, PILL_Y + PILL_H / 2 + 4, F_ORANGE);
+        draw_ftext(buf, y0, h, px + 30, PILL_Y + (PILL_H - font_mono_s.line_h) / 2, &font_mono_s, m, C_WHITE);
+        float vx = px + 30 + tw + 12, vy = PILL_Y + PILL_H / 2.0f;
+        float v[6] = {vx - 4, vy - 2, vx, vy + 2, vx + 4, vy - 2};
+        aa_path(buf, y0, h, v, 3, false, 1.8f, F_GREY);
+    }
+
+    // what you said (or what's wrong), then what Claude's saying, or what's going on
+    if (cs.status[0]) {
+        char t[LINE_CAP + 4];
+        plain(t, sizeof t, cs.status);
+        text_mid(buf, y0, h, TEXT_TOP, &font_small, t, F_ORANGE);
+    } else {
+        for (int i = 0; i < n_heard; i++) text_mid(buf, y0, h, TEXT_TOP + i * font_small.line_h, &font_small, heard_l[i], F_GREY);
+    }
+    if (n_said) {
+        for (int i = 0; i < n_said; i++) text_mid(buf, y0, h, said_top + i * said_f->line_h, said_f, said_l[i], C_WHITE);
+    } else if (said_top + font_mono.line_h <= TEXT_BOT) {
+        const char *hint = !cs.active ? (cs.mac ? "TAP TO TALK TO CLAUDE" : "OPEN BOBBLE ON YOUR MAC")
+                         : cs.muted ? "MUTED" : cs.state == CS_THINKING ? "THINKING" : "LISTENING";
+        text_mid(buf, y0, h, said_top + (n_heard ? 0 : 8), &font_mono, hint, F_GREY);
+    }
+
+    if (BTN_Y + MIC_R + 40 >= y0 && BTN_Y - MIC_R <= y0 + h) {
+        // speaker (left), in a chat: blue when Claude's muted
+        float sx = CX - SIDE_DX;
+        bool sp = cs.speaker_muted, dn = pressed == B_SPEAKER;
+        if (cs.active) {
+            uint16_t bg = sp ? (dn ? F_BLUE_DN : F_BLUE) : dn ? F_PANEL_DN : F_PANEL;
+            field_key(buf, y0, h, sx, SIDE_R, bg, !sp, "speaker");
+            speaker_glyph(buf, y0, h, sx + 2, BTN_Y, 0.95f, sp ? C_INK : C_WHITE);
+            if (sp) slash(buf, y0, h, sx, BTN_Y, 0.95f, C_INK, bg);
+        }
+
+        // the mic (middle): orange to start a chat; in one, dark, or yellow with a slash when you're muted
+        bool mut = cs.active && cs.muted;
+        dn = pressed == B_MIC;
+        uint16_t mb = !cs.active ? (dn ? F_ORANGE_DN : F_ORANGE) : mut ? (dn ? F_YELLOW_DN : F_YELLOW) : dn ? F_PANEL_DN : F_PANEL;
+        field_key(buf, y0, h, CX, MIC_R, mb, cs.active && !mut, !cs.active ? "talk" : mut ? "unmute" : "mute");
+        mic_glyph(buf, y0, h, CX, BTN_Y + 1, 1.15f, cs.active && !mut ? C_WHITE : C_INK);
+        if (mut) slash(buf, y0, h, CX, BTN_Y, 1.15f, C_INK, mb);
+
+        // end (right), in a chat
+        if (cs.active) {
+            float ex = CX + SIDE_DX;
+            field_key(buf, y0, h, ex, SIDE_R, pressed == B_CLOSE ? F_RED_DN : F_RED, false, "end");
+            line(buf, y0, h, ex - 8, BTN_Y - 8, ex + 8, BTN_Y + 8, 3, C_WHITE);
+            line(buf, y0, h, ex - 8, BTN_Y + 8, ex + 8, BTN_Y - 8, 3, C_WHITE);
+        }
+    }
+}
+#endif
+
 // ---------------------------------------------------------------- the menu (tap the model, or hold the speaker)
 
 #define MENU_W 300
@@ -272,12 +420,15 @@ static void draw_menu(uint16_t *buf, int y0, int h)
 {
     dim(buf, h);
     int top = menu_top(), bot = top + MENU_HEAD + menu_rows() * ROW_H, x0 = CX - MENU_W / 2, x1 = CX + MENU_W / 2;
-    aa_rrect(buf, y0, h, x0, top, x1, bot, 14, C_SHEET);
-    draw_ftext(buf, y0, h, x0 + 18, top + 12, &font_small, "Model", C_LABEL2);
+    bool fl = ui_field();
+    uint16_t accent = fl ? rgb(255, 102, 26) : C_BLUE;
+    aa_rrect(buf, y0, h, x0, top, x1, bot, fl ? 8 : 14, fl ? rgb(28, 28, 32) : C_SHEET);
+    if (fl) draw_ftext(buf, y0, h, x0 + 18, top + 12, &font_mono_s, "MODEL", rgb(118, 118, 126));
+    else draw_ftext(buf, y0, h, x0 + 18, top + 12, &font_small, "Model", C_LABEL2);
     for (int i = 0; i < menu_rows(); i++) {
         int ry = top + MENU_HEAD + i * ROW_H;
         bool last = i == menu_rows() - 1;
-        if (i == menu_press) aa_rrect(buf, y0, h, x0, ry, x1, ry + ROW_H, last ? 14 : 0, C_FILL_DN);
+        if (i == menu_press) aa_rrect(buf, y0, h, x0, ry, x1, ry + ROW_H, last ? (fl ? 8 : 14) : 0, C_FILL_DN);
         if (i == menu_press && last) fill_rect(buf, y0, h, x0, ry, x1, ry + 14, C_FILL_DN);   // (square at the top)
         fill_rect(buf, y0, h, x0 + (last ? 0 : 18), ry, x1, ry + 1, last ? rgb(52, 52, 56) : C_SEP);
         int ty = ry + (ROW_H - font_label.line_h) / 2;
@@ -285,13 +436,13 @@ static void draw_menu(uint16_t *buf, int y0, int h)
             draw_ftext(buf, y0, h, x0 + 18, ty, &font_label, cs.models[i], C_WHITE);
             if (i == cs.model) {                       // a tick
                 float p[6] = {x1 - 38, ry + 25, x1 - 32, ry + 31, x1 - 21, ry + 19};
-                aa_path(buf, y0, h, p, 3, false, 2.6f, C_BLUE);
+                aa_path(buf, y0, h, p, 3, false, 2.6f, accent);
             }
         } else {
-            draw_ftext(buf, y0, h, x0 + 18, ty, &font_label, "New Chat", C_BLUE);
+            draw_ftext(buf, y0, h, x0 + 18, ty, &font_label, "New Chat", accent);
             float px = x1 - 30, py = ry + ROW_H / 2.0f;   // a plus
-            line(buf, y0, h, px - 7, py, px + 7, py, 2.4f, C_BLUE);
-            line(buf, y0, h, px, py - 7, px, py + 7, 2.4f, C_BLUE);
+            line(buf, y0, h, px - 7, py, px + 7, py, 2.4f, accent);
+            line(buf, y0, h, px, py - 7, px, py + 7, 2.4f, accent);
         }
     }
 }
@@ -308,6 +459,13 @@ static float orb_size(void)
 
 void chat_ui_draw(uint16_t *buf, int y0, int h)
 {
+#if !SCREEN_ROUND
+    if (ui_field()) {
+        draw_field(buf, y0, h);
+        if (menu) draw_menu(buf, y0, h);
+        return;
+    }
+#endif
     // the orb first (its glow goes behind the pill)
     draw_orb(buf, y0, h, orb_size(), cs.active ? 1 : 0.6f, cs.active && cs.muted,
              t_anim * (cs.state == CS_THINKING ? 3.0f : 0.6f));

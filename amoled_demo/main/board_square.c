@@ -143,7 +143,23 @@ void sq_backlight(int level)
     ledc_update_duty(LEDC_LOW_SPEED_MODE, BL_CH);
 }
 
+// Set up from a task on core 1, so the panel's interrupt (refilling the bounce buffers as it scans) and the DMA copies
+// "done" interrupt run there: core 0 has Wi-Fi, whose interrupts delayed refills enough to show broken rows
+static void display_init_here(void);
+static SemaphoreHandle_t init_done;
+static void display_init_task(void *arg) { display_init_here(); xSemaphoreGive(init_done); vTaskDelete(NULL); }
+
 void sq_display_init(void)
+{
+    sq_i2c();                                          // (the I2C bus first, here: made from that short-lived task,
+                                                       // touch, battery and motion sensor stopped answering)
+    init_done = xSemaphoreCreateBinary();
+    xTaskCreatePinnedToCore(display_init_task, "lcd_init", 4096, NULL, 10, NULL, 1);
+    xSemaphoreTake(init_done, portMAX_DELAY);
+    vSemaphoreDelete(init_done);
+}
+
+static void display_init_here(void)
 {
     backlight_init();
     ex_dev = add_dev(0x20);

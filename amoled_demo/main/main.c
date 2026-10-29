@@ -994,6 +994,8 @@ enum { PW_AWAKE, PW_FADING_OUT, PW_ASLEEP, PW_FADING_IN };
 static int power = PW_AWAKE, brightness = 255;
 static int bright_pref = 255;         // chosen in Settings; saved in NVS
 static int volume_pref = 50;          // likewise
+static volatile bool look_changed;      // (set from the Mac app's request: the loop redraws everything)
+static bool field_pref = true;        // the Field look (Settings > Look; the beta's default)
 static float rest[3];                 // slowly-following accelerometer reading: where the board has been sitting
 
 static void set_brightness(int b)
@@ -1093,6 +1095,20 @@ static void set_locked(bool on)
 
 int device_volume_get(void) { return volume_pref; }
 
+bool ui_field(void) { return !SCREEN_ROUND && field_pref; }
+
+void ui_field_set(bool on)
+{
+    if (field_pref == on) return;
+    field_pref = on;
+    look_changed = true;
+    nvs_handle_t h;
+    if (nvs_open("demo", NVS_READWRITE, &h) != ESP_OK) return;
+    nvs_set_u8(h, "field", on);
+    nvs_commit(h);
+    nvs_close(h);
+}
+
 void device_volume_set(int level, bool save)
 {
     volume_pref = level < 0 ? 0 : (level > 100 ? 100 : level);
@@ -1111,6 +1127,7 @@ static void brightness_load(void)
     if (nvs_open("demo", NVS_READONLY, &h) != ESP_OK) return;
     if (nvs_get_u8(h, "bright", &v) == ESP_OK) bright_pref = v < 10 ? 10 : v;
     if (nvs_get_u8(h, "volume", &v) == ESP_OK) volume_pref = v > 100 ? 100 : v;
+    if (nvs_get_u8(h, "field", &v) == ESP_OK) field_pref = v;
     if (nvs_get_u8(h, "locked", &v) == ESP_OK) locked = v;
     nvs_close(h);
     set_brightness(bright_pref);
@@ -2010,8 +2027,14 @@ void app_main(void)
         static float last_ang = 1000;
         static bool prev_down;
         if (card_settled) { force_redraw = true; card_settled = false; }
+        if (look_changed) { force_redraw = true; look_changed = false; }
         bool lib_dirty = page == PAGE_LIB && library_ui_dirty(), music_dirty = page == PAGE_MUSIC && spotify_ui_dirty();
         bool pet_dirty = page == PAGE_PET && pet_ui_dirty(), chat_dirty = page == PAGE_CHAT && chat_ui_dirty();
+#if !SCREEN_ROUND
+        bool reels_dirty = page == PAGE_MUSIC && spotify_ui_reels_dirty();
+#else
+        bool reels_dirty = false;
+#endif
         // the pet page has no clock: a full frame every 10 s is plenty, plus one (smoothly turned) once the eyes settle
         static int64_t pet_moved;
         if (pet_dirty) pet_moved = now;
@@ -2019,7 +2042,7 @@ void app_main(void)
         int64_t full_every = page == PAGE_PET && sheet <= 0 ? 10000000 : 1000000;
         bool others = force_redraw || pg_drag || pg_off != 0 || ota_progress() >= 0 || cal_ui_animating() || music_dirty || lib_dirty ||
                       ((down || prev_down) && page != PAGE_PET) || card_drag || target >= 0 || sheet > 0 || now - last_full >= full_every;
-        bool content = others || pet_dirty || chat_dirty;
+        bool content = others || pet_dirty || chat_dirty || reels_dirty;
         // just the eyes moved: redraw only around them (a full frame still comes every second for the clock and status)
         part_cnt = pet_dirty && !others && ang == last_ang ? pet_ui_take_rects(part_rect) : 0;
         if (chat_dirty) {                              // the chat page: just the orb, if that's all
@@ -2027,6 +2050,11 @@ void app_main(void)
             part_cnt = chat_ui_take_rect(r) && !others && ang == last_ang ? 1 : 0;
             if (part_cnt) memcpy(part_rect[0], r, sizeof r);
         }
+#if !SCREEN_ROUND
+        if (reels_dirty) {                             // the music page: just the tape reels turning, if that's all
+            part_cnt = spotify_ui_take_reels(part_rect) && !others && ang == last_ang ? 2 : 0;
+        }
+#endif
         part_on = part_cnt > 0;
         if (pet_dirty && !part_on) pet_ui_take_rect(NULL, NULL, NULL, NULL);
         // dragging the brightness slider on the open card: just its rows (the whole card made the slider lag)

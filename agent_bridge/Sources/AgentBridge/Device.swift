@@ -225,6 +225,22 @@ final class Device {
         }
     }
 
+    // ---- the square's look: "field" (Teenage Engineering-ish) or "classic" (Apple-ish). Round boards don't have one.
+
+    // What it shows now (GET /info says it), or nil: a round board, older firmware, or not reachable
+    func fetchLook(_ done: @escaping (String?) -> Void) {
+        guard let endpoint else { done(nil); return }
+        request(endpoint, "/info", Data(), method: "GET") { code, body in
+            guard code == 200, let body, let j = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any] else { done(nil); return }
+            done(j["look"] as? String)
+        }
+    }
+
+    func setLook(_ look: String) {
+        guard let endpoint, let body = try? JSONSerialization.data(withJSONObject: ["look": look]) else { return }
+        request(endpoint, "/look", body, key: key) { _, _ in }
+    }
+
     // ---- firmware: which build the board runs, and putting a new one on it (Updater does this from a release)
 
     // Its release build number (0: an everyday build, or firmware from before boards said), and whether it's a release

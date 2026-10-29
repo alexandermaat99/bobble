@@ -14,6 +14,7 @@
 #include "esp_timer.h"
 #include "esp_attr.h"
 #include "gfx.h"
+#include "screen.h"
 #include "calendar.h"
 #include "calendar_ui.h"
 #include "reminders.h"
@@ -618,10 +619,10 @@ static uint16_t dimmed(uint16_t c)
     return rgb(((s >> 11) << 3) * 2 / 5, (((s >> 5) & 63) << 2) * 2 / 5, ((s & 31) << 3) * 2 / 5);
 }
 
-static void draw_timeline(uint16_t *buf, int y0, int h)
+// today's midnights, then the span: 8 AM to 6 PM, widened to the hour around any meeting today and around now (sets
+// tl_day0 / tl_day1; returns the hours at its ends and midnight)
+static void timeline_span(int *ph0, int *ph1, time_t *pmid0, time_t *pmid1)
 {
-    if (TL_Y + 30 <= y0 || TL_Y - 14 >= y0 + h) return;
-    // today's midnights, then the span: 8 AM to 6 PM, widened to the hour around any meeting today and around now
     struct tm tm;
     localtime_r(&now_t, &tm);
     tm.tm_hour = tm.tm_min = tm.tm_sec = 0;
@@ -652,6 +653,17 @@ static void draw_timeline(uint16_t *buf, int y0, int h)
     th.tm_hour = h1;
     th.tm_isdst = -1;
     tl_day1 = h1 >= 24 ? mid1 : mktime(&th);
+    *ph0 = h0; *ph1 = h1; *pmid0 = mid0; *pmid1 = mid1;
+}
+
+static void draw_timeline_span(void) { int a, b; time_t c, d; timeline_span(&a, &b, &c, &d); }
+
+static void draw_timeline(uint16_t *buf, int y0, int h)
+{
+    if (TL_Y + 30 <= y0 || TL_Y - 14 >= y0 + h) return;
+    int h0, h1;
+    time_t mid0, mid1;
+    timeline_span(&h0, &h1, &mid0, &mid1);
     float xn = tl_x(now_t);
     aa_rrect(buf, y0, h, TL_X0, TL_Y - 2, TL_X1, TL_Y + 2, 2, rgb(48, 48, 54));
     // hour marks: a dot every hour, a tick and label every few (about five labels in all); the ends always say
@@ -752,6 +764,8 @@ static void draw_ring(uint16_t *buf, int y0, int h)
     ftext_cx(buf, y0, h, RING_CX, top + lines * 24 + 3, &font_small, when, C_TEXT2);
 }
 
+static void list_fade(uint16_t *buf, int y0, int h);
+
 static void draw_list(uint16_t *buf, int y0, int h)
 {
     char line[64], t1[16], t2[16], l1[96];
@@ -833,7 +847,19 @@ static void draw_list(uint16_t *buf, int y0, int h)
         y += rh;
     }
     gfx_clip(0, H);
-    for (int yy = LIST_TOP; yy < LIST_TOP + 24; yy++) {   // the list fades in under the timeline
+    list_fade(buf, y0, h);
+    int ms = max_scroll();
+    if (ms > 0 && (dragging || fling != 0)) {           // scroll bar, only while it moves
+        int track = LIST_BOT - LIST_TOP - 16, total = ms + (LIST_BOT - LIST_TOP);
+        int th = track * (LIST_BOT - LIST_TOP) / total, ty = LIST_TOP + 8 + (track - th) * scroll / ms;
+        aa_rrect(buf, y0, h, W - 7, ty, W - 3, ty + th, 2, rgb(110, 110, 118));
+    }
+}
+
+// the list fades in under the timeline (once it's scrolled)
+static void list_fade(uint16_t *buf, int y0, int h)
+{
+    for (int yy = LIST_TOP; yy < LIST_TOP + 24; yy++) {
         if (yy < y0 || yy >= y0 + h || scroll <= 0) continue;
         int k = (yy - LIST_TOP) * (yy - LIST_TOP) * 256 / (24 * 24);
         uint16_t *row = buf + (yy - y0) * W;
@@ -844,11 +870,246 @@ static void draw_list(uint16_t *buf, int y0, int h)
             row[x] = SWAP16((uint16_t)(r << 11 | g << 5 | b));
         }
     }
-    int ms = max_scroll();
-    if (ms > 0 && (dragging || fling != 0)) {           // scroll bar, only while it moves
-        int track = LIST_BOT - LIST_TOP - 16, total = ms + (LIST_BOT - LIST_TOP);
-        int th = track * (LIST_BOT - LIST_TOP) / total, ty = LIST_TOP + 8 + (track - th) * scroll / ms;
-        aa_rrect(buf, y0, h, W - 7, ty, W - 3, ty + th, 2, rgb(110, 110, 118));
+}
+
+// ---------------------------------------------------------------- the Field look (Settings > Look)
+// Teenage Engineering-ish: black with a faint dot grid, four loud colours (blue, green, orange, yellow; red is "now"),
+// monospace labels in capitals, a segmented clock, flat blocks instead of rounded cards. Same layout and rows as the
+// classic page, so scrolling and taps work the same.
+#define F_BLUE   rgb(36, 130, 255)
+#define F_GREEN  rgb(38, 208, 124)
+#define F_ORANGE rgb(255, 102, 26)
+#define F_YELLOW rgb(255, 204, 0)
+#define F_RED    rgb(255, 59, 48)
+#define F_GREY   rgb(118, 118, 126)
+#define F_DIM    rgb(56, 56, 62)
+#define F_PANEL  rgb(20, 20, 23)
+
+static uint16_t field_color(int i)
+{
+    const uint16_t c[4] = {F_BLUE, F_GREEN, F_ORANGE, F_YELLOW};
+    return c[(calendar_count() > 1 ? items[i].cal : i) % 4];
+}
+
+static void upper(char *s) { for (; *s; s++) if (*s >= 'a' && *s <= 'z') *s -= 32; }
+
+// a 7-segment digit, w x hh, segments th thick (rounded ends), lit in col and the rest a faint ghost (d < 0: none)
+static void seg_digit(uint16_t *buf, int y0, int h, float x, float y, float w, float hh, float th, int d, uint16_t col)
+{
+    static const uint8_t map[10] = {0x3F, 0x06, 0x5B, 0x4F, 0x66, 0x6D, 0x7D, 0x07, 0x7F, 0x6F};   // bits a..g
+    float m = hh / 2, g = th * 0.35f;   // (gap between segments)
+    const float seg[7][4] = {
+        {x + g, y, x + w - g, y + th},                       // a: top
+        {x + w - th, y + g, x + w, y + m - g},               // b: top right
+        {x + w - th, y + m + g, x + w, y + hh - g},          // c: bottom right
+        {x + g, y + hh - th, x + w - g, y + hh},             // d: bottom
+        {x, y + m + g, x + th, y + hh - g},                  // e: bottom left
+        {x, y + g, x + th, y + m - g},                       // f: top left
+        {x + g, y + m - th / 2, x + w - g, y + m + th / 2},  // g: middle
+    };
+    for (int k = 0; k < 7 && d >= 0; k++) {
+        bool on = (map[d] >> k) & 1;
+        aa_rrect(buf, y0, h, seg[k][0], seg[k][1], seg[k][2], seg[k][3], th / 2, on ? col : rgb(17, 17, 20));
+    }
+}
+
+static void draw_field_clock(uint16_t *buf, int y0, int h, struct tm *tm)
+{
+    if (y0 >= 150) return;
+    int hr = tm->tm_hour % 12 ? tm->tm_hour % 12 : 12;
+    const float dw = 38, dh = 70, th = 9, gap = 12, top = 34;
+    float x = 22;
+    seg_digit(buf, y0, h, x, top, dw, dh, th, hr >= 10 ? 1 : -1, C_WHITE);   // (no leading zero: nothing there)
+    x += dw + gap;
+    seg_digit(buf, y0, h, x, top, dw, dh, th, hr % 10, C_WHITE);
+    x += dw + 10;
+    aa_rrect(buf, y0, h, x, top + 18, x + 9, top + 27, 2, F_ORANGE);       // the colon, two orange squares
+    aa_rrect(buf, y0, h, x, top + 43, x + 9, top + 52, 2, F_ORANGE);
+    x += 9 + 10;
+    seg_digit(buf, y0, h, x, top, dw, dh, th, tm->tm_min / 10, C_WHITE);
+    x += dw + gap;
+    seg_digit(buf, y0, h, x, top, dw, dh, th, tm->tm_min % 10, C_WHITE);
+    draw_ftext(buf, y0, h, (int)(x + dw + 6), (int)top - 4, &font_mono_s, tm->tm_hour < 12 ? "AM" : "PM", F_ORANGE);
+    char d[24];
+    strftime(d, sizeof d, "%a %d %b", tm);                   // "THU 29 OCT"
+    upper(d);
+    draw_ftext(buf, y0, h, 22, 116, &font_mono, d, F_ORANGE);
+}
+
+// "NEXT": a panel on the right, the meeting's name, and a dial that fills over the hour before it (or as it goes)
+#define FN_X0 262
+#define FN_Y0 46                                    // (under the status bar's Wi-Fi and battery)
+#define FN_X1 458
+#define FN_Y1 184
+static void draw_field_next(uint16_t *buf, int y0, int h)
+{
+    if (FN_Y1 + 2 <= y0 || FN_Y0 - 2 >= y0 + h) return;
+    aa_rrect(buf, y0, h, FN_X0, FN_Y0, FN_X1, FN_Y1, 6, F_DIM);
+    aa_rrect(buf, y0, h, FN_X0 + 2, FN_Y0 + 2, FN_X1 - 2, FN_Y1 - 2, 4, 0);
+    int cur = calendar_loaded() ? item_at(now_t) : -1, nxt = calendar_loaded() ? next_item(now_t) : -1;
+    int show = cur >= 0 ? cur : nxt;
+    uint16_t c = show >= 0 ? field_color(show) : F_GREY;
+    aa_rrect(buf, y0, h, FN_X0 + 12, FN_Y0 + 14, FN_X0 + 20, FN_Y0 + 22, 1.5f, c);
+    draw_ftext(buf, y0, h, FN_X0 + 26, FN_Y0 + 7, &font_mono_s, cur >= 0 ? "NOW" : "NEXT", F_GREY);
+    char t[80], l2[80], when[32];
+    const int tw = FN_X1 - FN_X0 - 24;
+    if (!calendar_loaded() || show < 0) {
+        wrap2w_cal(!calendar_loaded() ? (calendar_count() ? calendar_error() : "Add a calendar in the Bobble app")
+                   : "Nothing coming up", &font_small, tw, t, l2, sizeof t);
+        draw_ftext(buf, y0, h, FN_X0 + 12, FN_Y0 + 40, &font_small, t, F_GREY);
+        if (l2[0]) draw_ftext(buf, y0, h, FN_X0 + 12, FN_Y0 + 60, &font_small, l2, F_GREY);
+        return;
+    }
+    ical_item_t *it = &items[show];
+    wrap2w_cal(it->title, &font_label, tw, t, l2, sizeof t);
+    draw_ftext(buf, y0, h, FN_X0 + 12, FN_Y0 + 34, &font_label, t, C_WHITE);
+    if (l2[0]) draw_ftext(buf, y0, h, FN_X0 + 12, FN_Y0 + 58, &font_label, l2, C_WHITE);
+    // the dial: twelve ticks, an arc in the meeting's colour, a white pointer
+    float dx = FN_X0 + 32, dy = FN_Y1 - 30, r = 18;
+    float frac = cur >= 0 ? (float)(now_t - it->start) / fmaxf(1, (float)(it->end - it->start))
+                          : 1 - (float)(it->start - now_t) / 3600;
+    frac = frac < 0 ? 0 : frac > 1 ? 1 : frac;
+    for (int k = 0; k < 12; k++) {
+        float a = k * (float)M_PI / 6, p[4] = {dx + (r + 3) * sinf(a), dy - (r + 3) * cosf(a), dx + (r + 7) * sinf(a), dy - (r + 7) * cosf(a)};
+        aa_path(buf, y0, h, p, 2, false, 1.6f, k / 12.0f < frac ? c : F_DIM);
+    }
+    aa_disc(buf, y0, h, dx, dy, r, F_PANEL);
+    float a = frac * 2 * (float)M_PI, pt[4] = {dx, dy, dx + (r - 6) * sinf(a), dy - (r - 6) * cosf(a)};
+    aa_path(buf, y0, h, pt, 2, false, 3, C_WHITE);
+    aa_disc(buf, y0, h, dx, dy, 3.5f, c);
+    // how long: "IN 49M" / "ENDS IN 1H 05M"
+    fmt_short(when, sizeof when, "", cur >= 0 ? it->end - now_t : it->start - now_t);
+    upper(when);
+    draw_ftext(buf, y0, h, (int)dx + r + 16, (int)dy - 26, &font_mono_s, cur >= 0 ? "ENDS IN" : "IN", F_GREY);
+    draw_ftext(buf, y0, h, (int)dx + r + 16, (int)dy - 12, &font_mono_l, when, c);
+}
+
+// the day as a tape: a flat track, meetings as blocks on it, the hours under it, a red "now" marker
+static void draw_field_tape(uint16_t *buf, int y0, int h)
+{
+    if (TL_Y + 30 <= y0 || TL_Y - 20 >= y0 + h) return;
+    draw_timeline_span();                              // (sets tl_day0 / tl_day1 as the classic timeline does)
+    float xn = tl_x(now_t);
+    fill_rect(buf, y0, h, TL_X0, TL_Y - 7, TL_X1, TL_Y + 7, rgb(26, 26, 30));
+    for (int i = 0; i < n_items; i++) {
+        ical_item_t *it = &items[i];
+        if (it->all_day || it->end <= tl_day0 || it->start >= tl_day1) continue;
+        float xa = fmaxf(TL_X0, tl_x(it->start)), xb = fminf(TL_X1, tl_x(it->end));
+        if (xb - xa < 4) { float m = (xa + xb) / 2; xa = m - 2; xb = m + 2; }
+        uint16_t c = field_color(i);
+        float hh = it->free ? 3 : 7;
+        aa_rrect(buf, y0, h, xa, TL_Y - hh, xb, TL_Y + hh, 1, c);
+        if (xa < xn) aa_rrect(buf, y0, h, xa, TL_Y - hh, fminf(xn, xb), TL_Y + hh, 1, dimmed(c));
+    }
+    int span = (int)((tl_day1 - tl_day0) / 3600), step = span <= 8 ? 2 : span <= 12 ? 3 : span <= 16 ? 4 : 6;
+    for (int k = 0; k <= span; k++) {
+        time_t t = tl_day0 + k * 3600;
+        float x = tl_x(t);
+        struct tm tm;
+        localtime_r(&t, &tm);
+        fill_rect(buf, y0, h, (int)x, TL_Y + 9, (int)x + 1, TL_Y + (k % step ? 12 : 15), F_DIM);
+        if (k % step && k != span) continue;
+        char l[4];
+        snprintf(l, sizeof l, "%02d", tm.tm_hour);
+        int lw = ftext_width(&font_mono_s, l), lx = (int)x - lw / 2;
+        lx = lx < TL_X0 ? TL_X0 : lx + lw > TL_X1 ? TL_X1 - lw : lx;
+        if (fabsf(x - xn) > 26) draw_ftext(buf, y0, h, lx, TL_Y + 16, &font_mono_s, l, F_GREY);
+    }
+    fill_rect(buf, y0, h, (int)xn - 1, TL_Y - 14, (int)xn + 2, TL_Y + 14, F_RED);
+    int nw = ftext_width(&font_mono_s, "NOW");
+    draw_ftext(buf, y0, h, (int)xn - nw / 2, TL_Y + 16, &font_mono_s, "NOW", F_RED);
+}
+
+// the agenda as flat rows: days in orange capitals over a rule, meetings as dark blocks with a colour tab
+static void draw_field_list(uint16_t *buf, int y0, int h)
+{
+    char line[64], t1[16], t2[16], l1[96];
+    compute_agenda();
+    gfx_clip(LIST_TOP, LIST_BOT);
+    int y = LIST_TOP - scroll;
+    for (int r = 0; r < ag_n; r++) {
+        int rh = ag_h[r], type = ag_types[r], ix = ag_idx[r];
+        if (y + rh > y0 && y < y0 + h && y + rh > LIST_TOP && y < LIST_BOT) {
+            if (type == 0) {                              // "TODAY  29.10" and a rule to the edge
+                time_t d = calendar_window_start() + ix * 86400 + 3600;
+                struct tm tm;
+                localtime_r(&d, &tm);
+                char day[16], date[16];
+                if (ix == 0) strlcpy(day, "TODAY", sizeof day);
+                else if (ix == 1) strlcpy(day, "TOMORROW", sizeof day);
+                else { strftime(day, sizeof day, "%A", &tm); upper(day); }
+                strftime(date, sizeof date, "%d.%m", &tm);
+                int x = 18;
+                draw_ftext(buf, y0, h, x, y + 14, &font_mono, day, F_ORANGE);
+                x += ftext_width(&font_mono, day) + 10;
+                draw_ftext(buf, y0, h, x, y + 14, &font_mono, date, F_GREY);
+                x += ftext_width(&font_mono, date) + 12;
+                fill_rect(buf, y0, h, x, y + 27, W - 18, y + 28, F_DIM);
+            } else if (type == 2) {
+                draw_ftext(buf, y0, h, 18, y + 10, &font_mono_s, "-- NOTHING SCHEDULED", F_DIM);
+            } else {
+                const int x0 = 14, x1 = W - 14, ya = y + 4, yb = y + rh - 4;
+                float mid = (ya + yb) / 2.0f;
+                aa_rrect(buf, y0, h, x0, ya, x1, yb, 4, F_PANEL);
+                if (type == 3) {                          // a reminder: a square to tick, in its list's colour
+                    reminder_t *rm = &rems[ix];
+                    uint16_t lc = rgb(rm->r, rm->g, rm->b);
+                    bool ticked = !strcmp(ticked_id, rm->id), overdue = rm->due < calendar_window_start() ||
+                                  (rm->has_time && rm->due < now_t);
+                    aa_rrect(buf, y0, h, x0 + 14, mid - 9, x0 + 32, mid + 9, 3, lc);
+                    if (!ticked) aa_rrect(buf, y0, h, x0 + 16.5f, mid - 6.5f, x0 + 29.5f, mid + 6.5f, 1.5f, F_PANEL);
+                    fitw(l1, sizeof l1, rm->title, &font_label, x1 - x0 - 60);
+                    draw_ftext(buf, y0, h, x0 + 46, ya + 5, &font_label, l1, ticked ? F_DIM : C_WHITE);
+                    if (rm->has_time) fmt_time(t1, sizeof t1, rm->due, false);
+                    snprintf(line, sizeof line, "%s%s", overdue ? "OVERDUE " : "", rm->has_time ? t1 : rm->list);
+                    upper(line);
+                    draw_ftext(buf, y0, h, x0 + 46, ya + 31, &font_mono_s, line, overdue ? F_RED : F_GREY);
+                } else {
+                    ical_item_t *it = &items[ix];
+                    bool past = it->end <= now_t, now = !it->all_day && it->start <= now_t && now_t < it->end;
+                    uint16_t c = field_color(ix);
+                    aa_rrect(buf, y0, h, x0, ya, x0 + 8, yb, 2, past ? dimmed(c) : c);   // the tab
+                    int right = x1 - 12;
+                    if (now) {                            // a red block: NOW
+                        int tw = ftext_width(&font_mono_s, "NOW");
+                        fill_rect(buf, y0, h, right - tw - 12, (int)mid - 11, right, (int)mid + 11, F_RED);
+                        draw_ftext(buf, y0, h, right - tw - 6, (int)mid - 10, &font_mono_s, "NOW", rgb(0, 0, 0));
+                        right -= tw + 22;
+                    }
+                    if (it->all_day) {
+                        int aw = ftext_width(&font_mono_s, "ALL DAY");
+                        draw_ftext(buf, y0, h, right - aw, (int)mid - 10, &font_mono_s, "ALL DAY", past ? F_DIM : c);
+                        fitw(l1, sizeof l1, it->title, &font_label, right - aw - 12 - (x0 + 22));
+                        draw_ftext(buf, y0, h, x0 + 22, (int)mid - 12, &font_label, l1, past ? F_GREY : C_WHITE);
+                    } else {
+                        fitw(l1, sizeof l1, it->title, &font_label, right - (x0 + 22));
+                        draw_ftext(buf, y0, h, x0 + 22, ya + 5, &font_label, l1, past ? F_GREY : C_WHITE);
+                        fmt_time(t1, sizeof t1, it->start, false);
+                        fmt_time(t2, sizeof t2, it->end, false);
+                        snprintf(line, sizeof line, "%s - %s", t1, t2);
+                        draw_ftext(buf, y0, h, x0 + 22, ya + 31, &font_mono_s, line, past ? F_DIM : F_GREY);
+                    }
+                }
+            }
+        }
+        y += rh;
+    }
+    gfx_clip(0, H);
+    list_fade(buf, y0, h);
+}
+
+static void draw_field(uint16_t *buf, int y0, int h)
+{
+    compute_face();
+    struct tm tm;
+    localtime_r(&now_t, &tm);
+    for (int y = y0 - y0 % 24 + 12; y < y0 + h; y += 24)   // the dot grid (behind everything, every 24 px)
+        if (y >= y0) for (int x = 12; x < W; x += 24) buf[(y - y0) * W + x] = rgb(34, 34, 38);
+    draw_field_clock(buf, y0, h, &tm);
+    draw_field_next(buf, y0, h);
+    if (calendar_loaded()) {
+        draw_field_tape(buf, y0, h);
+        draw_field_list(buf, y0, h);
     }
 }
 
@@ -877,7 +1138,8 @@ static void draw_square(uint16_t *buf, int y0, int h)
 void cal_ui_draw(uint16_t *buf, int y0, int h)
 {
 #if !SCREEN_ROUND
-    draw_square(buf, y0, h);
+    if (ui_field()) draw_field(buf, y0, h);
+    else draw_square(buf, y0, h);
     return;
 #endif
     if (view == V_FACE) draw_face(buf, y0, h);

@@ -7,6 +7,10 @@ void screen_brightness_set(int level, bool save);
 // The board's own volume, picked in Settings (0..100, 0: silent); saved in NVS
 int device_volume_get(void);
 void device_volume_set(int level, bool save);
+// The look (the square): Classic, or Field (Teenage Engineering-ish: black, four loud colours, monospace labels, a
+// segmented clock). Picked in Settings, saved in NVS
+bool ui_field(void);
+void ui_field_set(bool on);
 // The motion sensor, for GET /motion: its filtered reading (g, the sensor's own axes), "up" in screen axes (x right,
 // y down, z out of the glass), the angle the content is turned to, and whether a tilt calibration is saved
 void motion_get(float raw[3], float up[3], float *angle, bool *calibrated, float R[9]);
