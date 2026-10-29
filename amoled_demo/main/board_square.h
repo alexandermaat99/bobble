@@ -23,7 +23,8 @@ void sq_draw(int x0, int y0, int x1, int y1, uint16_t *px, SemaphoreHandle_t don
 void sq_copy(uint16_t *dst, uint16_t *px, int bytes, SemaphoreHandle_t done);
 void sq_backlight(int level);           // 0 (off) .. 255
 void sq_touch_init(void);
-bool sq_touch_read(int *x, int *y);     // a finger is down (screen pixels)
+bool sq_touch_read(int *x, int *y);     // a finger is down (screen pixels); a tap between two reads shows once
+void sq_touch_fast(bool on);            // read the chip every 10 ms (screen on), else every 100 ms
 float sq_battery_volts(void);           // the cell's voltage from the power chip; 0 if no battery
 bool sq_plugged_in(void);               // USB power is present (a computer or a wall charger)
 #include "battery.h"

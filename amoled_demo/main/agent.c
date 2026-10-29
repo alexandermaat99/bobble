@@ -270,13 +270,19 @@ static esp_err_t name_post(httpd_req_t *req)
     char body[160];
     if (read_body(req, body, sizeof body) < 0) return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad size");
     cJSON *j = cJSON_Parse(body), *n = cJSON_GetObjectItem(j, "name");
-    char name[32] = "";
-    if (cJSON_IsString(n)) {                          // (printable ASCII: the display's font)
-        int k = 0;
-        for (const char *p = n->valuestring; *p && k < (int)sizeof name - 1; p++) if (*p >= 32 && *p < 127) name[k++] = *p;
-        name[k] = 0;
-    }
+    agent_set_name(cJSON_IsString(n) ? n->valuestring : "");
     cJSON_Delete(j);
+    return info_get(req);
+}
+
+// Renamed in the app (POST /name) or on the board (Settings > Battery)
+void agent_set_name(const char *in)
+{
+    char name[32];
+    int k = 0;
+    for (const char *p = in; *p && k < (int)sizeof name - 1; p++) if (*p >= 32 && *p < 127) name[k++] = *p;   // (printable
+    while (k && name[k - 1] == ' ') k--;                                                                      // ASCII: the
+    name[k] = 0;                                                                                              // font's)
     nvs_handle_t h;
     if (nvs_open("agent", NVS_READWRITE, &h) == ESP_OK) {
         if (name[0]) nvs_set_str(h, "name", name);
@@ -287,7 +293,6 @@ static esp_err_t name_post(httpd_req_t *req)
     dev_name[0] = 0;
     wifi_set_name(agent_device_name());
     ESP_LOGI(TAG, "named \"%s\"", agent_device_name());
-    return info_get(req);
 }
 
 // POST /agent/answers {"sessions": ["…", …]}: the choices tapped for these chats (the asking Mac's own), as

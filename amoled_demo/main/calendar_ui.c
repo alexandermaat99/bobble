@@ -230,15 +230,28 @@ static int row_height(int type, int idx)
     return l2[0] ? 92 : 68;              // time line + one or two title lines
 }
 
+// Where the agenda starts: today's next meeting (or the one going on) at the top, with the day's heading above it if
+// it's the day's first; nothing more today, the top of tomorrow, its heading first
 static void scroll_to_now(void)
 {
     int types[MAX_ITEMS * 2], idx[MAX_ITEMS * 2], n = agenda_rows(types, idx, MAX_ITEMS * 2), y = 0;
-    for (int r = 0; r < n; r++) {
-        if (types[r] == 1 && !items[idx[r]].all_day && items[idx[r]].end > now_t) break;
+    int day = -1, day_y = 0, tomorrow_y = -1, target = -1;
+    bool first = false;                               // (no rows yet under this day's heading)
+    for (int r = 0; r < n && target < 0; r++) {
+        if (types[r] == 0) {
+            day = idx[r];
+            day_y = y;
+            first = true;
+            if (day == 1) tomorrow_y = y;
+        } else {
+            if (day == 0 && types[r] == 1 && !items[idx[r]].all_day && items[idx[r]].end > now_t)
+                target = first ? day_y : y - (SCREEN_ROUND ? 0 : 18);   // (the square: clear of the fade at the list's top)
+            first = false;
+        }
         y += row_height(types[r], idx[r]);
     }
-    int head = SCREEN_ROUND ? 50 : 46;
-    scroll = y > head ? y - head : 0;    // keep the day heading above it in view
+    scroll = target >= 0 ? target : tomorrow_y >= 0 ? tomorrow_y : 0;
+    if (scroll < 0) scroll = 0;
 }
 
 bool cal_ui_animating(void) { return fling != 0; }
