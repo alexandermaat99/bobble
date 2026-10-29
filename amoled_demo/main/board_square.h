@@ -24,3 +24,4 @@ void sq_touch_init(void);
 bool sq_touch_read(int *x, int *y);     // a finger is down (screen pixels)
 float sq_battery_volts(void);           // the cell's voltage from the power chip; 0 if no battery
 bool sq_plugged_in(void);               // USB power is present (a computer or a wall charger)
+void sq_amp(bool on);                   // the speaker's amplifier (through the expander): off unless something's playing

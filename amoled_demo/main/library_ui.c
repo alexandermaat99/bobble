@@ -258,11 +258,12 @@ static void heart_icon(uint16_t *buf, int y0, int h, float cx, float cy, float s
     aa_path(buf, y0, h, p, 32, true, 2, c);
 }
 
-// the row's artwork: a rounded tile with a glyph (there's no cover to show)
-static void tile(uint16_t *buf, int y0, int h, int x, int y, int kind, const char *name)
+// the row's artwork: its cover (art, once it's loaded), or else a rounded tile with a glyph
+static void tile(uint16_t *buf, int y0, int h, int x, int y, int kind, const char *name, const uint16_t *art)
 {
-    const int S = 46;
+    const int S = SP_THUMB;
     float cx = x + S / 2.0f, cy = y + S / 2.0f;
+    if (art) { aa_image(buf, y0, h, x, y, S, art, 8); return; }
     if (kind == 1) {                                  // Liked Songs: Spotify's purple tile with a heart
         aa_rrect(buf, y0, h, x, y, x + S, y + S, 8, rgb(92, 60, 210));
         heart_icon(buf, y0, h, cx, cy, 24, C_WHITE);
@@ -364,12 +365,13 @@ static void draw_square(uint16_t *buf, int y0, int h)
         int ry = LIST_TOP + i * ROW_H - scroll;
         if (ry + ROW_H <= y0 || ry >= y0 + h || ry + ROW_H <= LIST_TOP || ry >= LIST_BOT) continue;
         bool hot = (pressed_any && press_id == ID_ROW + i) || (touched_row == i), current = false, dim = false;
-        int kind = 0;
+        int kind = 0, thumb = -1;
         const char *name = "";
         switch (view) {
         case V_PLAYLISTS:
             current = s.context_uri[0] && !strcmp(s.context_uri, pls[i].uri);
             name = pls[i].name;
+            thumb = pls[i].thumb;
             if (pls[i].tracks >= 0) snprintf(sub, sizeof sub, "Playlist - %d songs", pls[i].tracks);
             else { strlcpy(sub, "Your saved songs", sizeof sub); kind = 1; }
             break;
@@ -378,6 +380,7 @@ static void draw_square(uint16_t *buf, int y0, int h)
             snprintf(uri, sizeof uri, "spotify:show:%.31s", shows[i].id);
             current = !strcmp(s.context_uri, uri);
             name = shows[i].name;
+            thumb = shows[i].thumb;
             fit(sub, sizeof sub, shows[i].publisher, 60);
             kind = 2;
             break;
@@ -400,9 +403,9 @@ static void draw_square(uint16_t *buf, int y0, int h)
         }
         if (hot) fill_rect(buf, y0, h, 0, ry, W, ry + ROW_H, C_ROW_HI);
         bool tiled = view != V_EPISODES;
-        int tx = tiled ? PAD + 46 + 14 : PAD, right = W - PAD - (current ? 30 : 0);
+        int tx = tiled ? PAD + SP_THUMB + 14 : PAD, right = W - PAD - (current ? 30 : 0);
         uint16_t fg = current ? C_GREEN : dim ? rgb(100, 100, 108) : C_WHITE, fg2 = dim ? rgb(80, 80, 88) : C_TEXT2;
-        if (tiled) tile(buf, y0, h, PAD, ry + (ROW_H - 46) / 2, kind, kind == 3 ? devs[i].type : name);
+        if (tiled) tile(buf, y0, h, PAD, ry + (ROW_H - SP_THUMB) / 2, kind, kind == 3 ? devs[i].type : name, spotify_thumb(thumb));
         if (view == V_EPISODES) {                       // episode titles are long: two lines of small text
             wrap2w(name, &font_small, right - tx, line, l2, sizeof line);
             int tall = l2[0] ? 61 : 42, ty = ry + (ROW_H - tall) / 2;

@@ -9,6 +9,7 @@
 #include "gfx.h"
 #include "spotify.h"
 #include "spotify_ui.h"
+#include "spotify_logo.h"
 
 #define C_WHITE  rgb(255, 255, 255)
 #define C_GREY   rgb(170, 170, 185)
@@ -188,21 +189,24 @@ static void draw_skip(uint16_t *buf, int y0, int h, float cx, float cy, bool nex
     aa_icon(buf, y0, h, cx, cy, 20, next ? fwd_bar : back_bar, 2, false, 2, c);
 }
 
-// Not connected, or nothing playing: the Spotify mark (a green disc, three sound waves) and what to do
+// Not connected, or nothing playing: the Spotify logo (main/spotify_logo.h, its own SVG rasterised) and what to do
 #define LOGO_Y 168
-#define LOGO_R 52
+#define LOGO_R (SPOTIFY_LOGO_SIZE / 2)
 static void draw_square_idle(uint16_t *buf, int y0, int h)
 {
-    aa_disc(buf, y0, h, CX, LOGO_Y, LOGO_R, C_GREEN);
-    static const float rad[3] = {52, 40, 29}, span[3] = {50, 47, 43}, wid[3] = {8, 7, 6};   // (arcs round a point below)
-    for (int k = 0; k < 3; k++) {
-        float p[2 * 16];
-        for (int i = 0; i < 16; i++) {
-            float a = (-span[k] + 2 * span[k] * i / 15) * (float)M_PI / 180;
-            p[2 * i] = CX + 2 + rad[k] * sinf(a);
-            p[2 * i + 1] = LOGO_Y + 40 - rad[k] * cosf(a);
+    uint16_t g = SWAP16(C_GREEN);                       // the mask in Spotify green, over the black
+    int gr = g >> 11, gg = (g >> 5) & 63, gb = g & 31, ox = CX - LOGO_R, oy = LOGO_Y - LOGO_R;
+    for (int y = 0; y < SPOTIFY_LOGO_SIZE; y++) {
+        if (oy + y < y0 || oy + y >= y0 + h) continue;
+        uint16_t *row = buf + (oy + y - y0) * W + ox;
+        for (int x = 0; x < SPOTIFY_LOGO_SIZE; x++) {
+            int q = y * SPOTIFY_LOGO_SIZE + x, a = (spotify_logo[q / 2] >> (q & 1 ? 0 : 4)) & 15;
+            if (!a) continue;
+            uint16_t d = SWAP16(row[x]);
+            int dr = d >> 11, dg = (d >> 5) & 63, db = d & 31;
+            dr += (gr - dr) * a / 15; dg += (gg - dg) * a / 15; db += (gb - db) * a / 15;
+            row[x] = SWAP16((uint16_t)((dr << 11) | (dg << 5) | db));
         }
-        aa_path(buf, y0, h, p, 16, false, wid[k], rgb(10, 10, 14));
     }
     ftext_c(buf, y0, h, LOGO_Y + LOGO_R + 22, &font_body, "Spotify", C_WHITE);
     ftext_c(buf, y0, h, LOGO_Y + LOGO_R + 76, &font_label, s.configured ? "Nothing playing" : "Not connected", rgb(150, 150, 158));

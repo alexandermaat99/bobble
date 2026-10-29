@@ -163,6 +163,16 @@ void aa_rrect(uint16_t *buf, int y0, int h, float x0, float ya, float x1, float 
                   rrect_sdf(px, py, x0, ya, x1, yb, r));
 }
 
+void aa_image(uint16_t *buf, int y0, int h, int x, int y, int n, const uint16_t *px, float r)
+{
+    int lo = row_lo(y0), hi = row_hi(y0, h);
+    for (int iy = y > lo ? y : lo; iy < y + n && iy < hi; iy++)
+        for (int ix = x < 0 ? 0 : x; ix < x + n && ix < W; ix++) {
+            float a = 0.5f - rrect_sdf(ix + 0.5f, iy + 0.5f, x, y, x + n, y + n, r);
+            blend_px(&buf[(iy - y0) * W + ix], px[(iy - y) * n + ix - x], a);
+        }
+}
+
 // A path's segments, worked out once per shape: start, direction, 1 / length squared and bounds (for skipping the far
 // ones). Each pixel then takes the nearest by squared distance and one square root: per pixel, a divide and a root
 // for every segment cost the square's Control Center icons ~40 ms a frame.

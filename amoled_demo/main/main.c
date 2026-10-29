@@ -837,6 +837,7 @@ static void draw_overlay(uint16_t *buf, int y0, int h)
 enum { PW_AWAKE, PW_FADING_OUT, PW_ASLEEP, PW_FADING_IN };
 static int power = PW_AWAKE, brightness = 255;
 static int bright_pref = 255;         // chosen in Settings; saved in NVS
+static int volume_pref = 50;          // likewise
 static float rest[3];                 // slowly-following accelerometer reading: where the board has been sitting
 
 static void set_brightness(int b)
@@ -932,12 +933,26 @@ static void set_locked(bool on)
     nvs_close(h);
 }
 
+int device_volume_get(void) { return volume_pref; }
+
+void device_volume_set(int level, bool save)
+{
+    volume_pref = level < 0 ? 0 : (level > 100 ? 100 : level);
+    if (!save) return;
+    nvs_handle_t h;
+    if (nvs_open("demo", NVS_READWRITE, &h) != ESP_OK) return;
+    nvs_set_u8(h, "volume", (uint8_t)volume_pref);
+    nvs_commit(h);
+    nvs_close(h);
+}
+
 static void brightness_load(void)
 {
     nvs_handle_t h;
     uint8_t v;
     if (nvs_open("demo", NVS_READONLY, &h) != ESP_OK) return;
     if (nvs_get_u8(h, "bright", &v) == ESP_OK) bright_pref = v < 10 ? 10 : v;
+    if (nvs_get_u8(h, "volume", &v) == ESP_OK) volume_pref = v > 100 ? 100 : v;
     if (nvs_get_u8(h, "locked", &v) == ESP_OK) locked = v;
     nvs_close(h);
     set_brightness(bright_pref);

@@ -4,3 +4,5 @@ dependencies:
   espressif/qrcode: "*"
   espressif/mdns: "*"
   espressif/esp_jpeg: "*"
+  # the square board's speaker (ES8311)
+  espressif/esp_codec_dev: "~1.6.2"
