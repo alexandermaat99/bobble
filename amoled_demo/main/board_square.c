@@ -22,7 +22,7 @@ static const char *TAG = "square";
 #define EX_CS     (1 << 0)              // panel's 3-wire SPI
 #define EX_SDA    (1 << 1)
 #define EX_SCL    (1 << 2)
-#define EX_AMP    (1 << 3)              // speaker amplifier (kept off)
+#define EX_AMP    (1 << 3)              // speaker amplifier (on only while a voice chat is open: audio.c)
 #define EX_RST    (1 << 5)              // panel and touch reset
 #define EX_TINT   (1 << 6)              // touch interrupt: held low through reset to pick the touch chip's address
 
@@ -192,6 +192,11 @@ void sq_display_init(void)
     esp_cache_msync(fb, 480 * 480 * 2, ESP_CACHE_MSYNC_FLAG_DIR_C2M);   // (no dirty lines left to land on DMA's work)
     async_memcpy_config_t mc = {.backlog = 4, .dma_burst_size = 32};   // (rows are 960 bytes: whole bursts)
     if (esp_async_memcpy_install_gdma_ahb(&mc, &mcp) != ESP_OK) { mcp = NULL; ESP_LOGW(TAG, "no DMA copy: the CPU copies"); }
+}
+
+void sq_amp(bool on)
+{
+    if (ex_dev) ex_set(EX_AMP, on);
 }
 
 // DMA copies each strip into the frame in PSRAM while the next one is drawn (copying with the CPU stalled on every

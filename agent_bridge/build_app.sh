@@ -80,6 +80,7 @@ cat > "$app/Contents/Info.plist" <<PLIST
     <key>LSUIElement</key><true/>
     <key>NSLocalNetworkUsageDescription</key><string>Bobble finds your Bobble display on the local network and sends it what your coding agents are doing.</string>
     <key>NSBonjourServices</key><array><string>_bobble._tcp</string></array>
+    <key>NSSpeechRecognitionUsageDescription</key><string>Bobble turns what you say to your Bobble into text, on this Mac, so Claude can answer.</string>
 </dict></plist>
 PLIST
 codesign --force --sign - "$app" >/dev/null 2>&1

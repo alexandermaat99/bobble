@@ -4,3 +4,6 @@ dependencies:
   espressif/qrcode: "*"
   espressif/mdns: "*"
   espressif/esp_jpeg: "*"
+  # the square board's speaker and microphones (ES8311 / ES7210), and the echo canceller for talking over replies
+  espressif/esp_codec_dev: "~1.6.2"
+  espressif/esp-sr: "~2.4.7"

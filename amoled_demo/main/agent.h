@@ -66,5 +66,6 @@ void agent_pair_cancel(void);      // take the code down (a tap on it, or POST /
 bool agent_just_paired(void);       // paired in the last few seconds (the display says so)
 bool agent_known(void);
 bool agent_token_ok(httpd_req_t *req);
+bool agent_key_ok(const char *token);   // the same check on a key that came some other way (the chat connection)
 const char *agent_device_id(void);     // this board: 12 hex digits from its hardware address
 const char *agent_device_name(void);   // "Bobble 3F2A", or what it's been named in the app   // the request carries the paired Mac's key (or the development one)             // a Mac has paired, or sent a chat, at some point (else it's still being set up)
