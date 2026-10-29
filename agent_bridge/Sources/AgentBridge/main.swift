@@ -10,6 +10,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let device = Device()
     private let sims = [Device(sim: Device.bubble), Device(sim: Device.square)]   // the simulators, when they're running (chats go to all)
     private var server: HookServer!
+    private var voice: VoiceChat!                 // talking with Claude through the square Bobble
     private let updater = Updater()              // new builds from the Bobble repo's releases
     private var badged = false                    // the menu-bar mark has its "needs you" dot
 
@@ -46,6 +47,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
             s.start()
         }
+        voice = VoiceChat(chats: chats, devices: [device] + sims)
         updater.board = device
         updater.busy = { [weak self] in                 // (open with -forceBoardUpdate YES to test it mid-chat)
             if UserDefaults.standard.bool(forKey: "forceBoardUpdate") { return false }
@@ -125,6 +127,13 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(header(counts.isEmpty ? "Chats" : "Chats · " + counts.joined(separator: ", ")))
         if active.isEmpty { menu.addItem(note("No chats right now")) }
         for c in active { menu.addItem(chatRow(c)) }
+        menu.addItem(.separator())
+
+        menu.addItem(header("Voice Chat"))
+        let key = action(Claude.apiKey == nil ? "Add Claude API Key…" : "Claude API Key…", #selector(setAPIKey))
+        key.state = Claude.apiKey == nil ? .off : .on
+        key.toolTip = "Talk with Claude from the chat page on your square Bobble (swipe right from the chats)."
+        menu.addItem(key)
         menu.addItem(.separator())
 
         menu.addItem(header("Show Chats From"))
@@ -255,6 +264,30 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
         NSWorkspace.shared.openApplication(at: app, configuration: NSWorkspace.OpenConfiguration())
+    }
+
+    // The Claude API key voice chat uses (from console.anthropic.com), kept in a file only you can read
+    @objc private func setAPIKey() {
+        let a = NSAlert()
+        a.messageText = "Claude API key"
+        a.informativeText = "Voice chat on your square Bobble talks to Claude with your own API key, from console.anthropic.com › API Keys. It stays on this Mac. Leave it empty to remove it."
+        let f = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 24))
+        f.placeholderString = Claude.apiKey == nil ? "sk-ant-…" : "(saved: type a new one to replace it)"
+        a.accessoryView = f
+        a.addButton(withTitle: "Save")
+        a.addButton(withTitle: "Cancel")
+        a.window.initialFirstResponder = f
+        NSApp.activate(ignoringOtherApps: true)
+        guard a.runModal() == .alertFirstButtonReturn else { return }
+        let k = f.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        if k.isEmpty, Claude.apiKey != nil {
+            let c = NSAlert()
+            c.messageText = "Remove the API key?"
+            c.addButton(withTitle: "Remove")
+            c.addButton(withTitle: "Cancel")
+            guard c.runModal() == .alertFirstButtonReturn else { return }
+        }
+        KeyStore.set(k, file: "anthropic-key")
     }
 
     @objc private func toggleHide() {

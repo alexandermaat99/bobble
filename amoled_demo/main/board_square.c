@@ -22,7 +22,7 @@ static const char *TAG = "square";
 #define EX_CS     (1 << 0)              // panel's 3-wire SPI
 #define EX_SDA    (1 << 1)
 #define EX_SCL    (1 << 2)
-#define EX_AMP    (1 << 3)              // speaker amplifier (on only while something's playing: sound.c)
+#define EX_AMP    (1 << 3)              // speaker amplifier (on only while something's playing: audio.c)
 #define EX_RST    (1 << 5)              // panel and touch reset
 #define EX_TINT   (1 << 6)              // touch interrupt: held low through reset to pick the touch chip's address
 

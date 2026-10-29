@@ -1150,6 +1150,11 @@ static void draw_spark(uint16_t *buf, int y0, int h, int cx, int cy, const int v
     }
 }
 
+void pet_ui_spark(uint16_t *buf, int y0, int h, int cx, int cy, int r, int g, int b, float scale)
+{
+    draw_spark(buf, y0, h, cx, cy, (int[3]){r, g, b}, 1, scale);
+}
+
 // Over the bubble (under the icon): which chat (its title, or the project) and the model, e.g.
 // "Access to other chats  Opus 5.5". A long title is cut to fit the glass up there.
 static void draw_label_row(uint16_t *buf, int y0, int h, int y, float alpha)

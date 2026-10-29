@@ -18,7 +18,7 @@
 #include "ota.h"
 #include "screen.h"
 #include "agent.h"
-#include "sound.h"
+#include "audio.h"
 #include "esp_app_desc.h"
 
 enum view { V_MENU, V_LIST, V_KEYS, V_STATUS, V_PHONE, V_RESET };
@@ -1194,7 +1194,7 @@ int wifi_ui_update(int tx, int ty, int64_t now)
     if (!is_down && down && (press_id == ID_BRIGHT || press_id == ID_VOLUME)) {   // let go of a slider: remember the level
         down = false;
         if (press_id == ID_BRIGHT) screen_brightness_set(screen_brightness_get(), true);
-        else { device_volume_set(device_volume_get(), true); sound_click(); }   // (a tick at the new level)
+        else { device_volume_set(device_volume_get(), true); audio_click(); }   // (a tick at the new level)
         press_id = ID_NONE;
     } else if (!is_down && down) {                    // finger up
         down = false;
