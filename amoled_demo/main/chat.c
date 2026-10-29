@@ -3,6 +3,8 @@
 #include <stdlib.h>
 #include <time.h>
 #include <unistd.h>
+#include <errno.h>
+#include <sys/select.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -27,21 +29,24 @@
 
 static const char *TAG = "chat";
 
-#define MAX_FRAME (64 * 1024)
+#define MAX_FRAME (20 * 1024)                 // (the Mac sends speech in 16000-byte pieces)
 #define MIC_RING (AUDIO_RATE)                 // a second of microphone waiting to go (more: the oldest goes)
 #define IDLE_CLOSE_US (120 * 1000000LL)       // a chat nobody's said anything in for 2 minutes closes itself
 
-static SemaphoreHandle_t st_lock, send_lock, mic_lock, mic_ready;
-static QueueHandle_t ctl_q;                   // messages for the Mac, sent by the sender task (never the page's loop)
-static chat_status_t st;
-// The Mac's connection (changed only under send_lock): its socket, whether it gave our key, which one it is (messages
-// queued for an earlier connection aren't sent on a later one), and when it last said anything
+// One task does all the talking on the network (chat_task): it listens, reads what the Mac sends, and sends what's
+// queued for it. Its stack and buffers are in PSRAM: internal RAM is what Wi-Fi, TLS and the screen's DMA run on, and
+// there's little of it to spare.
+static SemaphoreHandle_t st_lock, mic_lock, wake;
+static QueueHandle_t ctl_q;                   // messages for the Mac (from the page, the reader, the audio): sent by chat_task
+EXT_RAM_BSS_ATTR static chat_status_t st;
+// The Mac's connection (chat_task's own): its socket, whether it gave our key, which one it is (messages queued for
+// an earlier connection aren't sent on a later one), and when it last said anything
 static int conn = -1;
-static bool conn_authed;
-static uint32_t conn_gen;
-static volatile int64_t conn_heard;
+static volatile bool conn_authed;
+static volatile uint32_t conn_gen;
+static int64_t conn_heard;
 typedef struct { char *s; uint32_t gen; } ctl_t;
-EXT_RAM_BSS_ATTR static int16_t mic_ring[MIC_RING];   // (in PSRAM: internal RAM is what Wi-Fi needs)
+EXT_RAM_BSS_ATTR static int16_t mic_ring[MIC_RING];
 static int mic_r, mic_n;
 static volatile bool awaiting_played;         // speech came in since the last "played"
 static volatile int64_t last_activity;
@@ -60,25 +65,24 @@ static bool send_all(int fd, const void *p, int n)
     return true;
 }
 
-// (the sender task only) One message to the Mac, on the connection that's current (gen: only if it's still that one)
+static void drop_conn(void);
+
+// (chat_task only) One message to the Mac, if the connection is still the one it was meant for
 static void send_frame(char type, const void *data, int n, uint32_t gen)
 {
+    if (conn < 0 || !conn_authed || gen != conn_gen) return;
     uint8_t h[4] = {(uint8_t)type, (uint8_t)(n >> 16), (uint8_t)(n >> 8), (uint8_t)n};
-    xSemaphoreTake(send_lock, portMAX_DELAY);
-    int fd = conn;
-    if (fd >= 0 && conn_authed && gen == conn_gen && !(send_all(fd, h, 4) && send_all(fd, data, n)))
-        shutdown(fd, SHUT_RDWR);                      // (the reader notices, and tidies up)
-    xSemaphoreGive(send_lock);
+    if (!send_all(conn, h, 4) || !send_all(conn, data, n)) drop_conn();
 }
 
-// Queued for the sender task: the page's buttons and the reader never wait on the network
+// Queued for chat_task: the page's buttons never wait on the network
 static void send_json(cJSON *j)
 {
     ctl_t c = {cJSON_PrintUnformatted(j), conn_gen};
     cJSON_Delete(j);
     if (!c.s) return;
     if (xQueueSend(ctl_q, &c, 0) != pdTRUE) cJSON_free(c.s);
-    else xSemaphoreGive(mic_ready);
+    else xSemaphoreGive(wake);
 }
 
 static void send_msg(const char *t)
@@ -96,8 +100,8 @@ static void send_flag(const char *t, bool on)
     send_json(j);
 }
 
-// The microphones' frames (from the audio task): kept in a ring and sent from our own task, so a slow network never
-// holds up the speaker
+// The microphones' frames (from the audio task): kept in a ring for chat_task, so a slow network never holds up the
+// speaker
 static void mic_frames(const int16_t *pcm, int n)
 {
     if (!st.active || st.muted || !conn_authed) return;
@@ -108,40 +112,41 @@ static void mic_frames(const int16_t *pcm, int n)
         mic_n++;
     }
     xSemaphoreGive(mic_lock);
-    xSemaphoreGive(mic_ready);
+    xSemaphoreGive(wake);
 }
 
-static void sender_task(void *arg)
+// Everything waiting to go: queued messages, then the microphones
+static void send_pending(void)
 {
     EXT_RAM_BSS_ATTR static int16_t out[1024];
-    int64_t dry_since = 0;
+    ctl_t c;
+    while (xQueueReceive(ctl_q, &c, 0) == pdTRUE) { send_frame('J', c.s, strlen(c.s), c.gen); cJSON_free(c.s); }
     for (;;) {
-        xSemaphoreTake(mic_ready, pdMS_TO_TICKS(50));
-        ctl_t c;
-        while (xQueueReceive(ctl_q, &c, 0) == pdTRUE) { send_frame('J', c.s, strlen(c.s), c.gen); cJSON_free(c.s); }
-        for (;;) {
-            xSemaphoreTake(mic_lock, portMAX_DELAY);
-            int k = mic_n < 1024 ? mic_n : 1024;
-            for (int i = 0; i < k; i++) out[i] = mic_ring[(mic_r + i) % MIC_RING];
-            mic_r = (mic_r + k) % MIC_RING;
-            mic_n -= k;
-            xSemaphoreGive(mic_lock);
-            if (!k) break;
-            send_frame('A', out, k * 2, conn_gen);
-        }
-        // the reply has all played (a moment's quiet after the last of it): the Mac goes back to listening
-        int64_t now = esp_timer_get_time();
-        if (awaiting_played && audio_queued_ms() == 0) {
-            if (!dry_since) dry_since = now;
-            else if (now - dry_since > 150000) { awaiting_played = false; dry_since = 0; send_msg("played"); }
-        } else dry_since = 0;
-        // nobody's said anything for a while: close the chat (you're talking, or Claude is: still going)
-        if (st.active && (audio_mic_level() > 0.45f || st.state == CS_THINKING || st.state == CS_SPEAKING || awaiting_played))
-            last_activity = now;
-        if (st.active && now - last_activity > IDLE_CLOSE_US) {
-            ESP_LOGI(TAG, "quiet for 2 minutes: closing the chat");
-            chat_close();
-        }
+        xSemaphoreTake(mic_lock, portMAX_DELAY);
+        int k = mic_n < 1024 ? mic_n : 1024;
+        for (int i = 0; i < k; i++) out[i] = mic_ring[(mic_r + i) % MIC_RING];
+        mic_r = (mic_r + k) % MIC_RING;
+        mic_n -= k;
+        xSemaphoreGive(mic_lock);
+        if (!k) break;
+        send_frame('A', out, k * 2, conn_gen);
+    }
+}
+
+// The reply has all played (a moment's quiet after the last of it): the Mac goes back to listening. And a chat
+// nobody's said anything in for a while closes (you're talking, or Claude is: still going).
+static void check_quiet(int64_t now)
+{
+    static int64_t dry_since;
+    if (awaiting_played && audio_queued_ms() == 0) {
+        if (!dry_since) dry_since = now;
+        else if (now - dry_since > 150000) { awaiting_played = false; dry_since = 0; send_msg("played"); }
+    } else dry_since = 0;
+    if (st.active && (audio_mic_level() > 0.45f || st.state == CS_THINKING || st.state == CS_SPEAKING || awaiting_played))
+        last_activity = now;
+    if (st.active && now - last_activity > IDLE_CLOSE_US) {
+        ESP_LOGI(TAG, "quiet for 2 minutes: closing the chat");
+        chat_close();
     }
 }
 
@@ -207,7 +212,7 @@ static char *agenda_text(void)
 
 static char *music_text(const char *a)
 {
-    spotify_state_t sp;
+    EXT_RAM_BSS_ATTR static spotify_state_t sp;      // (chat_task only)
     spotify_get(&sp);
     char *s = malloc(400);
     if (!s) return NULL;
@@ -228,7 +233,7 @@ static char *music_text(const char *a)
 
 // ---------------------------------------------------------------- receiving
 
-static void handle_json(int fd, bool *authed, const char *text)
+static void handle_json(int fd, volatile bool *authed, const char *text)
 {
     cJSON *j = cJSON_Parse(text);
     if (!j) return;
@@ -236,18 +241,13 @@ static void handle_json(int fd, bool *authed, const char *text)
     const char *s = cJSON_GetStringValue(cJSON_GetObjectItem(j, "s"));
     const char *txt = cJSON_GetStringValue(cJSON_GetObjectItem(j, "text"));
     t = t ? t : "";
-    if (*authed && fd != conn) { cJSON_Delete(j); return; }   // (a connection that's been replaced: not listened to)
     if (!*authed) {
         const char *key = cJSON_GetStringValue(cJSON_GetObjectItem(j, "key"));
         if (strcmp(t, "hello") || !key || !agent_key_ok(key)) {
             ESP_LOGW(TAG, "a connection without our key: hanging up");
             shutdown(fd, SHUT_RDWR);
         } else {
-            xSemaphoreTake(send_lock, portMAX_DELAY);
-            *authed = fd == conn;
-            if (*authed) conn_authed = true;
-            xSemaphoreGive(send_lock);
-            if (!*authed) { cJSON_Delete(j); return; }   // (already replaced by a newer one)
+            *authed = conn_authed = true;
             ST_EDIT(st.mac = true; st.status[0] = 0);
             ESP_LOGI(TAG, "the Mac is here");
             cJSON *r = cJSON_CreateObject();
@@ -294,88 +294,111 @@ static void handle_json(int fd, bool *authed, const char *text)
     cJSON_Delete(j);
 }
 
-static bool recv_all(int fd, void *p, int n)
-{
-    char *c = p;
-    while (n > 0) {
-        int k = recv(fd, c, n, 0);
-        if (k <= 0) return false;
-        c += k;
-        n -= k;
-    }
-    return true;
-}
+// The connection's gone (it closed, went quiet, failed a send, or a newer one replaced it)
+static int rx_n, rx_len;                      // bytes of the frame coming in so far (its 4-byte header included), its length
+static uint8_t *rx_body;
 
-static void reader_task(void *arg)
+static void drop_conn(void)
 {
-    int fd = (int)(intptr_t)arg;
-    bool authed = false;                              // (this connection gave our key)
-    uint8_t *buf = malloc(MAX_FRAME + 1);
-    uint8_t h[4];
-    while (buf && recv_all(fd, h, 4)) {
-        int n = h[1] << 16 | h[2] << 8 | h[3];
-        if (n > MAX_FRAME || !recv_all(fd, buf, n)) break;
-        if (fd == conn) conn_heard = esp_timer_get_time();
-        if (h[0] == 'A' && authed && fd == conn) {
-            if (st.active) { audio_play((const int16_t *)buf, n / 2); awaiting_played = true; }
-        } else if (h[0] == 'J') {
-            buf[n] = 0;
-            handle_json(fd, &authed, (const char *)buf);
-        }
-    }
-    free(buf);
-    xSemaphoreTake(send_lock, portMAX_DELAY);         // (no send halfway through on this socket, and its number
-    bool current = conn == fd;                        //  isn't reused while one could be)
-    if (current) { conn = -1; conn_authed = false; }
-    close(fd);
-    xSemaphoreGive(send_lock);
-    if (current) {
+    if (conn < 0) return;
+    bool was = conn_authed;
+    close(conn);
+    conn = -1;
+    conn_authed = false;
+    rx_n = 0;
+    if (was) {
         ESP_LOGI(TAG, "the Mac went away");
-        if (st.active) chat_close();
+        chat_close();
         ST_EDIT(st.mac = false; st.state = CS_IDLE);
     }
-    vTaskDelete(NULL);
 }
 
-static void listen_task(void *arg)
+// Whatever's arrived, as whole frames; false: the connection's finished
+static bool read_some(int64_t now)
 {
+    static uint8_t hdr[4];
+    for (;;) {
+        int want = rx_n < 4 ? 4 - rx_n : 4 + rx_len - rx_n;
+        uint8_t *dst = rx_n < 4 ? hdr + rx_n : rx_body + (rx_n - 4);
+        int k = want ? recv(conn, dst, want, MSG_DONTWAIT) : 0;
+        if (want && k == 0) return false;
+        if (want && k < 0) return errno == EAGAIN || errno == EWOULDBLOCK;
+        rx_n += k;
+        conn_heard = now;
+        if (rx_n == 4) {
+            rx_len = hdr[1] << 16 | hdr[2] << 8 | hdr[3];
+            if (rx_len > MAX_FRAME) return false;
+        }
+        if (rx_n < 4 || rx_n < 4 + rx_len) continue;
+        rx_n = 0;
+        if (hdr[0] == 'A' && conn_authed) {
+            if (st.active) { audio_play((const int16_t *)rx_body, rx_len / 2); awaiting_played = true; }
+        } else if (hdr[0] == 'J') {
+            rx_body[rx_len] = 0;
+            handle_json(conn, &conn_authed, (const char *)rx_body);
+            if (conn < 0) return true;                 // (it hung up on a bad key)
+        }
+    }
+}
+
+static int listen_on(void)
+{
+    int ls = socket(AF_INET, SOCK_STREAM, 0);
+    int one = 1;
+    if (ls >= 0) setsockopt(ls, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+    struct sockaddr_in a = {.sin_family = AF_INET, .sin_port = htons(CHAT_PORT), .sin_addr.s_addr = htonl(INADDR_ANY)};
+    if (ls < 0 || bind(ls, (struct sockaddr *)&a, sizeof a) < 0 || listen(ls, 2) < 0) {
+        ESP_LOGW(TAG, "can't listen on port %d", CHAT_PORT);
+        if (ls >= 0) close(ls);
+        return -1;
+    }
+    ESP_LOGI(TAG, "listening for the Mac on port %d", CHAT_PORT);
+    return ls;
+}
+
+static void take_conn(int ls, int64_t now)
+{
+    int fd = accept(ls, NULL, NULL);
+    if (fd < 0) return;
+    // A new connection replaces the old one, unless the old one is a Mac that's still here (it says something every
+    // 10 s): then it's a second Mac, and the first keeps the board
+    if (conn >= 0 && conn_authed && now - conn_heard < 15000000) {
+        ESP_LOGI(TAG, "another Mac is already connected: turning this one away");
+        close(fd);
+        return;
+    }
+    drop_conn();
+    int one = 1;
+    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+    struct timeval stv = {.tv_sec = 5};
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &stv, sizeof stv);
+    conn = fd;
+    conn_gen++;
+    conn_heard = now;
+}
+
+static void chat_task(void *arg)
+{
+    rx_body = heap_caps_malloc(MAX_FRAME + 1, MALLOC_CAP_SPIRAM);
     int ls = -1;
     for (;;) {
 #ifndef BOBBLE_SIM
-        if (wifi_state() != WS_CONNECTED) { vTaskDelay(pdMS_TO_TICKS(1000)); continue; }
+        if (wifi_state() != WS_CONNECTED && conn < 0) { vTaskDelay(pdMS_TO_TICKS(1000)); continue; }
 #endif
-        if (ls < 0) {
-            ls = socket(AF_INET, SOCK_STREAM, 0);
-            int one = 1;
-            setsockopt(ls, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
-            struct sockaddr_in a = {.sin_family = AF_INET, .sin_port = htons(CHAT_PORT), .sin_addr.s_addr = htonl(INADDR_ANY)};
-            if (ls < 0 || bind(ls, (struct sockaddr *)&a, sizeof a) < 0 || listen(ls, 2) < 0) {
-                ESP_LOGW(TAG, "can't listen on port %d", CHAT_PORT);
-                if (ls >= 0) close(ls);
-                ls = -1;
-                vTaskDelay(pdMS_TO_TICKS(5000));
-                continue;
-            }
-            ESP_LOGI(TAG, "listening for the Mac on port %d", CHAT_PORT);
-        }
-        int fd = accept(ls, NULL, NULL);
-        if (fd < 0) { vTaskDelay(pdMS_TO_TICKS(200)); continue; }
-        int one = 1;
-        setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
-        struct timeval tv = {.tv_sec = 30};           // (the Mac says something every 10 s at least: silence is a dead link)
-        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
-        struct timeval stv = {.tv_sec = 5};
-        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &stv, sizeof stv);
-        // A new connection replaces the old one, unless the old one is a Mac that's still here (it says something
-        // every 10 s): then it's a second Mac, and the first keeps the board
-        xSemaphoreTake(send_lock, portMAX_DELAY);
-        bool busy = conn >= 0 && conn_authed && esp_timer_get_time() - conn_heard < 15000000;
-        int old = busy ? -1 : conn;
-        if (!busy) { conn = fd; conn_authed = false; conn_gen++; conn_heard = esp_timer_get_time(); }
-        xSemaphoreGive(send_lock);
-        if (busy) { ESP_LOGI(TAG, "another Mac is already connected: turning this one away"); close(fd); continue; }
-        if (old >= 0) shutdown(old, SHUT_RDWR);
-        xTaskCreate(reader_task, "chat_rx", 6144, (void *)(intptr_t)fd, 5, NULL);
+        if (ls < 0 && (ls = listen_on()) < 0) { vTaskDelay(pdMS_TO_TICKS(5000)); continue; }
+        fd_set rd;
+        FD_ZERO(&rd);
+        FD_SET(ls, &rd);
+        if (conn >= 0) FD_SET(conn, &rd);
+        struct timeval tv = {.tv_sec = 0, .tv_usec = 20000};
+        int r = select((conn > ls ? conn : ls) + 1, &rd, NULL, NULL, &tv);
+        int64_t now = esp_timer_get_time();
+        if (r > 0 && conn >= 0 && FD_ISSET(conn, &rd) && !read_some(now)) drop_conn();
+        if (r > 0 && FD_ISSET(ls, &rd)) take_conn(ls, now);
+        if (conn >= 0 && now - conn_heard > 30000000) { ESP_LOGW(TAG, "the Mac's gone quiet"); drop_conn(); }
+        send_pending();
+        check_quiet(now);
+        xSemaphoreTake(wake, 0);                       // (select did the waiting)
     }
 }
 
@@ -388,16 +411,13 @@ void chat_start(void)
 {
     if (!audio_available() || st_lock) return;
     st_lock = xSemaphoreCreateMutex();
-    send_lock = xSemaphoreCreateMutex();
     mic_lock = xSemaphoreCreateMutex();
-    mic_ready = xSemaphoreCreateBinary();
+    wake = xSemaphoreCreateBinary();
     ctl_q = xQueueCreate(24, sizeof(ctl_t));
-#if CONFIG_SPIRAM_XIP_FROM_PSRAM   // (stack in PSRAM where code runs from there, as on the square: flash writes don't pause it, and internal RAM is short)
-    xTaskCreateWithCaps(listen_task, "chat", 4096, NULL, 4, NULL, MALLOC_CAP_SPIRAM);
-    xTaskCreateWithCaps(sender_task, "chat_tx", 4096, NULL, 6, NULL, MALLOC_CAP_SPIRAM);
+#ifdef BOBBLE_SIM
+    xTaskCreate(chat_task, "chat", 6144, NULL, 5, NULL);
 #else
-    xTaskCreate(listen_task, "chat", 4096, NULL, 4, NULL);
-    xTaskCreate(sender_task, "chat_tx", 4096, NULL, 6, NULL);
+    xTaskCreatePinnedToCoreWithCaps(chat_task, "chat", 6144, NULL, 5, NULL, tskNO_AFFINITY, MALLOC_CAP_SPIRAM);
 #endif
 }
 

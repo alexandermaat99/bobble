@@ -1820,8 +1820,9 @@ void app_main(void)
         if (now - log_t > 5000000) {
             ESP_LOGI(TAG, "page %d: redraws lib %d music %d slide %d rot %d, pg_off %d", page, why_lib, why_music, why_slide, why_rot, (int)pg_off);
             why_lib = why_music = why_slide = why_rot = 0;
-            ESP_LOGI(TAG, "%s %d frames/s, angle %d, battery %.2f V (%d%%%s, curve from %d runs%s), free internal %u, calendar: %s", sheet >= H ? "wifi" : "calendar",
+            ESP_LOGI(TAG, "%s %d frames/s, angle %d, battery %.2f V (%d%%%s, curve from %d runs%s), free internal %u, psram %u KB (largest %u KB), calendar: %s", sheet >= H ? "wifi" : "calendar",
                      frames / 5, (int)ang, battery_volts(), battery_percent(), battery_charging() ? ", charging" : "", battery_learned_runs(), battery_logging() ? ", logging" : "", (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                     (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024), (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM) / 1024),
                      calendar_loaded() ? "loaded" : calendar_error());
             if (frames > part_n) ESP_LOGI(TAG, "render %d ms/full frame, %d eyes-only frames at %d ms (all frames: draw %d ms, turn+send %d ms)",
                                           (int)(render_us / (frames - part_n) / 1000), part_n, part_n ? (int)(part_us / part_n / 1000) : 0,

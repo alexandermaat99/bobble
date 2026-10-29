@@ -88,6 +88,7 @@ final class Mouth {
         if from != b.format || converter == nil {
             from = b.format
             converter = AVAudioConverter(from: b.format, to: out)
+            converter?.sampleRateConverterQuality = AVAudioQuality.max.rawValue   // (the voice comes at 48 kHz: keep it clean going down)
         }
         guard let converter else { return nil }
         let cap = AVAudioFrameCount(Double(b.frameLength) * 16000 / b.format.sampleRate) + 64

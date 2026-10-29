@@ -47,7 +47,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
             s.start()
         }
-        voice = VoiceChat(chats: chats, devices: [device] + sims)
+        voice = VoiceChat(chats: chats, devices: [device] + sims.filter { $0.sim?.name == Device.square.name })   // (the Square: it has the speaker and mics)
         updater.board = device
         updater.busy = { [weak self] in                 // (open with -forceBoardUpdate YES to test it mid-chat)
             if UserDefaults.standard.bool(forKey: "forceBoardUpdate") { return false }

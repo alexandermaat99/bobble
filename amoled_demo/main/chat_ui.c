@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <math.h>
+#include "esp_attr.h"
 #include "gfx.h"
 #include "chat.h"
 #include "pet_ui.h"
@@ -27,7 +28,7 @@ static const int claude[3] = {217, 119, 87};          // Claude's orange
 
 enum { B_NONE, B_MIC, B_SPEAKER, B_CLOSE, B_MENU_ROW = 100 };
 
-static chat_status_t cs;
+EXT_RAM_BSS_ATTR static chat_status_t cs;          // (PSRAM: internal RAM is short)
 static uint32_t seen_version = 0xFFFFFFFF;
 static bool dirty = true;
 static int pressed = B_NONE;                           // what the finger went down on
@@ -42,7 +43,7 @@ static float level;                                     // the halo round the mi
 #define LINE_CAP 72
 #define HEARD_LINES 2
 #define SAID_LINES 3                                    // (40 px each: the rest of a long reply rolls up)
-static char heard_l[HEARD_LINES][LINE_CAP], said_l[SAID_LINES][LINE_CAP];
+EXT_RAM_BSS_ATTR static char heard_l[HEARD_LINES][LINE_CAP], said_l[SAID_LINES][LINE_CAP];
 static int n_heard, n_said;
 
 // ---------------------------------------------------------------- text
