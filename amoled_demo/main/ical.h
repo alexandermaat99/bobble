@@ -22,6 +22,7 @@ ical_parser_t *ical_new(void);
 void ical_feed(ical_parser_t *p, const char *data, size_t len);
 void ical_finish(ical_parser_t *p);
 int ical_event_count(const ical_parser_t *p);
+bool ical_complete(const ical_parser_t *p);   // false: some events didn't fit in memory (better keep an older copy)
 // Occurrences overlapping [from, to), sorted by start (all-day first). Returns how many were written.
 int ical_expand(const ical_parser_t *p, time_t from, time_t to, ical_item_t *out, int max);
 void ical_free(ical_parser_t *p);

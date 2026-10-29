@@ -41,6 +41,7 @@ typedef struct {
 struct ical_parser {
     ev_t *ev;
     int n, cap;
+    bool oom;                 // an event didn't fit in memory: the calendar's incomplete
     ev_t cur;
     int depth_event, depth_other;   // inside VEVENT / inside a nested component (VALARM, VTIMEZONE)
     char line[LINE_MAX];
@@ -212,7 +213,7 @@ static void end_event(ical_parser_t *p)
     if (p->n == p->cap) {
         int cap = p->cap ? p->cap * 2 : 128;
         ev_t *grown = ICAL_REALLOC(p->ev, cap * sizeof(ev_t));
-        if (!grown) return;
+        if (!grown) { p->oom = true; return; }
         p->ev = grown;
         p->cap = cap;
     }
@@ -314,6 +315,7 @@ void ical_feed(ical_parser_t *p, const char *data, size_t len)
 void ical_finish(ical_parser_t *p) { flush_line(p); }
 
 int ical_event_count(const ical_parser_t *p) { return p->n; }
+bool ical_complete(const ical_parser_t *p) { return !p->oom; }
 
 void ical_free(ical_parser_t *p)
 {
