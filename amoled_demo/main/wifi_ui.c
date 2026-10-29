@@ -21,8 +21,9 @@
 #include "agent.h"
 #include "audio.h"
 #include "esp_app_desc.h"
+#include "battery.h"
 
-enum view { V_MENU, V_LIST, V_KEYS, V_STATUS, V_PHONE, V_RESET };
+enum view { V_MENU, V_LIST, V_KEYS, V_STATUS, V_PHONE, V_RESET, V_BATTERY };
 static enum view view;
 
 // colours
@@ -39,7 +40,7 @@ static enum view view;
 enum {
     ID_NONE = 0, ID_SCAN, ID_PHONE, ID_EXIT, ID_BACK, ID_CANCEL, ID_NETWORKS, ID_FORGET,
     ID_SHIFT, ID_DEL, ID_SYM, ID_SPACE, ID_JOIN, ID_SHOW,
-    ID_MENU, ID_WIFI, ID_CAL_TOUCH, ID_CAL_TILT, ID_BRIGHT, ID_LOCK, ID_RESET, ID_ERASE, ID_VOLUME,
+    ID_MENU, ID_WIFI, ID_CAL_TOUCH, ID_CAL_TILT, ID_BRIGHT, ID_LOCK, ID_RESET, ID_ERASE, ID_VOLUME, ID_BATTERY,
     ID_ROW = 100,     // + row index
     ID_KEY = 200,     // + character code
 };
@@ -110,8 +111,9 @@ static const button_t phone_buttons[] = {{CX - 55, 408, CX + 55, 440, ID_BACK, "
 #if !SCREEN_ROUND
 // The square, like the phone's Control Center: a grid of rounded modules four columns wide, three rows high. Wi-Fi
 // is wide (an icon disc, a name and a line about it), Tilt and Touch small tiles under it, brightness and volume
-// tall sliders beside them, then Factory reset and what this board is and runs, wide, along the bottom. (No
-// Lock on the square: it still locks itself after 2 hours asleep on battery.)
+// tall sliders beside them, then Factory reset and Battery (which opens the charger's numbers, and says which board
+// this is and what it runs), wide, along the bottom. (No Lock on the square: it still locks itself after 2 hours
+// asleep on battery.)
 #define CC_COL(c) (20 + (c) * 114)                 // a module's left edge: 98 wide, 16 apart
 #define CC_ROW(r) (78 + (r) * 118)                 // and its top: 104 high, 14 apart
 #define CC_W 98
@@ -125,7 +127,9 @@ static const button_t menu_buttons[] = {
     {CC_COL(2), CC_ROW(0), CC_COL(2) + CC_W, CC_ROW(1) + CC_H, ID_BRIGHT, ""},   // brightness: drag up and down
     {CC_COL(0), CC_ROW(2), CC_COL(1) + CC_W, CC_ROW(2) + CC_H, ID_RESET, "Factory reset"},
     {CC_COL(3), CC_ROW(0), CC_COL(3) + CC_W, CC_ROW(1) + CC_H, ID_VOLUME, ""},   // volume: likewise
+    {CC_COL(2), CC_ROW(2), CC_COL(3) + CC_W, CC_ROW(2) + CC_H, ID_BATTERY, "Battery"},
 };
+static const button_t battery_buttons[] = {{8, 46, 160, 88, ID_MENU, "Settings"}};
 #else
 static const button_t menu_buttons[] = {
     // round icon bubbles, two by two
@@ -136,6 +140,7 @@ static const button_t menu_buttons[] = {
     {CX - 172, 338, CX + 172, 386, ID_BRIGHT, ""},   // brightness slider row
     {CX - 100, 396, CX + 100, 434, ID_RESET, "Factory reset"},
     {-100, -100, -100, -100, ID_VOLUME, ""},          // (no volume here: off the glass, never hit)
+    {-100, -100, -100, -100, ID_BATTERY, ""},         // (nor a battery page)
 };
 #endif
 #define ERASE_Y 262
@@ -240,7 +245,8 @@ bool wifi_ui_wants_status_bar(void) { return view != V_KEYS; }   // the keyboard
 
 bool wifi_ui_swipe_ok(void)
 {
-    return (view == V_MENU || view == V_STATUS || view == V_PHONE || view == V_RESET) && press_id != ID_BRIGHT &&
+    return (view == V_MENU || view == V_STATUS || view == V_PHONE || view == V_RESET || view == V_BATTERY) &&
+           press_id != ID_BRIGHT &&
            press_id != ID_VOLUME && press_id != ID_ERASE;
 }
 
@@ -312,7 +318,7 @@ static void draw_lock(uint16_t *buf, int y0, int h, int x, int y, uint16_t c)
 }
 
 // ---------------------------------------------------------------- views
-enum { ICON_WIFI, ICON_TOUCH, ICON_TILT, ICON_SUN, ICON_LOCK };
+enum { ICON_WIFI, ICON_TOUCH, ICON_TILT, ICON_SUN, ICON_LOCK, ICON_BATTERY };
 static void draw_icon(uint16_t *buf, int y0, int h, int kind, int cx, int cy, int r, uint16_t col);
 #if SCREEN_ROUND                                     // (the square's own come after its menu)
 static void draw_list(uint16_t *buf, int y0, int h)
@@ -596,6 +602,19 @@ static void cc_icon(uint16_t *buf, int y0, int h, int kind, float cx, float cy, 
         aa_rrect(buf, y0, h, cx - 8.5f, cy - 2.5f, cx + 8.5f, cy + 11, 3, c);
         aa_disc(buf, y0, h, cx, cy + 4, 1.8f, bg);
         break;
+    case ICON_BATTERY: {                            // a cell on its side: a bolt in it while plugged in, else its level
+        aa_rrect(buf, y0, h, cx - 12, cy - 6.5f, cx + 9, cy + 6.5f, 3.5f, c);
+        aa_rrect(buf, y0, h, cx - 10, cy - 4.5f, cx + 7, cy + 4.5f, 2, bg);
+        aa_rrect(buf, y0, h, cx + 10, cy - 2.5f, cx + 12.5f, cy + 2.5f, 1, c);
+        int p = battery_percent();
+        if (battery_charging()) {
+            const float bolt[] = {cx + 1, cy - 6, cx - 4, cy + 0.8f, cx + 2, cy - 0.8f, cx - 3, cy + 6};
+            aa_path(buf, y0, h, bolt, 4, false, 2.2f, c);
+        } else if (p > 6) {
+            aa_rrect(buf, y0, h, cx - 8.5f, cy - 3, cx - 8.5f + 14.0f * (p > 100 ? 100 : p) / 100, cy + 3, 1.2f, c);
+        }
+        break;
+    }
     case ICON_SUN:
         aa_disc(buf, y0, h, cx, cy, 5, c);
         for (int i = 0; i < 8; i++) {
@@ -625,6 +644,7 @@ static void bin_icon(uint16_t *buf, int y0, int h, float cx, float cy, uint16_t 
 #define CC_MOD_ON  rgb(58, 58, 64)                   // ...under the finger
 #define CC_OFF     rgb(70, 70, 76)                   // an icon disc that's off
 #define CC_BLUE    rgb(10, 132, 255)
+#define CC_GREEN   rgb(48, 209, 88)
 #define CC_TEXT2   rgb(150, 150, 158)
 
 // a wide module: an icon disc on the left, its name and a line about it
@@ -695,22 +715,17 @@ static void draw_menu(uint16_t *buf, int y0, int h)
     cc_wide(buf, y0, h, rb, rgb(255, 69, 58), "Factory reset", "Erase everything", CC_TEXT2, current_id() == ID_RESET);
     bin_icon(buf, y0, h, rb->x0 + 38, (rb->y0 + rb->y1) / 2.0f, C_WHITE);
 
-    // which board, and what it runs (not a button)
-    const button_t ib = {CC_COL(2), CC_ROW(2), CC_COL(3) + CC_W, CC_ROW(2) + CC_H, ID_NONE, ""};
-    const esp_app_desc_t *d = esp_app_get_description();
-    char v[48], bl[48];
-    snprintf(v, sizeof v, "Firmware %s", d->version);
-#if defined(BOBBLE_BUILD) && BOBBLE_BUILD
-    snprintf(bl, sizeof bl, "Build %lld", (long long)BOBBLE_BUILD);
-#else
-    snprintf(bl, sizeof bl, "Built %s", ota_build_time());
-#endif
-    aa_rrect(buf, y0, h, ib.x0, ib.y0, ib.x1, ib.y1, CC_R, rgb(40, 40, 44));   // just an outline: it's not a button
-    aa_rrect(buf, y0, h, ib.x0 + 1.5f, ib.y0 + 1.5f, ib.x1 - 1.5f, ib.y1 - 1.5f, CC_R - 1.5f, 0);
-    int tw = ib.x1 - ib.x0 - 36, iy = (ib.y0 + ib.y1) / 2;
-    draw_fit(buf, y0, h, ib.x0 + 18, iy - 33, &font_label, agent_device_name(), tw, C_WHITE);
-    draw_fit(buf, y0, h, ib.x0 + 18, iy - 6, &font_small, v, tw, CC_TEXT2);
-    draw_fit(buf, y0, h, ib.x0 + 18, iy + 13, &font_small, bl, tw, rgb(100, 100, 108));
+    // Battery: its level and what the charger's doing (green while charging); opens the charger's numbers
+    const button_t *bb = &menu_buttons[7];
+    battery_diag_t bd;
+    battery_diag(&bd);
+    char bsub[48];
+    int pct = battery_percent();
+    if (pct >= 0) snprintf(bsub, sizeof bsub, "%d%%  %s", pct, battery_state_text(&bd));
+    else strlcpy(bsub, battery_state_text(&bd), sizeof bsub);
+    uint16_t bdisc = battery_charging_now(&bd) ? CC_GREEN : CC_OFF;
+    cc_wide(buf, y0, h, bb, bdisc, "Battery", bsub, CC_TEXT2, current_id() == ID_BATTERY);
+    cc_icon(buf, y0, h, ICON_BATTERY, bb->x0 + 38, (bb->y0 + bb->y1) / 2.0f, C_WHITE, bdisc);
 }
 
 // ---------------------------------------------------------------- the square's Wi-Fi pages, in the same style
@@ -862,6 +877,68 @@ static void draw_phone(uint16_t *buf, int y0, int h)
     }
 }
 
+static void volts_text(char *out, size_t cap, int mv)
+{
+    if (mv < 0) strlcpy(out, "-", cap);
+    else snprintf(out, cap, "%d.%02d V", mv / 1000, (mv % 1000) / 10);
+}
+
+// Battery: what the charger says (the square's power chip), row by row, then which board this is and what it runs
+static void draw_battery(uint16_t *buf, int y0, int h)
+{
+    nav(buf, y0, h, &battery_buttons[0], "Battery");
+    battery_diag_t d;
+    battery_diag(&d);
+    ftext_mid(buf, y0, h, CX, 106, &font_body, battery_state_text(&d), battery_charging_now(&d) ? CC_GREEN : C_WHITE);
+    char head[64] = "";
+    int pct = battery_percent();
+    if (pct >= 0 && d.gauge_pct >= 0) snprintf(head, sizeof head, "%d%% shown, %d%% by the power chip", pct, d.gauge_pct);
+    else if (pct >= 0) snprintf(head, sizeof head, "%d%%", pct);
+    ftext_mid(buf, y0, h, CX, 137, &font_small, head, SQ_TEXT2);
+
+    static const char *lab[8] = {"Battery", "Charging", "USB power", "System", "Charge current", "Charges to",
+                                 "USB input limit", "Chip temperature"};
+    char v[8][32];
+    volts_text(v[0], sizeof v[0], d.vbat_mv);
+    strlcpy(v[1], !d.chip ? "-" : !d.charge_on ? "Switched off" : battery_stage_text(d.stage), sizeof v[1]);
+    if (d.usb && d.vbus_mv >= 0) volts_text(v[2], sizeof v[2], d.vbus_mv);
+    else strlcpy(v[2], d.usb ? "Connected" : "Not connected", sizeof v[2]);
+    volts_text(v[3], sizeof v[3], d.vsys_mv);
+    if (d.charge_ma >= 0) snprintf(v[4], sizeof v[4], "%d mA", d.charge_ma); else strlcpy(v[4], "-", sizeof v[4]);
+    volts_text(v[5], sizeof v[5], d.full_mv);
+    if (d.in_limit_ma >= 0) snprintf(v[6], sizeof v[6], "%d mA", d.in_limit_ma); else strlcpy(v[6], "-", sizeof v[6]);
+    if (d.chip) snprintf(v[7], sizeof v[7], "%d  C", (int)lroundf(d.chip_c)); else strlcpy(v[7], "-", sizeof v[7]);
+    const int gt = 154, rh = 31, n = 8;               // the numbers, in a group
+    aa_rrect(buf, y0, h, ROW_X0, gt, ROW_X1, gt + n * rh, 14, SQ_GROUP);
+    for (int i = 0; i < n; i++) {
+        int top = gt + i * rh, my = top + rh / 2;
+        if (top + rh <= y0 || top >= y0 + h) continue;
+        if (i) fill_rect(buf, y0, h, 32, top, ROW_X1, top + 1, SQ_SEP);
+        draw_ftext(buf, y0, h, 32, my - font_label.line_h / 2, &font_label, lab[i], C_WHITE);
+        int vw = ftext_width(&font_label, v[i]), vx = ROW_X1 - 16 - vw;
+        draw_ftext(buf, y0, h, vx, my - font_label.line_h / 2, &font_label, v[i], SQ_TEXT2);
+        if (i == 7 && d.chip) {                       // (the font has no degree sign: a small ring before the C)
+            float dx = vx + vw - ftext_width(&font_label, "C") - 4.5f;
+            aa_disc(buf, y0, h, dx, my - 5, 2.6f, SQ_TEXT2);
+            aa_disc(buf, y0, h, dx, my - 5, 1.2f, SQ_GROUP);
+        }
+    }
+    // the chip's own words, for anyone chasing a charging problem; then the board and its firmware
+    char raw[64], fw[96];
+    if (d.chip) snprintf(raw, sizeof raw, "status %02x %02x   TS %02x   irq %02x %02x %02x", d.st1, d.st2, d.ts,
+                         d.irq[0], d.irq[1], d.irq[2]);
+    else strlcpy(raw, "No power chip on this board", sizeof raw);
+    ftext_mid(buf, y0, h, CX, gt + n * rh + 16, &font_small, raw, rgb(100, 100, 108));
+#if defined(BOBBLE_BUILD) && BOBBLE_BUILD
+    snprintf(fw, sizeof fw, "%s   Firmware %s   Build %lld", agent_device_name(), esp_app_get_description()->version,
+             (long long)BOBBLE_BUILD);
+#else
+    snprintf(fw, sizeof fw, "%s   Firmware %s   Built %s", agent_device_name(), esp_app_get_description()->version,
+             ota_build_time());
+#endif
+    ftext_mid(buf, y0, h, CX, gt + n * rh + 38, &font_small, fw, CC_TEXT2);
+}
+
 static void draw_reset(uint16_t *buf, int y0, int h)
 {
     nav(buf, y0, h, &reset_buttons[1], "Factory reset");
@@ -973,6 +1050,11 @@ void wifi_ui_draw(uint16_t *buf, int y0, int h)
     case V_STATUS: draw_status(buf, y0, h); break;
     case V_PHONE: draw_phone(buf, y0, h); break;
     case V_RESET: draw_reset(buf, y0, h); break;
+#if !SCREEN_ROUND
+    case V_BATTERY: draw_battery(buf, y0, h); break;
+#else
+    case V_BATTERY: break;
+#endif
     }
 }
 
@@ -1043,6 +1125,7 @@ static int activate(int id)
     case ID_CAL_TOUCH: return WIFI_UI_CAL_TOUCH;
     case ID_CAL_TILT: return WIFI_UI_CAL_TILT;
     case ID_RESET: view = V_RESET; break;
+    case ID_BATTERY: view = V_BATTERY; break;
     case ID_SCAN: wifi_scan(); last_scan_us = esp_timer_get_time(); break;
     case ID_PHONE: view = V_PHONE; break;
     case ID_BACK: go_list(); break;
@@ -1075,6 +1158,7 @@ static int hit_test(int x, int y)
         b = &menu_buttons[6];
         if (x >= b->x0 && x < b->x1 && y >= b->y0 - 4 && y < b->y1 + 4) return ID_VOLUME;
         if (hit(&menu_buttons[5], 1, x, y)) return ID_RESET;
+        if (hit(&menu_buttons[7], 1, x, y)) return ID_BATTERY;
         int id = hit_pad(menu_buttons, 4, x, y, false);   // rows sit close together: a row you're on beats a neighbour's margin
         return id ? id : hit(menu_buttons, 4, x, y);
     }
@@ -1093,6 +1177,11 @@ static int hit_test(int x, int y)
         return wifi_state() == WS_CONNECTED ? hit(connected_buttons, 3, x, y) : hit(connecting_buttons, 1, x, y);
     case V_PHONE: return hit(phone_buttons, 1, x, y);
     case V_RESET: return hit(reset_buttons, 2, x, y);
+#if !SCREEN_ROUND
+    case V_BATTERY: return hit(battery_buttons, 1, x, y);
+#else
+    case V_BATTERY: return ID_NONE;
+#endif
     }
     return ID_NONE;
 }

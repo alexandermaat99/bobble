@@ -63,6 +63,17 @@ void draw_status_bar(uint16_t *buf, int y0, int h, int top)
         float lvl = 21.0f * (pct > 100 ? 100 : pct < 4 ? 4 : pct) / 100;
         aa_rrect(buf, y0, h, bx0 + 2.5f, my - 4, bx0 + 2.5f + lvl, my + 4, 1.8f, fill);
         aa_rrect(buf, y0, h, bx0 + 26, my - 2.5f, bx1, my + 2.5f, 1, rgb(120, 120, 128));
+        if (chg) {                                            // plugged in: a solid bolt over the middle, outlined in black
+            float cx = bx0 + 12.5f;                           // top, left, inner left, bottom, right, inner right
+            const float b[12] = {cx + 2, my - 7, cx - 4, my + 1.2f, cx - 0.4f, my + 1.2f,
+                                 cx - 2, my + 7, cx + 4, my - 1.2f, cx + 0.4f, my - 1.2f};
+            aa_path(buf, y0, h, b, 6, true, 3, 0);
+            const int t[4][3] = {{0, 1, 2}, {0, 2, 5}, {2, 3, 4}, {2, 4, 5}};
+            for (int i = 0; i < 4; i++)
+                fill_tri(buf, y0, h, lroundf(b[2 * t[i][0]]), lroundf(b[2 * t[i][0] + 1]), lroundf(b[2 * t[i][1]]),
+                         lroundf(b[2 * t[i][1] + 1]), lroundf(b[2 * t[i][2]]), lroundf(b[2 * t[i][2] + 1]), white);
+            aa_path(buf, y0, h, b, 6, true, 1, white);
+        }
     } else {
         bx0 = bx1 + 8;                                        // (no battery: the Wi-Fi takes the corner)
     }
