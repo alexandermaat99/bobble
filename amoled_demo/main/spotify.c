@@ -39,7 +39,7 @@ typedef struct { int cmd; char arg[96]; } sp_cmd_t;
 #define MAX_PL 51
 #define MAX_DEV 10
 EXT_RAM_BSS_ATTR static sp_playlist_t playlists[MAX_PL];
-static sp_device_t devices[MAX_DEV];
+EXT_RAM_BSS_ATTR static sp_device_t devices[MAX_DEV];
 static int n_playlists = -1, n_devices;          // -1: not loaded yet
 #define MAX_SHOWS 30
 #define MAX_EPS 20
@@ -249,7 +249,7 @@ static bool refresh_access(void)
 {
     char form[400];
     snprintf(form, sizeof form, "grant_type=refresh_token&refresh_token=%s&client_id=%s", refresh_token, client_id);
-    static char buf[2048];
+    EXT_RAM_BSS_ATTR static char buf[2048];
     body_t b = {buf, 0, sizeof buf};
     buf[0] = 0;
     esp_http_client_config_t cfg = {
@@ -466,6 +466,18 @@ const uint16_t *spotify_thumb(int slot)
     return thumbs && slot >= 0 && slot < MAX_THUMBS && thumbs[slot].ok ? thumbs[slot].px : NULL;
 }
 
+static int16_t want[MAX_THUMBS];                      // (under lock) the Library's order, then slot order
+static int n_want;
+
+void spotify_want_thumbs(const int16_t *slots, int n)
+{
+    if (n > MAX_THUMBS) n = MAX_THUMBS;
+    xSemaphoreTake(lock, portMAX_DELAY);
+    memcpy(want, slots, n * sizeof *slots);
+    n_want = n;
+    xSemaphoreGive(lock);
+}
+
 // The image to shrink: the smallest at least SP_THUMB px across (Spotify lists them largest first; a cover you
 // uploaded yourself has no size given, and is taken as large)
 static void thumb_url(cJSON *imgs, char *out)
@@ -569,14 +581,23 @@ static bool shrink_thumb(int len, uint16_t *out)
     return true;
 }
 
-// Fetch covers not loaded yet, for up to budget_us, giving way to a waiting command
+// Fetch covers not loaded yet, for up to budget_us, giving way to a waiting command: the ones the Library wants
+// first (what's on screen), then the rest
 static void load_thumbs(int64_t budget_us)
 {
     static int fetched;                               // since the last time they were all in, for the log
     static int64_t busy_us;
     if (!thumbs) return;
     int64_t t0 = esp_timer_get_time();
-    for (int k = 0; k < MAX_THUMBS; k++) {
+    int16_t order[2 * MAX_THUMBS];
+    xSemaphoreTake(lock, portMAX_DELAY);
+    int n = n_want;
+    memcpy(order, want, n * sizeof *order);
+    xSemaphoreGive(lock);
+    for (int k = 0; k < MAX_THUMBS; k++) order[n++] = k;
+    for (int i = 0; i < n; i++) {
+        int k = order[i];
+        if (k < 0 || k >= MAX_THUMBS) continue;
         thumb_t *t = &thumbs[k];
         if (!t->url[0] || t->ok || t->tried) continue;
         if (uxQueueMessagesWaiting(cmds) || esp_timer_get_time() - t0 > budget_us || !jpeg_bufs()) {
@@ -630,7 +651,7 @@ typedef struct {
 
 static void save_last_track(const spotify_state_t *s)
 {
-    static last_track_t t;
+    EXT_RAM_BSS_ATTR static last_track_t t;
     t = (last_track_t){.magic = LAST_MAGIC, .progress_ms = s->progress_ms, .duration_ms = s->duration_ms, .episode = s->episode};
     strlcpy(t.title, s->title, sizeof t.title);
     strlcpy(t.artist, s->artist, sizeof t.artist);

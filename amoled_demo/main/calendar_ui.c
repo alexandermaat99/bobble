@@ -58,9 +58,11 @@ static const struct { int x0, y0, x1, y1; } agenda_btn = {CX - 100, 306, CX + 10
 
 void cal_ui_init(void)
 {
-    ang_lut = heap_caps_malloc(W * H, MALLOC_CAP_SPIRAM);
-    rad_lut = heap_caps_malloc(W * H, MALLOC_CAP_SPIRAM);
-    for (int y = 0; y < H; y++)
+    if (SCREEN_ROUND) {                              // (only the round board has the dial: 460 KB of PSRAM)
+        ang_lut = heap_caps_malloc(W * H, MALLOC_CAP_SPIRAM);
+        rad_lut = heap_caps_malloc(W * H, MALLOC_CAP_SPIRAM);
+    }
+    for (int y = 0; y < H && ang_lut && rad_lut; y++)
         for (int x = 0; x < W; x++) {
             float dx = x - CX + 0.5f, dy = y - CY + 0.5f;
             float a = atan2f(dx, -dy);                 // 0 at 12 o'clock, clockwise
@@ -300,7 +302,8 @@ static int agenda_rows(int *types, int *idx, int max)
 }
 
 // Agenda layout (rows and their heights), worked out once per data refresh rather than per strip
-static int ag_types[MAX_ITEMS * 2], ag_idx[MAX_ITEMS * 2], ag_h[MAX_ITEMS * 2], ag_n, ag_total;
+EXT_RAM_BSS_ATTR static int ag_types[MAX_ITEMS * 2], ag_idx[MAX_ITEMS * 2], ag_h[MAX_ITEMS * 2];
+static int ag_n, ag_total;
 static uint32_t ag_ver = 0xFFFFFFFF;
 static uint32_t data_version;              // bumped whenever items/reminders are re-read
 

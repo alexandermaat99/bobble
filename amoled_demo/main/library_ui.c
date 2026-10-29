@@ -52,7 +52,7 @@ static const box_t tab_pl = {CX - 128, 40, CX, 88}, tab_pod = {CX, 40, CX + 128,
 EXT_RAM_BSS_ATTR static sp_playlist_t pls[51];
 EXT_RAM_BSS_ATTR static sp_show_t shows[30];
 EXT_RAM_BSS_ATTR static sp_episode_t eps[20];
-static sp_device_t devs[10];
+EXT_RAM_BSS_ATTR static sp_device_t devs[10];
 static int n_pls = -1, n_shows = -1, n_eps = -1, n_devs;
 static char eps_show[32], open_show[32], open_show_name[64];
 static spotify_state_t s;
@@ -594,6 +594,23 @@ static void tap(int id, int64_t now_us)
     }
 }
 
+// Tell the Spotify task which covers to fetch first: the rows on screen, then the rest of the list below and above
+// them (only when that changes)
+static void want_covers(void)
+{
+    static int sent_view = -1, sent_first = -1;
+    static uint32_t sent_version;
+    if (view != V_PLAYLISTS && view != V_SHOWS) return;
+    int n = rows(), first = scroll / ROW_H;
+    if (view == sent_view && first == sent_first && seen_version == sent_version) return;
+    sent_view = view; sent_first = first; sent_version = seen_version;
+    int16_t slots[64];
+    int m = 0;
+    for (int i = first; i < n && m < 64; i++) slots[m++] = view == V_PLAYLISTS ? pls[i].thumb : shows[i].thumb;
+    for (int i = first - 1; i >= 0 && m < 64; i--) slots[m++] = view == V_PLAYLISTS ? pls[i].thumb : shows[i].thumb;
+    spotify_want_thumbs(slots, m);
+}
+
 void library_ui_update(int tx, int ty, int64_t now_us)
 {
     spotify_get(&s);
@@ -646,6 +663,7 @@ void library_ui_update(int tx, int ty, int64_t now_us)
         if (scroll <= 0 || scroll >= ms) { scroll = scroll < 0 ? 0 : (scroll > ms ? ms : scroll); fling = 0; }
         if (fabsf(fling) < 0.5f) fling = 0;
     }
+    want_covers();
 }
 
 bool library_ui_dirty(void)

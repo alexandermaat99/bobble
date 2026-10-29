@@ -15,6 +15,7 @@
 #include "agent.h"
 #include "chat.h"
 #include "secrets.h"
+#include "esp_attr.h"
 
 static const char *TAG = "agent";
 
@@ -37,10 +38,10 @@ typedef struct {
 // Choices tapped on the display, till the Mac collects them (POST /agent/answers)
 #define ANSWERS_MAX 6
 typedef struct { char id[40], qid[24]; int choice; } answer_t;
-static answer_t answers[ANSWERS_MAX];
+EXT_RAM_BSS_ATTR static answer_t answers[ANSWERS_MAX];
 static int n_answers;
 
-static sess_t sess[MAX_SESS];
+EXT_RAM_BSS_ATTR static sess_t sess[MAX_SESS];
 static uint32_t attention, activity;
 static char pinned[40];                       // the session picked with a tap, until pin_until
 static int64_t pin_until;
@@ -62,7 +63,7 @@ static agent_state_t parse_state(const char *s)
 #define PAIR_TRIES 5                           // wrong codes before it's cancelled
 #define MAX_MACS 4
 typedef struct { char key[33], client[17], name[32]; uint32_t used; } mac_t;
-static mac_t macs[MAX_MACS];
+EXT_RAM_BSS_ATTR static mac_t macs[MAX_MACS];
 static int n_macs;
 static char pair_code[8];
 static bool seen;                             // a chat has come in at some point (kept in NVS: "agent"/"seen")

@@ -1,5 +1,6 @@
 // Settings card for the 466x466 round AMOLED (and the 480x480 square board, which lays the menu out as tiles and says
-// which firmware it runs): a small menu (Wi-Fi, touch and tilt calibration, lock, brightness, reset; the square also volume), plus
+// which firmware it runs): a small menu (Wi-Fi, touch and tilt calibration, brightness, reset; the round board also lock,
+// the square volume), plus
 // the Wi-Fi screens: pick a network from a scrollable list,
 // type the password on an on-screen keyboard, then watch it connect (and show a synced clock).
 // Phone setup through the hotspot / QR code is still available from the list.
@@ -61,8 +62,6 @@ static bool dragging;
 static int64_t press_us, repeat_us;
 #define LOCK_HOLD_US 3000000
 
-static int64_t lock_tapped_us = -10000000;    // (when Lock was let go too soon: the square says to hold it)
-
 // ---------------------------------------------------------------- layout
 #if !SCREEN_ROUND
 // The square's Wi-Fi pages: a "< Settings" link top left and the title in the middle, then rounded groups of rows
@@ -110,9 +109,9 @@ static const button_t phone_buttons[] = {{CX - 55, 408, CX + 55, 440, ID_BACK, "
 #define BUB_R 62
 #if !SCREEN_ROUND
 // The square, like the phone's Control Center: a grid of rounded modules four columns wide, three rows high. Wi-Fi
-// is wide (an icon disc, a name and a line about it), Lock and Touch small tiles under it, brightness and volume
+// is wide (an icon disc, a name and a line about it), Tilt and Touch small tiles under it, brightness and volume
 // tall sliders beside them, then Factory reset and what this board is and runs, wide, along the bottom. (No
-// tilt calibration on the square.)
+// Lock on the square: it still locks itself after 2 hours asleep on battery.)
 #define CC_COL(c) (20 + (c) * 114)                 // a module's left edge: 98 wide, 16 apart
 #define CC_ROW(r) (78 + (r) * 118)                 // and its top: 104 high, 14 apart
 #define CC_W 98
@@ -121,8 +120,8 @@ static const button_t phone_buttons[] = {{CX - 55, 408, CX + 55, 440, ID_BACK, "
 static const button_t menu_buttons[] = {
     {CC_COL(0), CC_ROW(0), CC_COL(1) + CC_W, CC_ROW(0) + CC_H, ID_WIFI, "Wi-Fi"},
     {CC_COL(1), CC_ROW(1), CC_COL(1) + CC_W, CC_ROW(1) + CC_H, ID_CAL_TOUCH, "Touch"},
-    {-100, -100, -100, -100, ID_CAL_TILT, "Tilt"},     // (off the glass: never hit)
-    {CC_COL(0), CC_ROW(1), CC_COL(0) + CC_W, CC_ROW(1) + CC_H, ID_LOCK, "Lock"},
+    {CC_COL(0), CC_ROW(1), CC_COL(0) + CC_W, CC_ROW(1) + CC_H, ID_CAL_TILT, "Tilt"},
+    {-100, -100, -100, -100, ID_LOCK, "Lock"},         // (off the glass: never hit)
     {CC_COL(2), CC_ROW(0), CC_COL(2) + CC_W, CC_ROW(1) + CC_H, ID_BRIGHT, ""},   // brightness: drag up and down
     {CC_COL(0), CC_ROW(2), CC_COL(1) + CC_W, CC_ROW(2) + CC_H, ID_RESET, "Factory reset"},
     {CC_COL(3), CC_ROW(0), CC_COL(3) + CC_W, CC_ROW(1) + CC_H, ID_VOLUME, ""},   // volume: likewise
@@ -158,7 +157,7 @@ static const char *rows_upper[] = {"1234567890", "QWERTYUIOP", "ASDFGHJKL", "ZXC
 static const char *rows_sym[] = {"!@#$%^&*()", "-_=+[]{}\\|", ";:'\",.<>?", "/`~"};
 
 #define MAX_KEYS 48
-static button_t keys[MAX_KEYS];
+EXT_RAM_BSS_ATTR static button_t keys[MAX_KEYS];
 static char key_labels[MAX_KEYS][2];
 static int key_count;
 
@@ -674,17 +673,7 @@ static void draw_menu(uint16_t *buf, int y0, int h)
     cc_wide(buf, y0, h, wb, conn ? CC_BLUE : CC_OFF, "Wi-Fi", sub, CC_TEXT2, current_id() == ID_WIFI);
     cc_icon(buf, y0, h, ICON_WIFI, wb->x0 + 38, (wb->y0 + wb->y1) / 2.0f - 1, C_WHITE, 0);
 
-    // Lock: hold it; the disc turns indigo and a ring fills round it (a tap says to hold it)
-    const button_t *lb = &menu_buttons[3];
-    bool lon = current_id() == ID_LOCK;
-    uint16_t ldisc = lon ? rgb(94, 92, 230) : CC_OFF;
-    cc_small(buf, y0, h, lb, ICON_LOCK, ldisc, esp_timer_get_time() - lock_tapped_us < 2000000 ? "Hold 3 s" : "Lock", lon);
-    if (lon) {
-        int64_t held = esp_timer_get_time() - press_us;
-        float frac = held >= LOCK_HOLD_US ? 1 : held / (float)LOCK_HOLD_US;
-        cc_arc(buf, y0, h, (lb->x0 + lb->x1) / 2.0f, lb->y0 + 38, 28, 0, 360 * frac, 3, C_WHITE);
-    }
-
+    cc_small(buf, y0, h, &menu_buttons[2], ICON_TILT, CC_OFF, "Tilt", current_id() == ID_CAL_TILT);
     cc_small(buf, y0, h, &menu_buttons[1], ICON_TOUCH, CC_OFF, "Touch", current_id() == ID_CAL_TOUCH);
 
     // brightness: a tall module that fills from the bottom, the sun at its foot
@@ -1200,7 +1189,6 @@ int wifi_ui_update(int tx, int ty, int64_t now)
         down = false;
         ESP_LOGI("wifi_ui", "touch up at %d,%d, id %d%s", cur_x, cur_y, press_id, dragging ? " (drag)" : "");
         if (!dragging && press_id != ID_NONE && !(press_id == ID_DEL && now - press_us > 500000)) action = activate(press_id);
-        if (press_id == ID_LOCK) lock_tapped_us = now;   // (let go before it locked)
         press_id = ID_NONE;
         dragging = false;
     }
