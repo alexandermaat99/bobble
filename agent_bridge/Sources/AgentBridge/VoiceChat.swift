@@ -116,6 +116,8 @@ final class VoiceChat {
     private func begin(on link: ChatLink) {
         NSLog("voice chat: started on %@", link.device.name)
         if let a = active, a !== link { a.send(["t": "end"]) }   // (one at a time)
+        mouth.voice = Mouth.bestVoice()               // (looked for each time: a voice downloaded since is used straight away)
+        if let v = mouth.voice { NSLog("voice chat: speaking as %@ (%@)", v.name, v.identifier) }
         if turn != nil || !mouth.idle || !outgoing.isEmpty { interrupt(record: true) }
         active = link
         sendModels(link)
