@@ -566,7 +566,7 @@ static void load_thumbs(int64_t budget_us)
         }
         t->tried = true;
         fetched++;
-        static uint16_t px[SP_THUMB * SP_THUMB];
+        EXT_RAM_BSS_ATTR static uint16_t px[SP_THUMB * SP_THUMB];
         int len = img_get(t->url);
         if (len < 100 || !shrink_thumb(len, px)) { ESP_LOGW(TAG, "thumbnail failed (%d): %.80s", len, t->url); continue; }
         memcpy(t->px, px, sizeof px);
@@ -1119,7 +1119,11 @@ void spotify_start(void)
     st.volume = -1;
     creds_load();
     ESP_LOGI(TAG, "%s", st.configured ? "signed in" : "not signed in (run spotify_auth.py)");
+#if CONFIG_SPIRAM_XIP_FROM_PSRAM   // (stack in PSRAM where code runs from there, as on the square: flash writes don't pause it, and internal RAM is short)
+    xTaskCreateWithCaps(sp_task, "spotify", 12288, NULL, 3, NULL, MALLOC_CAP_SPIRAM);
+#else
     xTaskCreate(sp_task, "spotify", 12288, NULL, 3, NULL);
+#endif
 }
 
 // ---------------------------------------------------------------- sign-in hand-off from the Mac's Bobble app
