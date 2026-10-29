@@ -8,3 +8,9 @@ CONFIG_LCD_RGB_RESTART_IN_VSYNC=y
 CONFIG_IDF_EXPERIMENTAL_FEATURES=y
 CONFIG_SPIRAM_SPEED_120M=y
 CONFIG_ESPTOOLPY_FLASHFREQ_120M=y
+# Fewer of Wi-Fi's buffers kept in internal RAM (~23 KB back; ESP-IDF's own defaults without PSRAM, about): the panel's
+# buffers leave internal RAM short, and the speaker and microphones hold ~18 KB of it once started. Plenty for what
+# this board sends and gets (API calls, covers, a chat's 32 KB/s each way).
+CONFIG_ESP_WIFI_STATIC_TX_BUFFER_NUM=8
+CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=10
+CONFIG_ESP_WIFI_RX_BA_WIN=8

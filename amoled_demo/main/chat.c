@@ -12,6 +12,8 @@
 #include "freertos/queue.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_attr.h"
+#include "esp_heap_caps.h"
 #include "cJSON.h"
 #include "audio.h"
 #include "agent.h"
@@ -39,7 +41,7 @@ static bool conn_authed;
 static uint32_t conn_gen;
 static volatile int64_t conn_heard;
 typedef struct { char *s; uint32_t gen; } ctl_t;
-static int16_t mic_ring[MIC_RING];
+EXT_RAM_BSS_ATTR static int16_t mic_ring[MIC_RING];   // (in PSRAM: internal RAM is what Wi-Fi needs)
 static int mic_r, mic_n;
 static volatile bool awaiting_played;         // speech came in since the last "played"
 static volatile int64_t last_activity;
@@ -111,7 +113,7 @@ static void mic_frames(const int16_t *pcm, int n)
 
 static void sender_task(void *arg)
 {
-    static int16_t out[1024];
+    EXT_RAM_BSS_ATTR static int16_t out[1024];
     int64_t dry_since = 0;
     for (;;) {
         xSemaphoreTake(mic_ready, pdMS_TO_TICKS(50));
@@ -180,7 +182,7 @@ static void fmt_time(char *out, size_t cap, time_t t)
 // The calendar, as the board has it: today's and tomorrow's events, one a line
 static char *agenda_text(void)
 {
-    static ical_item_t items[40];
+    EXT_RAM_BSS_ATTR static ical_item_t items[40];
     int n = calendar_items(items, 40);
     size_t cap = 4096, len = 0;
     char *s = malloc(cap);
@@ -390,8 +392,13 @@ void chat_start(void)
     mic_lock = xSemaphoreCreateMutex();
     mic_ready = xSemaphoreCreateBinary();
     ctl_q = xQueueCreate(24, sizeof(ctl_t));
+#if CONFIG_SPIRAM_XIP_FROM_PSRAM   // (stack in PSRAM where code runs from there, as on the square: flash writes don't pause it, and internal RAM is short)
+    xTaskCreateWithCaps(listen_task, "chat", 4096, NULL, 4, NULL, MALLOC_CAP_SPIRAM);
+    xTaskCreateWithCaps(sender_task, "chat_tx", 4096, NULL, 6, NULL, MALLOC_CAP_SPIRAM);
+#else
     xTaskCreate(listen_task, "chat", 4096, NULL, 4, NULL);
     xTaskCreate(sender_task, "chat_tx", 4096, NULL, 6, NULL);
+#endif
 }
 
 void chat_tap_mic(void)
