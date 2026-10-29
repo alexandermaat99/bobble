@@ -497,10 +497,7 @@ static esp_err_t status_get(httpd_req_t *req)
 static void start_web(void)
 {
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
-    cfg.stack_size = 6144;
-#if CONFIG_SPIRAM_XIP_FROM_PSRAM   // (stack in PSRAM where code runs from there, as on the square: OTA's flash writes don't pause it)
-    cfg.task_caps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
-#endif
+    cfg.stack_size = 6144;   // (in internal RAM: /ota maps flash to check the image, which freezes the cache: a PSRAM stack asserts)
     cfg.lru_purge_enable = true;
     cfg.max_uri_handlers = 24;
     if (httpd_start(&httpd, &cfg) != ESP_OK) return;
