@@ -43,7 +43,7 @@ static const char *TAG = "audio";
 #define ES7210_ADDR 0x80
 #define MIC_GAIN_DB 30.0f
 #define IDLE_MS 3000                    // a tick with no chat open: the speaker goes off again after this long quiet
-#define RING_SAMPLES (AUDIO_RATE * 15)  // up to 15 s of reply waiting to be played
+#define WAKE_MS 210                     // ...and on again: this long for the codec and amplifier to come up before it
 
 static esp_codec_dev_handle_t in_dev, out_dev;
 static aec_handle_t *aec;
@@ -56,6 +56,7 @@ static volatile bool open_ok;
 static audio_mic_cb mic_cb;
 static volatile float mic_lvl, out_lvl;
 static int16_t *ring;
+static int ring_cap;                     // samples it holds: up to 15 s of reply waiting to be played (less if PSRAM is short)
 static volatile int ring_r, ring_n;      // read position, how many queued
 static int16_t click[AUDIO_RATE * 60 / 1000], quiet[AUDIO_RATE * 30 / 1000];
 static volatile bool click_wanted;       // audio_click() asked for one...
@@ -139,13 +140,19 @@ static bool hw_init(void)
     aec = aec_create_from_config(&ac);
     if (!aec) return false;
     chunk = aec_get_chunksize(aec);
-    raw = heap_caps_aligned_alloc(16, chunk * 2 * sizeof(int16_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    mic = heap_caps_aligned_alloc(16, chunk * sizeof(int16_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    ref = heap_caps_aligned_alloc(16, chunk * sizeof(int16_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    clean = heap_caps_aligned_alloc(16, chunk * sizeof(int16_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    play = heap_caps_aligned_alloc(16, chunk * sizeof(int16_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    ring = heap_caps_malloc(RING_SAMPLES * sizeof(int16_t), MALLOC_CAP_SPIRAM);
-    if (!raw || !mic || !ref || !clean || !play || !ring) return false;
+    raw = heap_caps_aligned_alloc(16, chunk * 2 * sizeof(int16_t), MALLOC_CAP_SPIRAM);
+    mic = heap_caps_aligned_alloc(16, chunk * sizeof(int16_t), MALLOC_CAP_SPIRAM);
+    ref = heap_caps_aligned_alloc(16, chunk * sizeof(int16_t), MALLOC_CAP_SPIRAM);
+    clean = heap_caps_aligned_alloc(16, chunk * sizeof(int16_t), MALLOC_CAP_SPIRAM);
+    play = heap_caps_aligned_alloc(16, chunk * sizeof(int16_t), MALLOC_CAP_SPIRAM);
+    static const int secs[] = {15, 8, 4};          // (PSRAM is mostly frames: take what fits rather than no speech at all)
+    for (int i = 0; i < 3 && !ring; i++) {
+        ring_cap = AUDIO_RATE * secs[i];
+        ring = heap_caps_malloc(ring_cap * sizeof(int16_t), MALLOC_CAP_SPIRAM);
+    }
+    if (!ring) ring_cap = 0;
+    else if (ring_cap < AUDIO_RATE * 15) ESP_LOGW(TAG, "room for %d s of reply only", ring_cap / AUDIO_RATE);
+    if (!raw || !mic || !ref || !clean || !play) return false;
     ESP_LOGI(TAG, "ready: %s, %d-sample frames", aec_get_config_string(aec), chunk);
     return true;
 }
@@ -168,8 +175,8 @@ static void ring_take(int16_t *out, int n)
 {
     xSemaphoreTake(ring_lock, portMAX_DELAY);
     int k = ring_n < n ? ring_n : n;
-    for (int i = 0; i < k; i++) out[i] = ring[(ring_r + i) % RING_SAMPLES];
-    ring_r = (ring_r + k) % RING_SAMPLES;
+    for (int i = 0; i < k; i++) out[i] = ring[(ring_r + i) % ring_cap];
+    if (k) ring_r = (ring_r + k) % ring_cap;          // (no ring at all: ring_cap 0, nothing taken)
     ring_n -= k;
     xSemaphoreGive(ring_lock);
     if (k < n) memset(out + k, 0, (n - k) * sizeof(int16_t));
@@ -186,8 +193,9 @@ static void tick_alone(void)
         if (esp_codec_dev_open(out_dev, &fs) != ESP_CODEC_DEV_OK) { ESP_LOGE(TAG, "couldn't open the speaker"); return; }
         out_only = true;
         vol_set = -1;
+        follow_volume();
         sq_amp(true);
-        esp_codec_dev_write(out_dev, quiet, sizeof quiet);   // (a moment for the amplifier to wake)
+        for (int i = 0; i < WAKE_MS / 30; i++) esp_codec_dev_write(out_dev, quiet, sizeof quiet);   // (30 ms each)
     }
     follow_volume();
     esp_codec_dev_write(out_dev, click, sizeof click);
@@ -252,8 +260,9 @@ static bool task_up(void)
     wake = xSemaphoreCreateBinary();
     opened = xSemaphoreCreateBinary();
     ring_lock = xSemaphoreCreateMutex();
-    // (above the drawing, which uses both cores in bursts: a late frame here is a click in the speaker)
-    xTaskCreatePinnedToCore(audio_task, "audio", 6144, NULL, 9, &task, 1);
+    // (above the drawing, which uses both cores in bursts: a late frame here is a click in the speaker; its stack in
+    // PSRAM, as the square runs its code from there anyway: internal RAM is short)
+    xTaskCreatePinnedToCoreWithCaps(audio_task, "audio", 6144, NULL, 9, &task, 1, MALLOC_CAP_SPIRAM);
     return true;
 }
 
@@ -291,10 +300,10 @@ void audio_play(const int16_t *pcm, int n)
 {
     if (!ring) return;
     xSemaphoreTake(ring_lock, portMAX_DELAY);
-    int room = RING_SAMPLES - ring_n;
+    int room = ring_cap - ring_n;
     if (n > room) n = room;                           // (the Mac keeps well ahead of this: nothing to lose normally)
-    int w = (ring_r + ring_n) % RING_SAMPLES;
-    for (int i = 0; i < n; i++) ring[(w + i) % RING_SAMPLES] = pcm[i];
+    int w = (ring_r + ring_n) % ring_cap;
+    for (int i = 0; i < n; i++) ring[(w + i) % ring_cap] = pcm[i];
     ring_n += n;
     xSemaphoreGive(ring_lock);
 }

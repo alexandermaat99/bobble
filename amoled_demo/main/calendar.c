@@ -6,6 +6,7 @@
 #include "freertos/semphr.h"
 #include "esp_http_client.h"
 #include "esp_crt_bundle.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_attr.h"
@@ -309,5 +310,9 @@ void calendar_start(void)
 {
     lock = xSemaphoreCreateMutex();
     load_urls();
+#if CONFIG_SPIRAM_XIP_FROM_PSRAM   // (stack in PSRAM where code runs from there, as on the square: flash writes don't pause it, and internal RAM is short)
+    xTaskCreateWithCaps(cal_task, "calendar", 8192, NULL, 3, &task, MALLOC_CAP_SPIRAM);
+#else
     xTaskCreate(cal_task, "calendar", 8192, NULL, 3, &task);
+#endif
 }
