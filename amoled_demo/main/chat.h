@@ -45,6 +45,7 @@ void chat_start(void);         // listens for the Mac (call once, with Wi-Fi up 
 bool chat_available(void);     // this board can talk
 int chat_port(void);           // for /info, so the Mac knows where to connect (0: can't talk)
 void chat_get(chat_status_t *out);
+bool chat_active(void);        // a voice chat is on (PSRAM's busy then: the echo canceller)
 float chat_level(void);        // 0..1: how loud it is right now (you, or Claude while it speaks): for the button's glow
 
 void chat_tap_mic(void);       // not in a chat: start one; in one: mute / unmute the microphones

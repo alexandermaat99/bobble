@@ -163,6 +163,8 @@ void chat_get(chat_status_t *out)
     xSemaphoreGive(st_lock);
 }
 
+bool chat_active(void) { return st_lock && st.active; }
+
 float chat_level(void)
 {
     if (!st.active) return 0;

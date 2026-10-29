@@ -34,8 +34,12 @@ static void draw_wifi(uint16_t *buf, int y0, int h, int x, int y, int bars, uint
     }
 }
 
+static bool show_clock = true;
+void status_bar_clock(bool show) { show_clock = show; }
+
 static void draw_status_clock(uint16_t *buf, int y0, int h)
 {
+    if (!show_clock) return;
     if (SB_TOP + 24 <= y0 || SB_TOP >= y0 + h) return;
     time_t now = time(NULL);
     struct tm tm;
@@ -52,7 +56,7 @@ void draw_status_bar(uint16_t *buf, int y0, int h, int top)
 #if !SCREEN_ROUND
     (void)top;
     if (SB_TOP + 24 <= y0 || SB_TOP >= y0 + h) return;
-    int pct = battery_percent(), rssi = wifi_rssi(), bars = wifi_state() != WS_CONNECTED ? 0 : rssi > -60 ? 3 : rssi > -72 ? 2 : 1;
+    int pct = battery_percent(), bars = wifi_bars();
     uint16_t white = rgb(255, 255, 255);
     float bx1 = W - SB_SIDE, bx0 = bx1 - 27, my = SB_MID;      // the cell: 25 x 13 with a nub on the right
     if (pct >= 0) {

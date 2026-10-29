@@ -158,6 +158,27 @@ int wifi_rssi(void)
     wifi_ap_record_t ap;
     return state == WS_CONNECTED && esp_wifi_sta_get_ap_info(&ap) == ESP_OK ? ap.rssi : 0;
 }
+// The signal as bars, the way a phone shows it: the reading averaged over several seconds (it swings a few dB from
+// one packet to the next), and a bar only gained or lost once that's 3 dB past the line, so a signal sitting near one
+// doesn't flick between the two. (Lines: 1|2 at -72 dBm, 2|3 at -60.) Main task only.
+int wifi_bars(void)
+{
+    static const int line[3] = {0, -72, -60};         // line[b]: between b and b + 1 bars
+    static float avg;
+    static int bars;
+    static int64_t at;
+    int r = wifi_rssi();
+    if (r >= 0) { bars = 0; return 0; }               // (not connected)
+    int64_t now = esp_timer_get_time();
+    if (bars && now - at < 1000000) return bars;
+    at = now;
+    avg = bars ? avg * 0.8f + r * 0.2f : r;           // (~5 s to settle)
+    if (!bars) bars = avg > line[2] ? 3 : avg > line[1] ? 2 : 1;
+    while (bars < 3 && avg > line[bars] + 3) bars++;
+    while (bars > 1 && avg < line[bars - 1] - 3) bars--;
+    return bars;
+}
+
 const char *wifi_ap_ssid(void) { return ap_ssid; }
 const char *wifi_ap_pass(void) { return ap_pass; }
 int wifi_ap_clients(void) { return ap_clients; }

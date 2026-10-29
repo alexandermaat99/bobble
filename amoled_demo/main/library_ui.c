@@ -600,6 +600,7 @@ static void want_covers(void)
 {
     static int sent_view = -1, sent_first = -1;
     static uint32_t sent_version;
+    if (!spotify_library_visible()) { sent_view = -1; return; }   // (off screen: the start-up preload's list stands)
     if (view != V_PLAYLISTS && view != V_SHOWS) return;
     int n = rows(), first = scroll / ROW_H;
     if (view == sent_view && first == sent_first && seen_version == sent_version) return;
