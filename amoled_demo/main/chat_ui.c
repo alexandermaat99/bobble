@@ -30,7 +30,8 @@ enum { B_NONE, B_MIC, B_SPEAKER, B_CLOSE, B_MENU_ROW = 100 };
 
 EXT_RAM_BSS_ATTR static chat_status_t cs;          // (PSRAM: internal RAM is short)
 static uint32_t seen_version = 0xFFFFFFFF;
-static bool dirty = true;
+static bool dirty = true;                               // something changed: the whole page again
+static bool anim_dirty;                                 // just the glow round the mic (or the thinking dots) moved
 static int pressed = B_NONE;                           // what the finger went down on
 static int64_t pressed_at;
 static bool held;                                       // the speaker was held: the menu opened, the tap doesn't count
@@ -337,18 +338,28 @@ void chat_ui_update(int tx, int ty, int64_t now)
     }
     was_down = down;
 
-    // the halo follows the sound; the dots go round while it thinks
+    // the halo follows the sound; the dots go round while it thinks. At most 15 times a second, and only the buttons'
+    // corner of the page is redrawn for it (chat_ui_take_rect): whole frames at full speed beside the echo canceller
+    // were more than PSRAM could keep up with, and the panel showed broken rows.
+    static int64_t anim_at;
+    if (now - anim_at < 66000) return;
+    anim_at = now;
     float target = chat_level();
     float nl = level + (target - level) * (dt > 0 ? fminf(1, dt * 14) : 1);
-    if (fabsf(nl - level) > 0.004f || (level > 0 && target == 0)) { level = nl < 0.003f ? 0 : nl; dirty = true; }
-    if (cs.active && cs.state == CS_THINKING) { t_anim += dt; dirty = true; }
+    if (fabsf(nl - level) > 0.004f || (level > 0 && target == 0)) { level = nl < 0.003f ? 0 : nl; anim_dirty = true; }
+    if (cs.active && cs.state == CS_THINKING) { t_anim += 0.066f; anim_dirty = true; }
 }
 
-bool chat_ui_dirty(void)
+bool chat_ui_dirty(void) { return dirty || anim_dirty; }
+
+int chat_ui_take_rect(int r[4])
 {
-    bool d = dirty;
-    dirty = false;
-    return d;
+    bool whole = dirty;
+    dirty = anim_dirty = false;
+    if (whole) return 0;
+    const int m = MIC_R + 6 + 26 + 4;                 // (the glow at its biggest; the dots go round inside it)
+    r[0] = CX - m; r[1] = BTN_Y - m; r[2] = CX + m; r[3] = BTN_Y + m < H ? BTN_Y + m : H;
+    return 1;
 }
 
 bool chat_ui_animating(void) { return cs.active && (level > 0 || cs.state == CS_THINKING); }

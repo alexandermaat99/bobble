@@ -1785,11 +1785,16 @@ void app_main(void)
         if (pet_dirty) pet_moved = now;
         else if (pet_moved && now - pet_moved > 250000) { pet_moved = 0; force_redraw = true; }
         int64_t full_every = page == PAGE_PET && sheet <= 0 ? 10000000 : 1000000;
-        bool others = force_redraw || pg_drag || pg_off != 0 || ota_progress() >= 0 || cal_ui_animating() || music_dirty || lib_dirty || chat_dirty ||
+        bool others = force_redraw || pg_drag || pg_off != 0 || ota_progress() >= 0 || cal_ui_animating() || music_dirty || lib_dirty ||
                       ((down || prev_down) && page != PAGE_PET) || card_drag || target >= 0 || sheet > 0 || now - last_full >= full_every;
-        bool content = others || pet_dirty;
+        bool content = others || pet_dirty || chat_dirty;
         // just the eyes moved: redraw only around them (a full frame still comes every second for the clock and status)
         part_cnt = pet_dirty && !others && ang == last_ang ? pet_ui_take_rects(part_rect) : 0;
+        if (chat_dirty) {                              // the chat page: just the glow round the mic, if that's all
+            int r[4];
+            part_cnt = chat_ui_take_rect(r) && !others && ang == last_ang ? 1 : 0;
+            if (part_cnt) memcpy(part_rect[0], r, sizeof r);
+        }
         part_on = part_cnt > 0;
         if (pet_dirty && !part_on) pet_ui_take_rect(NULL, NULL, NULL, NULL);
         // dragging the brightness slider on the open card: just its rows (the whole card made the slider lag)
