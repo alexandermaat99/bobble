@@ -41,6 +41,7 @@ enum {
     ID_NONE = 0, ID_SCAN, ID_PHONE, ID_EXIT, ID_BACK, ID_CANCEL, ID_NETWORKS, ID_FORGET,
     ID_SHIFT, ID_DEL, ID_SYM, ID_SPACE, ID_JOIN, ID_SHOW,
     ID_MENU, ID_WIFI, ID_CAL_TOUCH, ID_CAL_TILT, ID_BRIGHT, ID_LOCK, ID_RESET, ID_ERASE, ID_VOLUME, ID_BATTERY,
+    ID_RENAME, ID_CLEAR,
     ID_ROW = 100,     // + row index
     ID_KEY = 200,     // + character code
 };
@@ -55,6 +56,8 @@ static int64_t last_scan_us;
 
 static char join_ssid[33], password[64], error_msg[64];
 static bool join_secure, from_keys, caps, symbols, hide_pw;
+static bool naming;   // the keyboard is typing the board's name (Settings > Battery), not a Wi-Fi password
+#define TYPED_MAX (naming ? 31 : 63)
 
 // touch tracking
 static bool down;
@@ -129,7 +132,11 @@ static const button_t menu_buttons[] = {
     {CC_COL(3), CC_ROW(0), CC_COL(3) + CC_W, CC_ROW(1) + CC_H, ID_VOLUME, ""},   // volume: likewise
     {CC_COL(2), CC_ROW(2), CC_COL(3) + CC_W, CC_ROW(2) + CC_H, ID_BATTERY, "Battery"},
 };
-static const button_t battery_buttons[] = {{8, 46, 160, 88, ID_MENU, "Settings"}};
+#define BAT_RH 30                                      // the battery page's rows: the charger's, then the About group
+#define BAT_G1 158
+#define BAT_G2 (BAT_G1 + 6 * BAT_RH + 14)
+static const button_t battery_buttons[] = {{8, 46, 160, 88, ID_MENU, "Settings"},
+                                           {16, BAT_G2, W - 16, BAT_G2 + BAT_RH, ID_RENAME, "Name"}};
 #else
 static const button_t menu_buttons[] = {
     // round icon bubbles, two by two
@@ -153,10 +160,16 @@ static const button_t reset_buttons[] = {
 #endif
 };
 
-// keyboard: 5 rows of keys on a 40 px pitch, sized to stay inside the round display
+// keyboard: 5 rows of keys on a 40 px pitch, sized to stay inside the round display (the square: its whole width,
+// 46 x 50 keys, as the 40 px ones were hard to hit)
 #define KEY_TOP 128
+#if !SCREEN_ROUND
+#define KEY_ROW 50
+#define KEY_P 46
+#else
 #define KEY_ROW 46
 #define KEY_P 40
+#endif
 static const char *rows_lower[] = {"1234567890", "qwertyuiop", "asdfghjkl", "zxcvbnm"};
 static const char *rows_upper[] = {"1234567890", "QWERTYUIOP", "ASDFGHJKL", "ZXCVBNM"};
 static const char *rows_sym[] = {"!@#$%^&*()", "-_=+[]{}\\|", ";:'\",.<>?", "/`~"};
@@ -180,13 +193,21 @@ static void build_keyboard(void)
         }
     }
     int y3 = KEY_TOP + 3 * KEY_ROW, y4 = KEY_TOP + 4 * KEY_ROW;
-    if (!symbols) keys[key_count++] = (button_t){CX - 196, y3, CX - 140, y3 + KEY_ROW, ID_SHIFT, caps ? "abc" : "ABC"};
-    keys[key_count++] = (button_t){CX + 140, y3, CX + 196, y3 + KEY_ROW, ID_DEL, "Del"};
-    keys[key_count++] = (button_t){CX - 180, y4, CX - 108, y4 + KEY_ROW, ID_SYM, symbols ? "abc" : "#+="};
-    keys[key_count++] = (button_t){CX - 104, y4, CX + 76, y4 + KEY_ROW, ID_SPACE, "space"};
-    keys[key_count++] = (button_t){CX + 80, y4, CX + 180, y4 + KEY_ROW, ID_JOIN, "Join"};
-    keys[key_count++] = (button_t){CX - 120, 366, CX - 5, 400, ID_CANCEL, "Cancel"};
-    keys[key_count++] = (button_t){CX + 5, 366, CX + 120, 400, ID_SHOW, hide_pw ? "Show" : "Hide"};
+#if !SCREEN_ROUND
+    const int sh0 = CX - 230, sh1 = CX - 168, dl0 = CX + 168, dl1 = CX + 230, sy0 = CX - 230, sy1 = CX - 150,
+              sp0 = CX - 146, sp1 = CX + 96, jn0 = CX + 100, jn1 = CX + 230, ft0 = 390, ft1 = 426;
+#else
+    const int sh0 = CX - 196, sh1 = CX - 140, dl0 = CX + 140, dl1 = CX + 196, sy0 = CX - 180, sy1 = CX - 108,
+              sp0 = CX - 104, sp1 = CX + 76, jn0 = CX + 80, jn1 = CX + 180, ft0 = 366, ft1 = 400;
+#endif
+    if (!symbols) keys[key_count++] = (button_t){sh0, y3, sh1, y3 + KEY_ROW, ID_SHIFT, caps ? "abc" : "ABC"};
+    keys[key_count++] = (button_t){dl0, y3, dl1, y3 + KEY_ROW, ID_DEL, "Del"};
+    keys[key_count++] = (button_t){sy0, y4, sy1, y4 + KEY_ROW, ID_SYM, symbols ? "abc" : "#+="};
+    keys[key_count++] = (button_t){sp0, y4, sp1, y4 + KEY_ROW, ID_SPACE, "space"};
+    keys[key_count++] = (button_t){jn0, y4, jn1, y4 + KEY_ROW, ID_JOIN, naming ? "Save" : "Join"};
+    keys[key_count++] = (button_t){CX - 120, ft0, CX - 5, ft1, ID_CANCEL, "Cancel"};
+    if (naming) keys[key_count++] = (button_t){CX + 5, ft0, CX + 120, ft1, ID_CLEAR, "Clear"};
+    else keys[key_count++] = (button_t){CX + 5, ft0, CX + 120, ft1, ID_SHOW, hide_pw ? "Show" : "Hide"};
 }
 
 // ---------------------------------------------------------------- QR for phone setup
@@ -892,18 +913,31 @@ static void version_text(char *out, size_t cap)
     snprintf(out, cap, "%.*s%s", n, g + 2, strstr(g, "-dirty") ? ", modified" : "");
 }
 
-// a group of label / value rows, the value on the right in grey
-static void rows(uint16_t *buf, int y0, int h, int top, int rh, int n, const char *const *lab, char (*val)[32])
+// a group of label / value rows, the value on the right in grey. tap: the row (-1: none) that opens something, with a
+// chevron after its value and lit while it's pressed (lit)
+static void rows(uint16_t *buf, int y0, int h, int top, int rh, int n, const char *const *lab, char (*val)[32], int tap,
+                 bool lit)
 {
     aa_rrect(buf, y0, h, ROW_X0, top, ROW_X1, top + n * rh, 14, SQ_GROUP);
     for (int i = 0; i < n; i++) {
         int t = top + i * rh, my = t + rh / 2;
         if (t + rh <= y0 || t >= y0 + h) continue;
+        if (i == tap && lit) {                        // pressed: the row lights (rounded where it's the group's end)
+            aa_rrect(buf, y0, h, ROW_X0, t, ROW_X1, t + rh, 14, SQ_PRESS);
+            if (i > 0) fill_rect(buf, y0, h, ROW_X0, t, ROW_X1, t + 14, SQ_PRESS);
+            if (i < n - 1) fill_rect(buf, y0, h, ROW_X0, t + rh - 14, ROW_X1, t + rh, SQ_PRESS);
+        }
         if (i) fill_rect(buf, y0, h, 32, t, ROW_X1, t + 1, SQ_SEP);
         draw_ftext(buf, y0, h, 32, my - font_label.line_h / 2, &font_label, lab[i], C_WHITE);
-        int room = ROW_X1 - 16 - 200, vw = ftext_width(&font_label, val[i]);
+        int right = ROW_X1 - 16;
+        if (i == tap) {
+            const float chev[] = {right - 6.0f, my - 6.0f, right, (float)my, right - 6.0f, my + 6.0f};
+            aa_path(buf, y0, h, chev, 3, false, 2.2f, rgb(90, 90, 96));
+            right -= 18;
+        }
+        int room = right - 200, vw = ftext_width(&font_label, val[i]);
         vw = vw < room ? vw : room;
-        draw_fit(buf, y0, h, ROW_X1 - 16 - vw, my - font_label.line_h / 2, &font_label, val[i], room, SQ_TEXT2);
+        draw_fit(buf, y0, h, right - vw, my - font_label.line_h / 2, &font_label, val[i], room, SQ_TEXT2);
     }
 }
 
@@ -928,8 +962,8 @@ static void draw_battery(uint16_t *buf, int y0, int h)
     if (d.charge_ma >= 0) snprintf(v[3], sizeof v[3], "%d mA", d.charge_ma); else strlcpy(v[3], "-", sizeof v[3]);
     volts_text(v[4], sizeof v[4], d.full_mv);
     if (d.chip) snprintf(v[5], sizeof v[5], "%d  C", (int)lroundf(d.chip_c)); else strlcpy(v[5], "-", sizeof v[5]);
-    const int rh = 30, g1 = 158, g2 = g1 + 6 * rh + 14;
-    rows(buf, y0, h, g1, rh, 6, lab, v);
+    const int rh = BAT_RH, g1 = BAT_G1, g2 = BAT_G2;
+    rows(buf, y0, h, g1, rh, 6, lab, v, -1, false);
     if (d.chip && g1 + 5 * rh + rh / 2 + 8 > y0 && g1 + 5 * rh < y0 + h) {   // (the font has no degree sign: a ring)
         int my = g1 + 5 * rh + rh / 2;
         float dx = ROW_X1 - 16 - ftext_width(&font_label, "C") - 4.5f;
@@ -946,7 +980,7 @@ static void draw_battery(uint16_t *buf, int y0, int h)
     version_text(a[1], sizeof a[1]);
 #endif
     strlcpy(a[2], ota_build_time(), sizeof a[2]);
-    rows(buf, y0, h, g2, rh, 3, about, a);
+    rows(buf, y0, h, g2, rh, 3, about, a, 0, current_id() == ID_RENAME);   // (the name: tap to change it)
 }
 
 static void draw_reset(uint16_t *buf, int y0, int h)
@@ -970,12 +1004,13 @@ static void draw_reset(uint16_t *buf, int y0, int h)
 static void draw_keys(uint16_t *buf, int y0, int h)
 {
     char line[64];
-    snprintf(line, sizeof line, "Password for %s", join_ssid);
+    if (naming) strlcpy(line, "Name", sizeof line);
+    else snprintf(line, sizeof line, "Password for %s", join_ssid);
     ftext_mid(buf, y0, h, CX, 30, &font_label, line, C_WHITE);
     aa_rrect(buf, y0, h, 16, 58, W - 16, 104, 12, SQ_GROUP);
     if (error_msg[0]) aa_rrect(buf, y0, h, 16, 58, W - 16, 104, 12, rgb(70, 30, 32));
     int n = strlen(password);
-    if (hide_pw) { memset(line, '*', n > 40 ? 40 : n); line[n > 40 ? 40 : n] = 0; }
+    if (hide_pw && !naming) { memset(line, '*', n > 40 ? 40 : n); line[n > 40 ? 40 : n] = 0; }
     else strlcpy(line, password, sizeof line);
     while (line[0] && ftext_width(&font_label, line) > W - 64) memmove(line, line + 1, strlen(line));   // (the end shows)
     int tx = 30, ty = 81 - font_label.line_h / 2;
@@ -988,7 +1023,7 @@ static void draw_keys(uint16_t *buf, int y0, int h)
     for (int i = 0; i < key_count; i++) {
         button_t *k = &keys[i];
         if (k->y1 <= y0 || k->y0 >= y0 + h) continue;
-        bool pressed = current_id() == k->id, letter = k->id >= ID_KEY, foot = k->id == ID_CANCEL || k->id == ID_SHOW;
+        bool pressed = current_id() == k->id, letter = k->id >= ID_KEY, foot = k->id == ID_CANCEL || k->id == ID_SHOW || k->id == ID_CLEAR;
         uint16_t bg = letter ? rgb(80, 80, 86) : rgb(50, 50, 55), fg = C_WHITE;
         if (k->id == ID_JOIN) bg = CC_BLUE;
         if (k->id == ID_SHIFT && caps) { bg = rgb(235, 235, 240); fg = rgb(20, 20, 24); }
@@ -1080,6 +1115,7 @@ static void go_list(void)
 
 static void go_keys(const char *ssid)
 {
+    naming = false;
     if (strcmp(ssid, join_ssid)) password[0] = 0;   // keep the typed password when retrying the same network
     strlcpy(join_ssid, ssid, sizeof join_ssid);
     view = V_KEYS;
@@ -1097,6 +1133,7 @@ static void start_join(void)
 void wifi_ui_enter(void)
 {
     down = false;
+    if (naming) { naming = false; password[0] = 0; }
     error_msg[0] = 0;
     view = V_MENU;
 }
@@ -1124,7 +1161,7 @@ static int activate(int id)
     }
     if (id >= ID_KEY) {
         int n = strlen(password);
-        if (n < 63) { password[n] = (char)(id - ID_KEY); password[n + 1] = 0; }
+        if (n < TYPED_MAX) { password[n] = (char)(id - ID_KEY); password[n + 1] = 0; }
         if (caps && !symbols) { caps = false; build_keyboard(); }   // shift applies to one letter
         error_msg[0] = 0;
         return WIFI_UI_NONE;
@@ -1136,6 +1173,15 @@ static int activate(int id)
     case ID_CAL_TILT: return WIFI_UI_CAL_TILT;
     case ID_RESET: view = V_RESET; break;
     case ID_BATTERY: view = V_BATTERY; break;
+    case ID_RENAME:                                   // the keyboard, with the name as it is
+        naming = true;
+        strlcpy(password, agent_device_name(), sizeof password);
+        error_msg[0] = 0;
+        view = V_KEYS;
+        caps = symbols = false;
+        build_keyboard();
+        break;
+    case ID_CLEAR: password[0] = 0; break;
     case ID_SCAN: wifi_scan(); last_scan_us = esp_timer_get_time(); break;
     case ID_PHONE: view = V_PHONE; break;
     case ID_BACK: go_list(); break;
@@ -1143,6 +1189,7 @@ static int activate(int id)
     case ID_NETWORKS: go_list(); break;
     case ID_FORGET: wifi_forget(); go_list(); break;
     case ID_CANCEL:
+        if (naming) { naming = false; password[0] = 0; view = V_BATTERY; break; }
         if (view == V_STATUS) wifi_forget();
         error_msg[0] = 0;
         go_list();
@@ -1150,9 +1197,17 @@ static int activate(int id)
     case ID_SHIFT: caps = !caps; build_keyboard(); break;
     case ID_SYM: symbols = !symbols; build_keyboard(); break;
     case ID_SHOW: hide_pw = !hide_pw; build_keyboard(); break;
-    case ID_SPACE: { int n = strlen(password); if (n < 63) { password[n] = ' '; password[n + 1] = 0; } break; }
+    case ID_SPACE: { int n = strlen(password); if (n < TYPED_MAX) { password[n] = ' '; password[n + 1] = 0; } break; }
     case ID_DEL: { int n = strlen(password); if (n) password[n - 1] = 0; break; }
-    case ID_JOIN: if (strlen(password) >= 8 || !password[0]) start_join();
+    case ID_JOIN:
+        if (naming) {                                 // (empty: back to its own name, "Bobble 3F2A")
+            agent_set_name(password);
+            password[0] = 0;
+            naming = false;
+            view = V_BATTERY;
+            break;
+        }
+        if (strlen(password) >= 8 || !password[0]) start_join();
                   else strlcpy(error_msg, "At least 8 characters", sizeof error_msg);
                   break;
     }
@@ -1188,7 +1243,7 @@ static int hit_test(int x, int y)
     case V_PHONE: return hit(phone_buttons, 1, x, y);
     case V_RESET: return hit(reset_buttons, 2, x, y);
 #if !SCREEN_ROUND
-    case V_BATTERY: return hit(battery_buttons, 1, x, y);
+    case V_BATTERY: return hit(battery_buttons, 2, x, y);
 #else
     case V_BATTERY: return ID_NONE;
 #endif
@@ -1243,6 +1298,10 @@ int wifi_ui_update(int tx, int ty, int64_t now)
         cur_x = tx; cur_y = ty;
         if (abs(ty - press_y) > 14 || abs(tx - press_x) > 14) {
             if (view == V_LIST && press_y >= LIST_TOP && press_y < LIST_BOT) dragging = true;
+            else if (view == V_KEYS) {                // the keyboard: the key under the finger when it lifts, as on a phone
+                int id = hit_test(tx, ty);
+                if (id != press_id) { press_id = id; press_us = repeat_us = now; }
+            }
             else if (press_id != ID_BRIGHT && press_id != ID_VOLUME && hit_test(tx, ty) != press_id) press_id = ID_NONE;   // slid off the key
         }
         if (dragging) {

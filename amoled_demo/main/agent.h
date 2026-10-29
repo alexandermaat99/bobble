@@ -68,4 +68,5 @@ bool agent_known(void);
 bool agent_token_ok(httpd_req_t *req);
 bool agent_key_ok(const char *token);   // the same check on a key that came some other way (the chat connection)
 const char *agent_device_id(void);     // this board: 12 hex digits from its hardware address
+void agent_set_name(const char *name);   // printable ASCII, up to 31 ("": back to "Bobble 3F2A"); saved, and advertised
 const char *agent_device_name(void);   // "Bobble 3F2A", or what it's been named in the app   // the request carries the paired Mac's key (or the development one)             // a Mac has paired, or sent a chat, at some point (else it's still being set up)

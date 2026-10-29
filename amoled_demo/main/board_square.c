@@ -3,6 +3,7 @@
 #include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "esp_heap_caps.h"
 #include "driver/gpio.h"
 #include "driver/ledc.h"
 #include "esp_lcd_panel_rgb.h"
@@ -242,20 +243,14 @@ static bool gt_read(uint16_t reg, uint8_t *d, int n)
     return i2c_master_transmit_receive(gt_dev, a, 2, d, n, 20) == ESP_OK;
 }
 
-void sq_touch_init(void)
-{
-    gt_dev = add_dev(0x5D);
-    if (!gt_dev) gt_dev = add_dev(0x14);
-    if (!gt_dev) ESP_LOGE(TAG, "no touch chip found");
-}
-
 // The chip flags each new report; between reports the finger is where it last was
-bool sq_touch_read(int *x, int *y)
+static bool gt_poll(int *x, int *y)
 {
     static bool down;
     static int lx, ly;
     uint8_t s;
-    if (!gt_dev || !gt_read(0x814E, &s, 1)) return false;
+    *x = lx; *y = ly;
+    if (!gt_dev || !gt_read(0x814E, &s, 1)) return down;
     if (s & 0x80) {
         uint8_t p[4];
         down = (s & 0x0F) && gt_read(0x8150, p, 4);
@@ -263,8 +258,52 @@ bool sq_touch_read(int *x, int *y)
         uint8_t clr[3] = {0x81, 0x4E, 0};
         i2c_master_transmit(gt_dev, clr, 3, 20);
     }
-    if (down) { *x = lx; *y = ly; }
+    *x = lx; *y = ly;
     return down;
+}
+
+// A task reads the chip every 10 ms (every 100 ms while the screen sleeps), so a quick tap that starts and ends
+// between two frames isn't lost: the main loop read it once a frame, 30-50 ms apart with the settings open, and the
+// chip keeps only its latest report. A press that came and went is handed over once, then the let-go.
+static portMUX_TYPE t_mux = portMUX_INITIALIZER_UNLOCKED;
+static volatile bool t_down, t_pressed, t_fast = true;   // t_pressed: went down since the last sq_touch_read
+static volatile int t_x, t_y, p_x, p_y;
+
+static void touch_task(void *arg)
+{
+    for (;;) {
+        int x, y;
+        bool d = gt_poll(&x, &y);
+        taskENTER_CRITICAL(&t_mux);
+        if (d) {
+            if (!t_down) { t_pressed = true; p_x = x; p_y = y; }
+            t_x = x; t_y = y;
+        }
+        t_down = d;
+        taskEXIT_CRITICAL(&t_mux);
+        vTaskDelay(pdMS_TO_TICKS(t_fast ? 10 : 100));
+    }
+}
+
+void sq_touch_init(void)
+{
+    gt_dev = add_dev(0x5D);
+    if (!gt_dev) gt_dev = add_dev(0x14);
+    if (!gt_dev) { ESP_LOGE(TAG, "no touch chip found"); return; }
+    xTaskCreatePinnedToCoreWithCaps(touch_task, "touch", 3072, NULL, 7, NULL, 0, MALLOC_CAP_SPIRAM);
+}
+
+void sq_touch_fast(bool on) { t_fast = on; }
+
+bool sq_touch_read(int *x, int *y)
+{
+    taskENTER_CRITICAL(&t_mux);
+    bool d = t_down || t_pressed;
+    if (t_down) { *x = t_x; *y = t_y; }
+    else if (t_pressed) { *x = p_x; *y = p_y; }       // (a tap that's already over: down here this once)
+    t_pressed = false;
+    taskEXIT_CRITICAL(&t_mux);
+    return d;
 }
 
 // ---------------------------------------------------------------- battery (AXP2101)

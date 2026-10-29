@@ -1584,6 +1584,9 @@ void app_main(void)
 
     for (;;) {
         int64_t now = esp_timer_get_time();
+#if SQUARE_HW
+        sq_touch_fast(power != PW_ASLEEP);             // (asleep: a touch only has to wake it)
+#endif
 
         // BOOT: short press opens/closes Wi-Fi, hold 3 s to recalibrate the touch screen
         int boot = gpio_get_level(PIN_BOOT);
