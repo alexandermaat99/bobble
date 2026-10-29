@@ -382,14 +382,16 @@ static void draw_square(uint16_t *buf, int y0, int h)
             kind = 2;
             break;
         }
-        case V_EPISODES:
+        case V_EPISODES: {
+            char day[24];
             name = eps[i].name;
             dim = eps[i].played;
-            nice_date(l2, sizeof l2, eps[i].date);
-            if (eps[i].played) snprintf(sub, sizeof sub, "%s - Played", l2);
-            else if (eps[i].resume_ms > 0) { fmt_min(t, sizeof t, eps[i].duration_ms - eps[i].resume_ms); snprintf(sub, sizeof sub, "%s - %s left", l2, t); }
-            else { fmt_min(t, sizeof t, eps[i].duration_ms); snprintf(sub, sizeof sub, "%s - %s", l2, t); }
+            nice_date(day, sizeof day, eps[i].date);
+            if (eps[i].played) snprintf(sub, sizeof sub, "%s - Played", day);
+            else if (eps[i].resume_ms > 0) { fmt_min(t, sizeof t, eps[i].duration_ms - eps[i].resume_ms); snprintf(sub, sizeof sub, "%s - %s left", day, t); }
+            else { fmt_min(t, sizeof t, eps[i].duration_ms); snprintf(sub, sizeof sub, "%s - %s", day, t); }
             break;
+        }
         default:
             current = devs[i].active;
             name = devs[i].name;

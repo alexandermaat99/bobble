@@ -109,9 +109,36 @@ static inline void blend_px(uint16_t *px, uint16_t col, float a)
     }                                                                                          \
 } while (0)
 
+// As AA_FILL, for a solid shape: SPAN sets [s0_, s1_), the part of row py at least a pixel inside, which is filled
+// flat; only the pixels either side of it (its edges) work out their coverage. (Doing every pixel of the big rounded
+// panels that way took the square's settings card to ~250 ms a frame.)
+#define AA_FILL_SOLID(X0, YA, X1, YB, SPAN, SDF) do {                                         \
+    int lo = row_lo(y0), hi = row_hi(y0, h), ya_ = (int)floorf(YA), yb_ = (int)ceilf(YB);      \
+    int xa_ = (int)floorf(X0), xb_ = (int)ceilf(X1);                                           \
+    if (ya_ < lo) ya_ = lo;                                                                    \
+    if (yb_ > hi) yb_ = hi;                                                                    \
+    if (xa_ < 0) xa_ = 0;                                                                      \
+    if (xb_ > W) xb_ = W;                                                                      \
+    for (int iy = ya_; iy < yb_; iy++) {                                                       \
+        uint16_t *row = buf + (iy - y0) * W;                                                   \
+        float py = iy + 0.5f, s0_ = 0, s1_ = 0;                                                \
+        SPAN;                                                                                  \
+        int sa_ = (int)ceilf(s0_ - 0.5f), sb_ = (int)floorf(s1_ - 0.5f) + 1;                    \
+        if (sa_ < xa_) sa_ = xa_;                                                              \
+        if (sb_ > xb_) sb_ = xb_;                                                              \
+        if (sb_ < sa_) sa_ = sb_ = xb_;                                                        \
+        for (int ix = xa_; ix < sa_; ix++) { float px = ix + 0.5f; blend_px(row + ix, col, 0.5f - (SDF)); } \
+        for (int ix = sa_; ix < sb_; ix++) row[ix] = col;                                      \
+        for (int ix = sb_; ix < xb_; ix++) { float px = ix + 0.5f; blend_px(row + ix, col, 0.5f - (SDF)); } \
+    }                                                                                          \
+} while (0)
+
 void aa_disc(uint16_t *buf, int y0, int h, float cx, float cy, float r, uint16_t col)
 {
-    AA_FILL(cx - r - 1, cy - r - 1, cx + r + 1, cy + r + 1, sqrtf((px - cx) * (px - cx) + (py - cy) * (py - cy)) - r);
+    float ri = r - 1;                                   // (a pixel in from the edge)
+    AA_FILL_SOLID(cx - r - 1, cy - r - 1, cx + r + 1, cy + r + 1,
+                  { float dy = py - cy; if (ri > 0 && dy * dy < ri * ri) { float k = sqrtf(ri * ri - dy * dy); s0_ = cx - k; s1_ = cx + k; } },
+                  sqrtf((px - cx) * (px - cx) + (py - cy) * (py - cy)) - r);
 }
 
 static inline float rrect_sdf(float px, float py, float x0, float ya, float x1, float yb, float r)
@@ -124,26 +151,37 @@ static inline float rrect_sdf(float px, float py, float x0, float ya, float x1, 
 
 void aa_rrect(uint16_t *buf, int y0, int h, float x0, float ya, float x1, float yb, float r, uint16_t col)
 {
-    AA_FILL(x0 - 1, ya - 1, x1 + 1, yb + 1, rrect_sdf(px, py, x0, ya, x1, yb, r));
+    float ri = r - 1;
+    AA_FILL_SOLID(x0 - 1, ya - 1, x1 + 1, yb + 1,
+                  {
+                      if (py >= ya + 1 && py <= yb - 1) {
+                          float dy = py < ya + r ? ya + r - py : (py > yb - r ? py - (yb - r) : 0);   // into a corner
+                          if (dy == 0) { s0_ = x0 + 1; s1_ = x1 - 1; }
+                          else if (ri > 0 && dy < ri) { float k = sqrtf(ri * ri - dy * dy); s0_ = x0 + r - k; s1_ = x1 - r + k; }
+                      }
+                  },
+                  rrect_sdf(px, py, x0, ya, x1, yb, r));
 }
 
-static inline float seg_dist(float px, float py, float ax, float ay, float bx, float by)
-{
-    float dx = bx - ax, dy = by - ay, l2 = dx * dx + dy * dy;
-    float t = l2 > 0 ? ((px - ax) * dx + (py - ay) * dy) / l2 : 0;
-    t = t < 0 ? 0 : t > 1 ? 1 : t;
-    float ex = px - ax - t * dx, ey = py - ay - t * dy;
-    return sqrtf(ex * ex + ey * ey);
-}
+// A path's segments, worked out once per shape: start, direction, 1 / length squared and bounds (for skipping the far
+// ones). Each pixel then takes the nearest by squared distance and one square root: per pixel, a divide and a root
+// for every segment cost the square's Control Center icons ~40 ms a frame.
+typedef struct { float ax, ay, dx, dy, il2, x0, y0, x1, y1; } seg_t;
 
-static float path_sdf(float px, float py, const float *p, int n, bool closed, float w)
+static float path_sdf(float px, float py, const seg_t *sg, int ns, float w)
 {
-    float d = 1e9f;
-    for (int i = 0; i + 1 < n + (closed ? 1 : 0); i++) {
-        int j = (i + 1) % n;
-        d = fminf(d, seg_dist(px, py, p[2 * i], p[2 * i + 1], p[2 * j], p[2 * j + 1]));
+    float best = 1e18f;
+    for (int i = 0; i < ns; i++) {
+        const seg_t *g = &sg[i];
+        float ox = px < g->x0 ? g->x0 - px : (px > g->x1 ? px - g->x1 : 0);   // (it can't be nearer than its box)
+        float oy = py < g->y0 ? g->y0 - py : (py > g->y1 ? py - g->y1 : 0);
+        if (ox * ox + oy * oy >= best) continue;
+        float t = ((px - g->ax) * g->dx + (py - g->ay) * g->dy) * g->il2;
+        t = t < 0 ? 0 : t > 1 ? 1 : t;
+        float ex = px - g->ax - t * g->dx, ey = py - g->ay - t * g->dy, d2 = ex * ex + ey * ey;
+        if (d2 < best) best = d2;
     }
-    return d - w / 2;
+    return sqrtf(best) - w / 2;
 }
 
 void aa_path(uint16_t *buf, int y0, int h, const float *pts, int n, bool closed, float w, uint16_t col)
@@ -154,7 +192,15 @@ void aa_path(uint16_t *buf, int y0, int h, const float *pts, int n, bool closed,
         ya = fminf(ya, pts[2 * i + 1]); yb = fmaxf(yb, pts[2 * i + 1]);
     }
     float m = w / 2 + 1;
-    AA_FILL(x0 - m, ya - m, x1 + m, yb + m, path_sdf(px, py, pts, n, closed, w));
+    if (yb + m <= row_lo(y0) || ya - m >= row_hi(y0, h)) return;   // (not in this strip)
+    seg_t sg[64];
+    int ns = 0;
+    for (int i = 0; i + 1 < n + (closed ? 1 : 0) && ns < 64; i++) {
+        int j = (i + 1) % n;
+        float ax = pts[2 * i], ay = pts[2 * i + 1], bx = pts[2 * j], by = pts[2 * j + 1], dx = bx - ax, dy = by - ay, l2 = dx * dx + dy * dy;
+        sg[ns++] = (seg_t){ax, ay, dx, dy, l2 > 0 ? 1 / l2 : 0, fminf(ax, bx), fminf(ay, by), fmaxf(ax, bx), fmaxf(ay, by)};
+    }
+    AA_FILL(x0 - m, ya - m, x1 + m, yb + m, path_sdf(px, py, sg, ns, w));
 }
 
 void aa_icon(uint16_t *buf, int y0, int h, float cx, float cy, float size, const float *g, int n, bool closed, float w,

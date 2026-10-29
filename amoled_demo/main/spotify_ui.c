@@ -188,6 +188,29 @@ static void draw_skip(uint16_t *buf, int y0, int h, float cx, float cy, bool nex
     aa_icon(buf, y0, h, cx, cy, 20, next ? fwd_bar : back_bar, 2, false, 2, c);
 }
 
+// Not connected, or nothing playing: the Spotify mark (a green disc, three sound waves) and what to do
+#define LOGO_Y 168
+#define LOGO_R 52
+static void draw_square_idle(uint16_t *buf, int y0, int h)
+{
+    aa_disc(buf, y0, h, CX, LOGO_Y, LOGO_R, C_GREEN);
+    static const float rad[3] = {52, 40, 29}, span[3] = {50, 47, 43}, wid[3] = {8, 7, 6};   // (arcs round a point below)
+    for (int k = 0; k < 3; k++) {
+        float p[2 * 16];
+        for (int i = 0; i < 16; i++) {
+            float a = (-span[k] + 2 * span[k] * i / 15) * (float)M_PI / 180;
+            p[2 * i] = CX + 2 + rad[k] * sinf(a);
+            p[2 * i + 1] = LOGO_Y + 40 - rad[k] * cosf(a);
+        }
+        aa_path(buf, y0, h, p, 16, false, wid[k], rgb(10, 10, 14));
+    }
+    ftext_c(buf, y0, h, LOGO_Y + LOGO_R + 22, &font_body, "Spotify", C_WHITE);
+    ftext_c(buf, y0, h, LOGO_Y + LOGO_R + 76, &font_label, s.configured ? "Nothing playing" : "Not connected", rgb(150, 150, 158));
+    ftext_c(buf, y0, h, LOGO_Y + LOGO_R + 106, &font_small,
+            s.configured ? "Play something on any device" : "Connect it from the Bobble menu on your Mac", rgb(100, 100, 108));
+    if (s.note[0]) ftext_c(buf, y0, h, LOGO_Y + LOGO_R + 152, &font_small, s.note, C_NOTE);
+}
+
 static void draw_square(uint16_t *buf, int y0, int h)
 {
     char line[96], l1[96];
@@ -244,6 +267,10 @@ void spotify_ui_draw(uint16_t *buf, int y0, int h)
 {
     char line[64], l1[48], l2[48];
     if (!s.configured || !s.active) {
+#if !SCREEN_ROUND
+        draw_square_idle(buf, y0, h);
+        return;
+#endif
         text_c(buf, y0, h, 150, 3, "Spotify", C_GREEN);
         if (!s.configured) {
             text_c(buf, y0, h, 200, 2, "To connect, on your Mac run", C_GREY);

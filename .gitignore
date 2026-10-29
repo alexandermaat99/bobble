@@ -12,6 +12,8 @@ amoled_demo/main/secrets.h
 # Built or downloaded
 build/
 build-release/
+build-square/
+*.log
 .build/
 managed_components/
 amoled_demo/sim/Sources/Firmware/fw/

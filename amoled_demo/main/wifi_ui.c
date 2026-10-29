@@ -265,6 +265,15 @@ static void fit(char *out, size_t cap, const char *in, int max_chars)
 
 static int current_id(void) { return down && !dragging ? press_id : ID_NONE; }
 
+// While the brightness slider is held only it changes: its box on the card, so only those rows need drawing
+bool wifi_ui_slider_rect(int r[4])
+{
+    if (view != V_MENU || !down || press_id != ID_BRIGHT) return false;
+    const button_t *b = &menu_buttons[4];
+    r[0] = b->x0 - 2; r[1] = b->y0 - 2; r[2] = b->x1 + 2; r[3] = b->y1 + 2;
+    return true;
+}
+
 static void draw_buttons(uint16_t *buf, int y0, int h, const button_t *b, int n, int sc, int accent_id)
 {
     for (int i = 0; i < n; i++) {

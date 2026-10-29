@@ -12,6 +12,7 @@
 #include "nvs.h"
 #include "driver/usb_serial_jtag.h"
 #include "battery.h"
+#include "board_square.h"
 
 static const char *TAG = "battery";
 static adc_oneshot_unit_handle_t adc;
@@ -22,6 +23,13 @@ static int64_t last;
 // Charging: the charger chip's status only drives the board's red LED, so the one thing we can sense is
 // a computer talking to us over USB. (Guessing from voltage jumps proved unreliable: plugging in only
 // moves the reading ~0.1 V, about the same as the screen or Wi-Fi switching on and off.)
+
+// The 4" board's power chip measures the cell itself and knows when USB power is in (a wall charger too)
+#if SQUARE_HW
+#define plugged_in() sq_plugged_in()
+#else
+#define plugged_in() usb_serial_jtag_is_connected()
+#endif
 
 // ---------------------------------------------------------------- learning
 // 1. Screen sag: each time the screen turns on or off, compare the readings either side and keep a running
@@ -205,7 +213,7 @@ static void load_learning(float v_now)
     int mv = (int)(v_now * 1000), last_mv = lg.mv[lg.n - 1];
     ESP_LOGI(TAG, "found discharge log: %d min, last %d mV, now %d mV", (lg.n - 1) * lg.step_min, last_mv, mv);
     if (last_mv <= NEAR_EMPTY_MV && mv > last_mv + 150) learn_from_log();   // ran flat, since recharged
-    else if (abs(mv - last_mv) < 60 && !usb_serial_jtag_is_connected()) {  // a reboot or OTA mid-run: carry on
+    else if (abs(mv - last_mv) < 60 && !plugged_in()) {  // a reboot or OTA mid-run: carry on
         run = RUN_LOGGING;
         run_t0 = esp_timer_get_time() - (int64_t)lg.n * lg.step_min * 60000000;
         run_min_mv = last_mv;
@@ -215,7 +223,7 @@ static void load_learning(float v_now)
 static void log_tick(int64_t now)
 {
     int mv = (int)(volts * 1000);
-    bool usb = usb_serial_jtag_is_connected();
+    bool usb = plugged_in();
 
     if (run == RUN_IDLE && mv >= FULL_MV + 20) run = RUN_ARMED;
     if (run == RUN_ARMED && !usb && mv < FULL_MV && unplugged_at && now - unplugged_at > 120000000) {   // settled
@@ -254,12 +262,14 @@ static void log_tick(int64_t now)
 void battery_init(void)
 {
     if (ok) return;
+#if !SQUARE_HW
     adc_oneshot_unit_init_cfg_t unit = {.unit_id = ADC_UNIT_1};
     if (adc_oneshot_new_unit(&unit, &adc) != ESP_OK) return;
     adc_oneshot_chan_cfg_t ch = {.bitwidth = ADC_BITWIDTH_12, .atten = ADC_ATTEN_DB_12};
     if (adc_oneshot_config_channel(adc, ADC_CHANNEL_3, &ch) != ESP_OK) return;
     adc_cali_curve_fitting_config_t cc = {.unit_id = ADC_UNIT_1, .chan = ADC_CHANNEL_3, .atten = ADC_ATTEN_DB_12, .bitwidth = ADC_BITWIDTH_12};
     have_cali = adc_cali_create_scheme_curve_fitting(&cc, &cali) == ESP_OK;
+#endif
     slot_lock = xSemaphoreCreateMutex();
     xTaskCreate(writer_task, "batt_nvs", 4096, NULL, 1, &writer);
     ok = true;
@@ -267,6 +277,9 @@ void battery_init(void)
 
 static float read_once(void)
 {
+#if SQUARE_HW
+    return sq_battery_volts();
+#endif
     int sum = 0, n = 0;
     for (int i = 0; i < 16; i++) {
         int raw;
@@ -304,7 +317,7 @@ static void sag_sample(float raw, int64_t now)
     float post = ring_avg(2);                          // skip the first second after the change
     float d = sag_to_on ? sag_pre - post : post - sag_pre;
     sag_pre = 0;
-    if (d < -0.05f || d > 0.4f || usb_serial_jtag_is_connected()) return;   // something else moved it
+    if (d < -0.05f || d > 0.4f || plugged_in()) return;   // something else moved it
     if (d < 0) d = 0;
     sag = have_sag ? sag * 0.8f + d * 0.2f : d;
     have_sag = true;
@@ -328,7 +341,7 @@ void battery_update(void)
     sag_sample(raw, now);
     float v = raw + (screen_on ? sag : 0), before = volts;
     volts = volts < 2.5f ? v : volts * 0.9f + v * 0.1f;  // smooth out ADC noise
-    bool usb = usb_serial_jtag_is_connected();
+    bool usb = plugged_in();
     if (have_usb_prev && usb != usb_prev) { usb_edge_at = now; usb_edge_v = before; }   // plugged in / unplugged
     if (!usb && (usb_prev || !have_usb_prev)) unplugged_at = now;
     usb_prev = usb;
@@ -347,7 +360,7 @@ void battery_update(void)
     log_tick(now);
 }
 
-bool battery_charging(void) { return usb_serial_jtag_is_connected(); }
+bool battery_charging(void) { return plugged_in(); }
 
 float battery_read_now(void) { return ok ? read_once() : 0; }
 

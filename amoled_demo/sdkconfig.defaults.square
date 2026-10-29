@@ -1,0 +1,10 @@
+# The 4" square board's RGB panel scans out of PSRAM all the time. Running code from PSRAM too means flash writes
+# (settings, updates) don't pause the cache, which would make the picture jump.
+CONFIG_SPIRAM_XIP_FROM_PSRAM=y
+CONFIG_LCD_RGB_ISR_IRAM_SAFE=y
+CONFIG_LCD_RGB_RESTART_IN_VSYNC=y
+# PSRAM (and flash, which must match) at 120 MHz, as Waveshare's own firmware for this board runs it: the panel's scan-out and the drawing share it
+# (octal PSRAM at 120 MHz is marked experimental: fine at steady temperatures)
+CONFIG_IDF_EXPERIMENTAL_FEATURES=y
+CONFIG_SPIRAM_SPEED_120M=y
+CONFIG_ESPTOOLPY_FLASHFREQ_120M=y

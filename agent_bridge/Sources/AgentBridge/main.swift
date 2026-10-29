@@ -148,7 +148,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // Pair, Calendars and Spotify for one display (each item knows which: the board, or the simulator)
     private func addDeviceItems(_ d: Device) {
         let pair = action(d.paired ? "Pair Again…" : (d.simulator ? "Pair…" : "Pair with Display…"), #selector(pair(_:)))
-        if case .searching = d.status { pair.isEnabled = false }
+        if case .searching = d.status, d.boards.isEmpty { pair.isEnabled = false }   // (ours is away, but another Bobble may be about)
         let cals = action("Calendars…", #selector(calendars(_:)))
         if case .online = d.status {} else if case .found = d.status {} else { cals.isEnabled = false }
         let rename = action("Rename…", #selector(rename(_:)))

@@ -13,4 +13,5 @@ int wifi_ui_update(int tx, int ty, int64_t now_us);
 void wifi_ui_draw(uint16_t *buf, int y0, int h);
 void wifi_ui_cancel_touch(void);
 bool wifi_ui_swipe_ok(void);
+bool wifi_ui_slider_rect(int r[4]);         // the brightness slider is being dragged: its box (card = glass when open)
 bool wifi_ui_wants_status_bar(void);     // an upward drag anywhere may close the card   // forget the current press (a screen gesture took over)

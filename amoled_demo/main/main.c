@@ -41,6 +41,7 @@
 #include "screen.h"
 #include "statusbar.h"
 #include "remote_log.h"
+#include "board_square.h"
 
 static const char *TAG = "main";
 static bool show_empty;              // battery ran out: showing "plug in" before shutting down
@@ -86,6 +87,15 @@ static bool on_trans_done(esp_lcd_panel_io_handle_t io, esp_lcd_panel_io_event_d
 
 static void display_init(void)
 {
+#if SQUARE_HW
+    sq_display_init();
+    buf_free = xSemaphoreCreateCounting(NBUF, NBUF);
+    for (int i = 0; i < NBUF; i++) {
+        bufs[i] = heap_caps_malloc(W * STRIP * 2, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+        assert(bufs[i]);
+    }
+    return;
+#endif
     spi_bus_config_t bus = SH8601_PANEL_BUS_QSPI_CONFIG(PIN_CLK, PIN_D0, PIN_D1, PIN_D2, PIN_D3, W * STRIP * 2);
     ESP_ERROR_CHECK(spi_bus_initialize(SPI2_HOST, &bus, SPI_DMA_CH_AUTO));
 
@@ -202,6 +212,9 @@ static float wrap180(float a)
 // degrees are ignored, and anything within 5 degrees of straight snaps to it so text stays crisp.
 static void update_orientation(void)
 {
+#if SQUARE_HW
+    return;                                           // (the 4" board stays upright: its sensor's mounting isn't mapped yet)
+#endif
     float up[3];
     imu_up(up);
     float gx = -up[0], gy = -up[1];                   // gravity on the glass
@@ -390,22 +403,30 @@ static i2c_master_dev_handle_t touch_dev;
 static void input_init(void)
 {
     i2c_master_bus_handle_t bus;
+#if SQUARE_HW
+    bus = sq_i2c();
+#else
     i2c_master_bus_config_t bc = {
         .i2c_port = I2C_NUM_0, .sda_io_num = PIN_SDA, .scl_io_num = PIN_SCL,
         .clk_source = I2C_CLK_SRC_DEFAULT, .glitch_ignore_cnt = 7,
         .flags.enable_internal_pullup = true,
     };
     ESP_ERROR_CHECK(i2c_new_master_bus(&bc, &bus));
+#endif
     {                                                 // what's on the bus (in the log): touch, motion sensor, clock... any audio chips?
         char found[160] = "";
         for (int a = 0x08; a < 0x78; a++)
             if (i2c_master_probe(bus, a, 20) == ESP_OK) snprintf(found + strlen(found), sizeof found - strlen(found), " 0x%02x", a);
         ESP_LOGI(TAG, "i2c devices:%s", found);
     }
+#if SQUARE_HW
+    sq_touch_init();
+#else
     i2c_device_config_t tc = {.dev_addr_length = I2C_ADDR_BIT_LEN_7, .device_address = 0x38, .scl_speed_hz = 400000};
     ESP_ERROR_CHECK(i2c_master_bus_add_device(bus, &tc, &touch_dev));
     uint8_t mode[2] = {0x00, 0x00};                   // normal operating mode
     i2c_master_transmit(touch_dev, mode, 2, 50);
+#endif
 
     gpio_config_t g = {.pin_bit_mask = 1ULL << PIN_BOOT, .mode = GPIO_MODE_INPUT, .pull_up_en = 1};
     gpio_config(&g);
@@ -441,6 +462,9 @@ static void touch_cal_save(void)
 
 static bool read_touch_raw(int *x, int *y)
 {
+#if SQUARE_HW
+    return sq_touch_read(x, y);
+#endif
     uint8_t reg = 0x02, n = 0, p[4];
     if (i2c_master_transmit_receive(touch_dev, &reg, 1, &n, 1, 20) != ESP_OK || !(n & 0x0F)) return false;
     reg = 0x03;
@@ -712,6 +736,12 @@ static void page_fg(int p, uint16_t *buf, int y0, int h)
     // (the square's stays put over the sliding pages: drawn by draw_overlay and draw_strip instead)
 }
 
+// Square: while the card moves, the page under it is still, so frames copy it from its snapshot instead of drawing
+// it again (drawing both the page and the card made the pull-down choppy)
+static bool card_snap;
+// ...and the card itself is drawn once as it starts to move and copied into place after that
+static uint16_t *card_img;
+static bool card_cached;
 static int pg_render;              // page being snapshotted (read by both render cores)
 static void page_render_bg(uint16_t *buf, int y0, int y1) { page_bg(pg_render, buf, y0, y1); }
 
@@ -721,7 +751,8 @@ static void render_bg(uint16_t *buf, int y0, int y1)
     if (calibrating || tilt_step || fs >= H || ota_progress() >= 0 || show_empty) { memset(buf, 0, (y1 - y0) * W * 2); return; }
     int a = y0 > fs ? y0 : (fs < y1 ? fs : y1);        // first calendar row below the card, within this strip
     if (a > y0) memset(buf, 0, (a - y0) * W * 2);
-    if (a < y1) {
+    if (a < y1 && card_snap) memcpy(buf + (a - y0) * W, snap_buf[0] + a * W, (y1 - a) * W * 2);
+    else if (a < y1) {
         if (page == PAGE_MUSIC) spotify_ui_render_bg(buf + (a - y0) * W, a, y1);
         else if (page == PAGE_LIB || page == PAGE_PET) memset(buf + (a - y0) * W, 0, (y1 - a) * W * 2);
         else cal_ui_render_bg(buf + (a - y0) * W, a, y1);
@@ -752,7 +783,8 @@ static void draw_overlay(uint16_t *buf, int y0, int h)
     if (calibrating) { touch_cal_draw(buf, y0, h); return; }
     if (tilt_step) { tilt_cal_draw(buf, y0, h); return; }
     if (fs < H) {
-        if (page == PAGE_MUSIC) spotify_ui_draw(buf, y0, h);
+        if (card_snap) {}                              // (already in the copied rows)
+        else if (page == PAGE_MUSIC) spotify_ui_draw(buf, y0, h);
         else if (page == PAGE_LIB) library_ui_draw(buf, y0, h);
         else if (page == PAGE_PET) pet_ui_draw(buf, y0, h);
         else cal_ui_draw(buf, y0, h);
@@ -786,7 +818,9 @@ static void draw_overlay(uint16_t *buf, int y0, int h)
     if (card_end > y0 && fs < H) memset(buf, 0, (card_end - y0) * W * 2);
     int vy0 = y0 - off;                                // the strip in the card's own coordinates
     gfx_base_clip(H - fs, H);
-    wifi_ui_draw(buf, vy0, h);
+    if (card_cached)                                   // (card row = glass row - off)
+        for (int y = y0 > 0 ? y0 : 0; y < card_end; y++) memcpy(buf + (y - y0) * W, card_img + (y - off) * W, W * 2);
+    else wifi_ui_draw(buf, vy0, h);
     fill_rrect(buf, vy0, h, CX - 22, H - 22, CX + 22, H - 17, 2, rgb(90, 90, 110));   // push-up handle
     if (fs < H) fill_rect(buf, vy0, h, CX - 120, H - 2, CX + 120, H, rgb(60, 60, 80)); // card edge
     gfx_base_clip(-100000, 100000);
@@ -810,6 +844,10 @@ static void set_brightness(int b)
     b = b < 0 ? 0 : (b > 255 ? 255 : b);
     if (b == brightness) return;
     brightness = b;
+#if SQUARE_HW
+    sq_backlight(b);
+    return;
+#endif
     uint8_t v = b;
     esp_lcd_panel_io_tx_param(panel_io, (0x02 << 24) | (0x51 << 8), &v, 1);   // write display brightness (QSPI)
 }
@@ -922,6 +960,9 @@ static bool hw_locked;
 
 static void panel_cmd(uint8_t cmd)
 {
+#if SQUARE_HW
+    return;                                            // (the 4" panel's commands go through the slow expander: the light does it)
+#endif
     esp_lcd_panel_io_tx_param(panel_io, (0x02 << 24) | (cmd << 8), NULL, 0);
 }
 
@@ -961,10 +1002,20 @@ static void power_screen_on(void)
 // reading well above the empty point, and then the board starts up as usual.
 #define EMPTY_CHECK_US (5 * 60 * 1000000LL)
 
+// The 4" panel has no on/off line: there the backlight is the switch
+static void panel_power(bool on)
+{
+#if SQUARE_HW
+    if (!on) sq_backlight(0);
+#else
+    esp_lcd_panel_disp_on_off(panel, on);
+#endif
+}
+
 static void sleep_until_charged(void)
 {
     ESP_LOGW(TAG, "battery empty (%.2f V): sleeping until it's charged", battery_volts());
-    esp_lcd_panel_disp_on_off(panel, false);
+    panel_power(false);
     panel_cmd(0x10);
     imu_power(false);
     wifi_suspend(true);
@@ -1177,7 +1228,11 @@ static void send_strip(uint16_t *buf, int y0, int h)
     int w = x1 - x0;
     if (w < W)
         for (int r = 0; r < h; r++) memmove(buf + r * w, buf + r * W + x0, w * 2);   // pack the rows
+#if SQUARE_HW
+    sq_draw(x0, y0, x1, y0 + h, buf, buf_free);       // (frees the strip when its copy is done, as the round panel's DMA does)
+#else
     esp_lcd_panel_draw_bitmap(panel, x0, y0, x1, y0 + h, buf);
+#endif
 }
 
 static int why_lib, why_music, why_slide, why_rot;   // redraw reasons, for the status log
@@ -1199,8 +1254,29 @@ static bool strip_skipped(int y0, int h, int a, int b) { return y0 + h <= a || y
 static int64_t prof_draw_us, prof_turn_us;   // (profiling) drawing upright vs turning onto the glass and sending, rotated frames
 static void render_frame(bool content)
 {
+    static int prev_sheet;
     frame_sheet = (int)(sheet + 0.5f);
     if (pages_sliding()) prepare_snapshots();
+#if !SCREEN_ROUND
+    card_snap = frame_sheet > 0 && frame_sheet < H && snap_buf[0] && !calibrating && !tilt_step && ota_progress() < 0 && !show_empty;
+    // (the snapshot is kept up to date while the page shows; coming back from the open card it's from before, so
+    // it's drawn afresh once)
+    if (card_snap && (snap_page[0] != page || prev_sheet >= H)) {
+        snapshot(page, snap_buf[0]);
+        snap_page[0] = page;
+        snap_time[0] = esp_timer_get_time();
+    }
+    bool card_moving = card_snap && card_img;
+    if (card_moving && !card_cached) {
+        for (int y0 = 0; y0 < H; y0 += STRIP) {
+            int h = (y0 + STRIP > H) ? H - y0 : STRIP;
+            memset(card_img + y0 * W, 0, h * W * 2);
+            wifi_ui_draw(card_img + y0 * W, y0, h);
+        }
+    }
+    card_cached = card_moving;
+#endif
+    prev_sheet = frame_sheet;
     if (ang != 0 && frame) {
         rs_slide = pages_sliding() && snap_a && snap_b;
         if (rs_slide) {                                // sample straight from the snapshots
@@ -1312,6 +1388,9 @@ void app_main(void)
     if (locked) power = PW_FADING_OUT;                 // restarted while locked: straight back to sleep
     frame = heap_caps_malloc(W * H * 2, MALLOC_CAP_SPIRAM);
     for (int i = 0; i < 3; i++) snap_buf[i] = heap_caps_malloc(W * H * 2, MALLOC_CAP_SPIRAM);
+#if !SCREEN_ROUND
+    card_img = heap_caps_malloc(W * H * 2, MALLOC_CAP_SPIRAM);
+#endif
     for (int i = 0; i < 20; i++) { imu_read(); vTaskDelay(pdMS_TO_TICKS(5)); }
     update_orientation();
     ang = ang_target;                                 // start in the right orientation, no spin
@@ -1391,7 +1470,7 @@ void app_main(void)
             update_orientation();                      // face the right way straight away, no spin
             ang = ang_target;
             render_frame(true);                        // fresh picture before the light comes on
-            esp_lcd_panel_disp_on_off(panel, true);
+            panel_power(true);
             battery_set_screen(true);
             calendar_set_awake(true);
             spotify_set_awake(true);
@@ -1501,7 +1580,7 @@ void app_main(void)
         if (power == PW_FADING_OUT) {
             set_brightness(brightness - 20);
             if (brightness == 0) {
-                esp_lcd_panel_disp_on_off(panel, false);
+                panel_power(false);
                 battery_set_screen(false);
                 calendar_set_awake(false);
                 spotify_set_awake(false);
@@ -1676,6 +1755,12 @@ void app_main(void)
         part_cnt = pet_dirty && !others && ang == last_ang ? pet_ui_take_rects(part_rect) : 0;
         part_on = part_cnt > 0;
         if (pet_dirty && !part_on) pet_ui_take_rect(NULL, NULL, NULL, NULL);
+        // dragging the brightness slider on the open card: just its rows (the whole card made the slider lag)
+        if (!part_on && sheet >= H && target < 0 && !card_drag && !force_redraw && ang == last_ang && ota_progress() < 0 &&
+            wifi_ui_slider_rect(part_rect[0])) {
+            part_cnt = 1;
+            part_on = true;
+        }
         {   // diagnostics: why frames are being redrawn (counts per 5 s, in the status line)
             if (lib_dirty) why_lib++;
             if (music_dirty) why_music++;
