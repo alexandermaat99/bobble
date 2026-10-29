@@ -670,12 +670,72 @@ static void bin_icon(uint16_t *buf, int y0, int h, float cx, float cy, uint16_t 
 #define CC_GREEN   rgb(48, 209, 88)
 #define CC_TEXT2   rgb(150, 150, 158)
 
+// ---- the Field look (Settings > Look): panels with a rim on a dot grid, square keys in the OP-1's colours instead of
+// discs, segmented sliders, names in mono capitals, and orange where Classic is blue
+#define F_ORANGE    rgb(255, 102, 26)
+#define F_ORANGE_DN rgb(255, 150, 90)
+#define F_GREY      rgb(118, 118, 126)
+#define F_DIM       rgb(56, 56, 62)
+#define F_PANEL     rgb(20, 20, 23)
+#define F_PRESS     rgb(46, 46, 52)
+
+static void upcase(char *out, size_t cap, const char *in)
+{
+    size_t i = 0;
+    for (; in[i] && i + 1 < cap; i++) out[i] = in[i] >= 'a' && in[i] <= 'z' ? in[i] - 32 : in[i];
+    out[i] = 0;
+}
+
+static uint16_t acc(uint16_t c) { return ui_field() && c == CC_BLUE ? F_ORANGE : c; }   // (Classic's blue: orange)
+static uint16_t off_col(void) { return ui_field() ? F_DIM : CC_OFF; }                 // a key or disc that's off
+static uint16_t grp_col(void) { return ui_field() ? F_PANEL : rgb(36, 36, 40); }       // inside a group
+
+// a module or group: a rim round a dark fill (Field), or a rounded grey one (Classic); lit under the finger
+static void panel(uint16_t *buf, int y0, int h, float x0, float t, float x1, float b, float r, bool on)
+{
+    if (!ui_field()) { aa_rrect(buf, y0, h, x0, t, x1, b, r, on ? CC_MOD_ON : CC_MOD); return; }
+    aa_rrect(buf, y0, h, x0, t, x1, b, 8, F_DIM);
+    aa_rrect(buf, y0, h, x0 + 2, t + 2, x1 - 2, b - 2, 6, on ? F_PRESS : F_PANEL);
+}
+
+// a pressed row in a group, rounded where it's the group's end
+static void press_row(uint16_t *buf, int y0, int h, int x0, int x1, int t, int b, bool first, bool last)
+{
+    bool fl = ui_field();
+    int in = fl ? 2 : 0, r = fl ? 6 : 14;
+    uint16_t c = fl ? F_PRESS : CC_MOD_ON;
+    x0 += in; x1 -= in;
+    if (first) t += in;
+    if (last) b -= in;
+    aa_rrect(buf, y0, h, x0, t, x1, b, r, c);
+    if (!first) fill_rect(buf, y0, h, x0, t, x1, t + r, c);
+    if (!last) fill_rect(buf, y0, h, x0, b - r, x1, b, c);
+}
+
+static void field_dots(uint16_t *buf, int y0, int h)   // the dot grid, every 24 px
+{
+    for (int y = y0 - y0 % 24 + 12; y < y0 + h; y += 24) {
+        if (y < y0) continue;
+        for (int x = 12; x < W; x += 24) buf[(y - y0) * W + x] = rgb(34, 34, 38);
+    }
+}
+
 // a wide module: an icon disc on the left, its name and a line about it
 static void cc_wide(uint16_t *buf, int y0, int h, const button_t *b, uint16_t disc, const char *name, const char *sub,
                     uint16_t sub_col, bool on)
 {
-    aa_rrect(buf, y0, h, b->x0, b->y0, b->x1, b->y1, CC_R, on ? CC_MOD_ON : CC_MOD);
+    panel(buf, y0, h, b->x0, b->y0, b->x1, b->y1, CC_R, on);
     float cy = (b->y0 + b->y1) / 2.0f;
+    if (ui_field()) {                                 // a square key, the name and the line in mono capitals
+        char n[32], l[48];
+        upcase(n, sizeof n, name);
+        upcase(l, sizeof l, sub);
+        aa_rrect(buf, y0, h, b->x0 + 15, cy - 23, b->x0 + 61, cy + 23, 9, disc);
+        int tx = b->x0 + 74, tw = b->x1 - 12 - tx;
+        draw_fit(buf, y0, h, tx, (int)cy - 25, &font_mono, n, tw, C_WHITE);
+        draw_fit(buf, y0, h, tx, (int)cy + 3, &font_mono_s, l, tw, F_GREY);
+        return;
+    }
     aa_disc(buf, y0, h, b->x0 + 38, cy, 23, disc);
     int tx = b->x0 + 70, tw = b->x1 - 12 - tx;
     draw_fit(buf, y0, h, tx, (int)cy - 23, &font_label, name, tw, C_WHITE);
@@ -685,16 +745,37 @@ static void cc_wide(uint16_t *buf, int y0, int h, const button_t *b, uint16_t di
 // a small module: its icon in a disc, its name under that
 static void cc_small(uint16_t *buf, int y0, int h, const button_t *b, int kind, uint16_t disc, const char *name, bool on)
 {
-    aa_rrect(buf, y0, h, b->x0, b->y0, b->x1, b->y1, CC_R, on ? CC_MOD_ON : CC_MOD);
+    panel(buf, y0, h, b->x0, b->y0, b->x1, b->y1, CC_R, on);
     float cx = (b->x0 + b->x1) / 2.0f;
+    if (ui_field()) {
+        char n[16];
+        upcase(n, sizeof n, name);
+        aa_rrect(buf, y0, h, cx - 23, b->y0 + 15, cx + 23, b->y0 + 61, 9, disc);
+        cc_icon(buf, y0, h, kind, cx, b->y0 + 38, C_WHITE, disc);
+        ftext_mid_cc(buf, y0, h, (int)cx, b->y0 + 70, &font_mono, n, C_WHITE);
+        return;
+    }
     aa_disc(buf, y0, h, cx, b->y0 + 38, 23, disc);
     cc_icon(buf, y0, h, kind, cx, b->y0 + 38, C_WHITE, disc);
     ftext_mid_cc(buf, y0, h, (int)cx, b->y0 + 69, &font_label, name, C_WHITE);
 }
 
-// a tall slider module, lit from the bottom to frac (0..1): where the lit part starts
-static float cc_slider(uint16_t *buf, int y0, int h, const button_t *b, float frac)
+// a tall slider module, lit from the bottom to frac (0..1): where the lit part starts. Field: a stack of segments
+// over the icon, as many lit (in lit) as it's up
+static float cc_slider(uint16_t *buf, int y0, int h, const button_t *b, float frac, uint16_t lit)
 {
+    if (ui_field()) {
+        panel(buf, y0, h, b->x0, b->y0, b->x1, b->y1, CC_R, false);
+        const int n = 12, gap = 4, top = b->y0 + 14, bot = b->y1 - 54;
+        float sh = (bot - top - (n - 1) * gap) / (float)n;
+        int on = (int)lroundf(frac * n);
+        if (frac > 0 && on < 1) on = 1;
+        for (int i = 0; i < n; i++) {
+            float sb = bot - i * (sh + gap);
+            fill_rect(buf, y0, h, b->x0 + 14, (int)lroundf(sb - sh), b->x1 - 14, (int)lroundf(sb), i < on ? lit : rgb(34, 34, 38));
+        }
+        return b->y1 + 1;                             // (the icon's always lit)
+    }
     aa_rrect(buf, y0, h, b->x0, b->y0, b->x1, b->y1, CC_R, CC_MOD);
     float fy = b->y1 - (b->y1 - b->y0) * frac;
     if (b->y1 - fy > 2) {                             // the lit part, clipped to the module
@@ -709,26 +790,27 @@ static float cc_slider(uint16_t *buf, int y0, int h, const button_t *b, float fr
 
 static void draw_menu(uint16_t *buf, int y0, int h)
 {
+    if (ui_field()) field_dots(buf, y0, h);
     // Wi-Fi: blue while connected
     const button_t *wb = &menu_buttons[0];
     bool conn = wifi_state() == WS_CONNECTED;
     const char *sub = conn ? wifi_ssid() : wifi_state() == WS_CONNECTING ? "Connecting..." : "Not connected";
-    cc_wide(buf, y0, h, wb, conn ? CC_BLUE : CC_OFF, "Wi-Fi", sub, CC_TEXT2, current_id() == ID_WIFI);
+    cc_wide(buf, y0, h, wb, conn ? CC_BLUE : off_col(), "Wi-Fi", sub, CC_TEXT2, current_id() == ID_WIFI);
     cc_icon(buf, y0, h, ICON_WIFI, wb->x0 + 38, (wb->y0 + wb->y1) / 2.0f - 1, C_WHITE, 0);
 
-    cc_small(buf, y0, h, &menu_buttons[2], ICON_TILT, CC_OFF, "Tilt", current_id() == ID_CAL_TILT);
-    cc_small(buf, y0, h, &menu_buttons[1], ICON_TOUCH, CC_OFF, "Touch", current_id() == ID_CAL_TOUCH);
+    cc_small(buf, y0, h, &menu_buttons[2], ICON_TILT, off_col(), "Tilt", current_id() == ID_CAL_TILT);
+    cc_small(buf, y0, h, &menu_buttons[1], ICON_TOUCH, off_col(), "Touch", current_id() == ID_CAL_TOUCH);
 
     // brightness: a tall module that fills from the bottom, the sun at its foot
     const button_t *b = &menu_buttons[4];
-    float fy = cc_slider(buf, y0, h, b, (screen_brightness_get() - 10) / 245.0f);
+    float fy = cc_slider(buf, y0, h, b, (screen_brightness_get() - 10) / 245.0f, rgb(235, 235, 240));
     float sy = b->y1 - 30;
     cc_icon(buf, y0, h, ICON_SUN, (b->x0 + b->x1) / 2.0f, sy, sy > fy ? rgb(110, 110, 118) : rgb(200, 200, 206), 0);
 
     // volume, the same way, a speaker at its foot (crossed out when silent)
     const button_t *vb = &menu_buttons[6];
     int vol = device_volume_get();
-    fy = cc_slider(buf, y0, h, vb, vol / 100.0f);
+    fy = cc_slider(buf, y0, h, vb, vol / 100.0f, F_ORANGE);
     sy = vb->y1 - 30;
     speaker_icon(buf, y0, h, (vb->x0 + vb->x1) / 2.0f + 2, sy, 1.15f, vol == 0 ? -1 : vol < 50 ? 1 : 2,
                  sy > fy ? rgb(110, 110, 118) : rgb(200, 200, 206));
@@ -741,7 +823,7 @@ static void draw_menu(uint16_t *buf, int y0, int h)
     // Look: Classic, or Field (four colour squares in an orange disc when it's on)
     const button_t *lk = &menu_buttons[8];
     bool fl = ui_field();
-    cc_small(buf, y0, h, lk, -1, fl ? rgb(255, 102, 26) : CC_OFF, fl ? "Field" : "Classic", current_id() == ID_LOOK);
+    cc_small(buf, y0, h, lk, -1, fl ? F_ORANGE : CC_OFF, fl ? "Field" : "Classic", current_id() == ID_LOOK);
     static const uint16_t sq[4][3] = {{36, 130, 255}, {38, 208, 124}, {255, 255, 255}, {255, 204, 0}};
     float lx = (lk->x0 + lk->x1) / 2.0f, ly = lk->y0 + 38;
     for (int i = 0; i < 4; i++) {
@@ -757,14 +839,12 @@ static void draw_menu(uint16_t *buf, int y0, int h)
     int pct = battery_percent();
     if (pct >= 0) snprintf(bsub, sizeof bsub, "%d%%  %s", pct, battery_state_text(&bd));
     else strlcpy(bsub, battery_state_text(&bd), sizeof bsub);
-    uint16_t bdisc = battery_charging_now(&bd) ? CC_GREEN : CC_OFF;
+    uint16_t bdisc = battery_charging_now(&bd) ? CC_GREEN : off_col();
     cc_wide(buf, y0, h, bb, bdisc, "Battery", bsub, CC_TEXT2, current_id() == ID_BATTERY);
     cc_icon(buf, y0, h, ICON_BATTERY, bb->x0 + 38, (bb->y0 + bb->y1) / 2.0f, C_WHITE, bdisc);
 }
 
 // ---------------------------------------------------------------- the square's Wi-Fi pages, in the same style
-#define SQ_GROUP rgb(36, 36, 40)
-#define SQ_PRESS rgb(58, 58, 64)
 #define SQ_SEP   rgb(52, 52, 58)
 #define SQ_TEXT2 rgb(150, 150, 158)
 
@@ -777,21 +857,29 @@ static void ftext_mid(uint16_t *buf, int y0, int h, int cx, int cy, const font_t
 static void nav(uint16_t *buf, int y0, int h, const button_t *back, const char *title)
 {
     static const float chev[] = {15, 5, 8, 12, 15, 19};
-    uint16_t c = current_id() == back->id ? rgb(90, 170, 255) : CC_BLUE;
+    bool fl = ui_field(), dn = current_id() == back->id;
+    uint16_t c = fl ? (dn ? F_ORANGE_DN : F_ORANGE) : dn ? rgb(90, 170, 255) : CC_BLUE;
+    const font_t *f = fl ? &font_mono : &font_label;
+    char t[48], bl[24];
+    if (fl) { upcase(t, sizeof t, title); upcase(bl, sizeof bl, back->label); }
+    else { strlcpy(t, title, sizeof t); strlcpy(bl, back->label, sizeof bl); }
     aa_icon(buf, y0, h, 24, 67, 22, chev, 3, false, 2.4f, c);
-    draw_ftext(buf, y0, h, 36, 67 - font_label.line_h / 2, &font_label, back->label, c);
-    char t[48];
-    strlcpy(t, title, sizeof t);
+    draw_ftext(buf, y0, h, 36, 67 - f->line_h / 2, f, bl, c);
     int room = W - 2 * 150;
-    draw_fit(buf, y0, h, CX - (ftext_width(&font_label, t) < room ? ftext_width(&font_label, t) : room) / 2,
-             67 - font_label.line_h / 2, &font_label, t, room, C_WHITE);
+    draw_fit(buf, y0, h, CX - (ftext_width(f, t) < room ? ftext_width(f, t) : room) / 2, 67 - f->line_h / 2, f, t, room, C_WHITE);
 }
 
 // a row button: a rounded group of its own, its words centred (or in red / blue)
 static void row_button(uint16_t *buf, int y0, int h, const button_t *b, uint16_t col)
 {
     bool on = current_id() == b->id;
-    aa_rrect(buf, y0, h, b->x0, b->y0, b->x1, b->y1, 14, on ? SQ_PRESS : SQ_GROUP);
+    panel(buf, y0, h, b->x0, b->y0, b->x1, b->y1, 14, on);
+    if (ui_field()) {
+        char t[32];
+        upcase(t, sizeof t, b->label);
+        ftext_mid(buf, y0, h, (b->x0 + b->x1) / 2, (b->y0 + b->y1) / 2, &font_mono, t, acc(col));
+        return;
+    }
     ftext_mid(buf, y0, h, (b->x0 + b->x1) / 2, (b->y0 + b->y1) / 2, &font_label, b->label, col);
 }
 
@@ -822,24 +910,21 @@ static void draw_list(uint16_t *buf, int y0, int h)
     gfx_clip(LIST_TOP, LIST_BOT);
     if (net_count > 0) {                              // the group the rows sit in
         int gt = LIST_TOP - scroll, gb = gt + net_count * ROW_H;
-        aa_rrect(buf, y0, h, ROW_X0, gt, ROW_X1, gb, 14, SQ_GROUP);
+        panel(buf, y0, h, ROW_X0, gt, ROW_X1, gb, 14, false);
     }
     for (int i = 0; i < net_count; i++) {
         int ry = LIST_TOP + i * ROW_H - scroll;
         if (ry + ROW_H <= y0 || ry >= y0 + h || ry + ROW_H <= LIST_TOP || ry >= LIST_BOT) continue;
         bool connected = wifi_state() == WS_CONNECTED && !strcmp(nets[i].ssid, wifi_ssid());
-        if (current_id() == ID_ROW + i) {             // pressed: the row lights (rounded where it's the group's end)
-            aa_rrect(buf, y0, h, ROW_X0, ry, ROW_X1, ry + ROW_H, 14, SQ_PRESS);
-            if (i > 0) fill_rect(buf, y0, h, ROW_X0, ry, ROW_X1, ry + 14, SQ_PRESS);
-            if (i < net_count - 1) fill_rect(buf, y0, h, ROW_X0, ry + ROW_H - 14, ROW_X1, ry + ROW_H, SQ_PRESS);
-        }
+        if (current_id() == ID_ROW + i)               // pressed: the row lights
+            press_row(buf, y0, h, ROW_X0, ROW_X1, ry, ry + ROW_H, i == 0, i == net_count - 1);
         float mid = ry + ROW_H / 2.0f;
         if (connected) {
             static const float chk[] = {5, 12.5f, 10, 17.5f, 19, 7};
-            aa_icon(buf, y0, h, 36, mid, 18, chk, 3, false, 2.4f, CC_BLUE);
+            aa_icon(buf, y0, h, 36, mid, 18, chk, 3, false, 2.4f, acc(CC_BLUE));
         }
         draw_fit(buf, y0, h, 56, (int)mid - font_label.line_h / 2, &font_label, nets[i].ssid, ROW_X1 - 70 - 56, C_WHITE);
-        if (nets[i].secure) small_lock(buf, y0, h, ROW_X1 - 48, mid, SQ_TEXT2, SQ_GROUP);
+        if (nets[i].secure) small_lock(buf, y0, h, ROW_X1 - 48, mid, SQ_TEXT2, grp_col());
         int bars = wifi_bars();                       // (the joined one: as the status bar shows it)
         fan(buf, y0, h, ROW_X1 - 22, mid - 4, connected ? (bars >= 3 ? -50 : bars == 2 ? -66 : -80) : nets[i].rssi);
         if (i < net_count - 1) fill_rect(buf, y0, h, 56, ry + ROW_H - 1, ROW_X1, ry + ROW_H, SQ_SEP);
@@ -847,7 +932,7 @@ static void draw_list(uint16_t *buf, int y0, int h)
     if (net_count == 0 && !wifi_scanning()) ftext_mid(buf, y0, h, CX, 240, &font_label, "No networks found", SQ_TEXT2);
     if (wifi_scanning() && net_count == 0)
         for (int i = 0; i < 3; i++)
-            aa_disc(buf, y0, h, CX - 24 + i * 24, 240, ((int)(esp_timer_get_time() / 200000) + i) % 3 == 0 ? 6 : 4, CC_BLUE);
+            aa_disc(buf, y0, h, CX - 24 + i * 24, 240, ((int)(esp_timer_get_time() / 200000) + i) % 3 == 0 ? 6 : 4, acc(CC_BLUE));
     gfx_clip(0, H);
     int ms = max_scroll();
     if (ms > 0 && dragging) {
@@ -869,18 +954,23 @@ static void draw_status(uint16_t *buf, int y0, int h)
 {
     if (wifi_state() == WS_CONNECTED) {
         nav(buf, y0, h, &connected_buttons[2], "Wi-Fi");
-        aa_disc(buf, y0, h, CX, 138, 34, CC_BLUE);
+        bool fl = ui_field();
+        if (fl) aa_rrect(buf, y0, h, CX - 34, 104, CX + 34, 172, 12, CC_BLUE);
+        else aa_disc(buf, y0, h, CX, 138, 34, CC_BLUE);
         cc_icon(buf, y0, h, ICON_WIFI, CX, 136, C_WHITE, CC_BLUE);
-        ftext_mid(buf, y0, h, CX, 194, &font_label, "Connected", C_WHITE);
+        if (fl) ftext_mid(buf, y0, h, CX, 194, &font_mono, "CONNECTED", C_WHITE);
+        else ftext_mid(buf, y0, h, CX, 194, &font_label, "Connected", C_WHITE);
         const int gt = 216;                           // the network's name and address, in a group
-        aa_rrect(buf, y0, h, ROW_X0, gt, ROW_X1, gt + 2 * 48, 14, SQ_GROUP);
+        panel(buf, y0, h, ROW_X0, gt, ROW_X1, gt + 2 * 48, 14, false);
         fill_rect(buf, y0, h, 32, gt + 48, ROW_X1, gt + 49, SQ_SEP);
-        const char *lab[2] = {"Network", "IP address"}, *val[2] = {wifi_ssid(), wifi_ip()};
+        const char *lab[2] = {fl ? "NETWORK" : "Network", fl ? "IP ADDRESS" : "IP address"}, *val[2] = {wifi_ssid(), wifi_ip()};
         for (int i = 0; i < 2; i++) {
             int my = gt + 24 + i * 48;
-            draw_ftext(buf, y0, h, 32, my - font_label.line_h / 2, &font_label, lab[i], C_WHITE);
-            int room = ROW_X1 - 16 - 160, vw = ftext_width(&font_label, val[i]);
-            draw_fit(buf, y0, h, ROW_X1 - 16 - (vw < room ? vw : room), my - font_label.line_h / 2, &font_label, val[i], room, SQ_TEXT2);
+            const font_t *lf = fl ? &font_mono_s : &font_label;
+            draw_ftext(buf, y0, h, 32, my - lf->line_h / 2, lf, lab[i], fl ? F_GREY : C_WHITE);
+            const font_t *vf = fl ? &font_mono : &font_label;
+            int room = ROW_X1 - 16 - 160, vw = ftext_width(vf, val[i]);
+            draw_fit(buf, y0, h, ROW_X1 - 16 - (vw < room ? vw : room), my - vf->line_h / 2, vf, val[i], room, fl ? rgb(235, 235, 240) : SQ_TEXT2);
         }
         row_button(buf, y0, h, &connected_buttons[0], CC_BLUE);
         row_button(buf, y0, h, &connected_buttons[1], rgb(255, 69, 58));
@@ -890,7 +980,7 @@ static void draw_status(uint16_t *buf, int y0, int h)
         strlcpy(t, wifi_ssid(), sizeof t);
         ftext_mid(buf, y0, h, CX, 202, &font_body, t, C_WHITE);
         int phase = (int)(esp_timer_get_time() / 150000);
-        for (int i = 0; i < 3; i++) aa_disc(buf, y0, h, CX - 24 + i * 24, 270 - ((phase + i) % 3 == 0 ? 6 : 0), 5, CC_BLUE);
+        for (int i = 0; i < 3; i++) aa_disc(buf, y0, h, CX - 24 + i * 24, 270 - ((phase + i) % 3 == 0 ? 6 : 0), 5, acc(CC_BLUE));
         row_button(buf, y0, h, &connecting_buttons[0], rgb(255, 69, 58));
     }
 }
@@ -932,26 +1022,30 @@ static void version_text(char *out, size_t cap)
 static void rows(uint16_t *buf, int y0, int h, int top, int rh, int n, const char *const *lab, char (*val)[32], int tap,
                  bool lit)
 {
-    aa_rrect(buf, y0, h, ROW_X0, top, ROW_X1, top + n * rh, 14, SQ_GROUP);
+    bool fl = ui_field();                             // (Field: the labels in small grey capitals, the values in mono)
+    const font_t *vf = fl ? &font_mono : &font_label;
+    panel(buf, y0, h, ROW_X0, top, ROW_X1, top + n * rh, 14, false);
     for (int i = 0; i < n; i++) {
         int t = top + i * rh, my = t + rh / 2;
         if (t + rh <= y0 || t >= y0 + h) continue;
-        if (i == tap && lit) {                        // pressed: the row lights (rounded where it's the group's end)
-            aa_rrect(buf, y0, h, ROW_X0, t, ROW_X1, t + rh, 14, SQ_PRESS);
-            if (i > 0) fill_rect(buf, y0, h, ROW_X0, t, ROW_X1, t + 14, SQ_PRESS);
-            if (i < n - 1) fill_rect(buf, y0, h, ROW_X0, t + rh - 14, ROW_X1, t + rh, SQ_PRESS);
+        if (i == tap && lit) press_row(buf, y0, h, ROW_X0, ROW_X1, t, t + rh, i == 0, i == n - 1);   // pressed: it lights
+        if (i) fill_rect(buf, y0, h, 32, t, ROW_X1 - (fl ? 2 : 0), t + 1, SQ_SEP);
+        if (fl) {
+            char l[32];
+            upcase(l, sizeof l, lab[i]);
+            draw_ftext(buf, y0, h, 32, my - font_mono_s.line_h / 2, &font_mono_s, l, F_GREY);
+        } else {
+            draw_ftext(buf, y0, h, 32, my - font_label.line_h / 2, &font_label, lab[i], C_WHITE);
         }
-        if (i) fill_rect(buf, y0, h, 32, t, ROW_X1, t + 1, SQ_SEP);
-        draw_ftext(buf, y0, h, 32, my - font_label.line_h / 2, &font_label, lab[i], C_WHITE);
         int right = ROW_X1 - 16;
         if (i == tap) {
             const float chev[] = {right - 6.0f, my - 6.0f, right, (float)my, right - 6.0f, my + 6.0f};
             aa_path(buf, y0, h, chev, 3, false, 2.2f, rgb(90, 90, 96));
             right -= 18;
         }
-        int room = right - 200, vw = ftext_width(&font_label, val[i]);
+        int room = right - 200, vw = ftext_width(vf, val[i]);
         vw = vw < room ? vw : room;
-        draw_fit(buf, y0, h, right - vw, my - font_label.line_h / 2, &font_label, val[i], room, SQ_TEXT2);
+        draw_fit(buf, y0, h, right - vw, my - vf->line_h / 2, vf, val[i], room, fl ? rgb(235, 235, 240) : SQ_TEXT2);
     }
 }
 
@@ -961,10 +1055,14 @@ static void draw_battery(uint16_t *buf, int y0, int h)
     nav(buf, y0, h, &battery_buttons[0], "Battery");
     battery_diag_t d;
     battery_diag(&d);
-    ftext_mid(buf, y0, h, CX, 106, &font_body, battery_state_text(&d), battery_charging_now(&d) ? CC_GREEN : C_WHITE);
+    bool fl = ui_field();
+    char st[40];
+    if (fl) upcase(st, sizeof st, battery_state_text(&d));
+    else strlcpy(st, battery_state_text(&d), sizeof st);
+    ftext_mid(buf, y0, h, CX, 106, fl ? &font_mono_l : &font_body, st, battery_charging_now(&d) ? CC_GREEN : C_WHITE);
     char head[16] = "";
     if (battery_percent() >= 0) snprintf(head, sizeof head, "%d%%", battery_percent());
-    ftext_mid(buf, y0, h, CX, 136, &font_label, head, SQ_TEXT2);
+    ftext_mid(buf, y0, h, CX, 136, fl ? &font_mono : &font_label, head, fl ? F_ORANGE : SQ_TEXT2);
 
     static const char *lab[6] = {"Battery", "Charging", "USB power", "Charge current", "Charges to", "Chip temperature"};
     char v[6][32];
@@ -980,9 +1078,11 @@ static void draw_battery(uint16_t *buf, int y0, int h)
     rows(buf, y0, h, g1, rh, 6, lab, v, -1, false);
     if (d.chip && g1 + 5 * rh + rh / 2 + 8 > y0 && g1 + 5 * rh < y0 + h) {   // (the font has no degree sign: a ring)
         int my = g1 + 5 * rh + rh / 2;
-        float dx = ROW_X1 - 16 - ftext_width(&font_label, "C") - 4.5f;
-        aa_disc(buf, y0, h, dx, my - 5, 2.6f, SQ_TEXT2);
-        aa_disc(buf, y0, h, dx, my - 5, 1.2f, SQ_GROUP);
+        const font_t *vf = fl ? &font_mono : &font_label;
+        uint16_t vc = fl ? rgb(235, 235, 240) : SQ_TEXT2;
+        float dx = ROW_X1 - 16 - ftext_width(vf, "C") - 4.5f;
+        aa_disc(buf, y0, h, dx, my - 5, 2.6f, vc);
+        aa_disc(buf, y0, h, dx, my - 5, 1.2f, grp_col());
     }
 
     static const char *about[3] = {"Name", "Firmware", "Built"};
@@ -1011,8 +1111,10 @@ static void draw_reset(uint16_t *buf, int y0, int h)
         cc_arc(buf, y0, h, CX, ERASE_Y, BUB_R + 8, 0, 360, 4, rgb(70, 70, 76));
         cc_arc(buf, y0, h, CX, ERASE_Y, BUB_R + 8, 0, 360 * frac, 4, rgb(255, 69, 58));
     }
-    ftext_mid(buf, y0, h, CX, ERASE_Y, &font_body, "Hold", C_WHITE);
-    ftext_mid(buf, y0, h, CX, 382, &font_small, "Hold for 3 seconds", SQ_TEXT2);
+    if (ui_field()) ftext_mid(buf, y0, h, CX, ERASE_Y, &font_mono_l, "HOLD", C_WHITE);
+    else ftext_mid(buf, y0, h, CX, ERASE_Y, &font_body, "Hold", C_WHITE);
+    if (ui_field()) ftext_mid(buf, y0, h, CX, 382, &font_mono_s, "HOLD FOR 3 SECONDS", F_GREY);
+    else ftext_mid(buf, y0, h, CX, 382, &font_small, "Hold for 3 seconds", SQ_TEXT2);
 }
 
 static void draw_keys(uint16_t *buf, int y0, int h)
@@ -1021,7 +1123,7 @@ static void draw_keys(uint16_t *buf, int y0, int h)
     if (naming) strlcpy(line, "Name", sizeof line);
     else snprintf(line, sizeof line, "Password for %s", join_ssid);
     ftext_mid(buf, y0, h, CX, 30, &font_label, line, C_WHITE);
-    aa_rrect(buf, y0, h, 16, 58, W - 16, 104, 12, SQ_GROUP);
+    panel(buf, y0, h, 16, 58, W - 16, 104, 12, false);
     if (error_msg[0]) aa_rrect(buf, y0, h, 16, 58, W - 16, 104, 12, rgb(70, 30, 32));
     int n = strlen(password);
     if (hide_pw && !naming) { memset(line, '*', n > 40 ? 40 : n); line[n > 40 ? 40 : n] = 0; }
@@ -1031,7 +1133,7 @@ static void draw_keys(uint16_t *buf, int y0, int h)
     draw_ftext(buf, y0, h, tx, ty, &font_label, line, C_WHITE);
     if ((esp_timer_get_time() / 500000) % 2 == 0) {
         int cx = tx + ftext_width(&font_label, line) + 1;
-        aa_rrect(buf, y0, h, cx, ty + 2, cx + 2, ty + 22, 1, CC_BLUE);
+        aa_rrect(buf, y0, h, cx, ty + 2, cx + 2, ty + 22, 1, acc(CC_BLUE));
     }
     if (error_msg[0]) ftext_mid(buf, y0, h, CX, 116, &font_small, error_msg, C_RED);
     for (int i = 0; i < key_count; i++) {
@@ -1039,13 +1141,17 @@ static void draw_keys(uint16_t *buf, int y0, int h)
         if (k->y1 <= y0 || k->y0 >= y0 + h) continue;
         bool pressed = current_id() == k->id, letter = k->id >= ID_KEY, foot = k->id == ID_CANCEL || k->id == ID_SHOW || k->id == ID_CLEAR;
         uint16_t bg = letter ? rgb(80, 80, 86) : rgb(50, 50, 55), fg = C_WHITE;
-        if (k->id == ID_JOIN) bg = CC_BLUE;
+        if (k->id == ID_JOIN) bg = acc(CC_BLUE);
         if (k->id == ID_SHIFT && caps) { bg = rgb(235, 235, 240); fg = rgb(20, 20, 24); }
-        if (foot) bg = SQ_GROUP;
+        if (foot) bg = grp_col();
         if (pressed) bg = letter ? rgb(130, 130, 138) : rgb(90, 90, 98);
-        aa_rrect(buf, y0, h, k->x0 + 2.5f, k->y0 + 3, k->x1 - 2.5f, k->y1 - 3, foot ? (k->y1 - k->y0 - 6) / 2.0f : 7, bg);
-        const font_t *f = letter ? &font_label : &font_small;
-        ftext_mid(buf, y0, h, (k->x0 + k->x1) / 2, (k->y0 + k->y1) / 2, f, k->label, foot ? CC_BLUE : fg);
+        bool fl = ui_field();
+        aa_rrect(buf, y0, h, k->x0 + 2.5f, k->y0 + 3, k->x1 - 2.5f, k->y1 - 3, fl ? 4 : foot ? (k->y1 - k->y0 - 6) / 2.0f : 7, bg);
+        const font_t *f = letter ? &font_label : fl ? &font_mono_s : &font_small;
+        char kl[16];
+        if (fl && !letter) upcase(kl, sizeof kl, k->label);
+        else strlcpy(kl, k->label, sizeof kl);
+        ftext_mid(buf, y0, h, (k->x0 + k->x1) / 2, (k->y0 + k->y1) / 2, f, kl, foot ? acc(CC_BLUE) : fg);
     }
 }
 
