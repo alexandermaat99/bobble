@@ -142,6 +142,11 @@ static float acc_x, acc_y, acc_z;   // filtered, in g
 // Sensor model from the 6-position calibration: corrected = (raw - bias) / scale per axis, then R turns
 // it into screen axes (x right, y down, z out of the glass). At rest the sensor reads the "up" vector.
 typedef struct { uint32_t magic; float bias[3], scale[3], R[9]; } imu_cal_t;
+#if SQUARE_HW
+// How the QMI8658 sits on the 4" board (rows: screen x, y, z in the sensor's axes): every axis the other way round, as
+// the 6-position calibration found it on one. Enough to turn the screen without a calibration of its own.
+static const float SQ_IMU_R[9] = {-1, 0, 0, 0, -1, 0, 0, 0, -1};
+#endif
 #define IMU_CAL_MAGIC 0x1C0CA106
 static imu_cal_t imu_cal = {0, {0, 0, 0}, {1, 1, 1}, {1, 0, 0, 0, 1, 0, 0, 0, 1}};
 
@@ -162,6 +167,9 @@ static void imu_cal_load(void)
             float R[9] = {-old.rx, -old.ry, 0, old.ux, old.uy, 0, 0, 0, out};
             memcpy(imu_cal.R, R, sizeof R);
         }
+#if SQUARE_HW
+        else memcpy(imu_cal.R, SQ_IMU_R, sizeof imu_cal.R);   // (no calibration: how the sensor sits on this board)
+#endif
     }
     nvs_close(h);
     ESP_LOGI("main", "tilt calibration: %s", ok ? "6-position" : "basic/guessed");
@@ -173,6 +181,15 @@ static void imu_up(float up[3])
     float a[3] = {acc_x, acc_y, acc_z}, v[3];
     for (int i = 0; i < 3; i++) v[i] = (a[i] - imu_cal.bias[i]) / imu_cal.scale[i];
     for (int i = 0; i < 3; i++) up[i] = imu_cal.R[i * 3] * v[0] + imu_cal.R[i * 3 + 1] * v[1] + imu_cal.R[i * 3 + 2] * v[2];
+}
+
+void motion_get(float raw[3], float up[3], float *angle, bool *calibrated, float R[9])
+{
+    memcpy(R, imu_cal.R, sizeof imu_cal.R);
+    raw[0] = acc_x; raw[1] = acc_y; raw[2] = acc_z;
+    imu_up(up);
+    *angle = ang_target;
+    *calibrated = imu_cal.magic == IMU_CAL_MAGIC;
 }
 
 static void imu_init(i2c_master_bus_handle_t bus)
@@ -211,26 +228,38 @@ static float wrap180(float a)
 
 // Point the content's "down" along gravity. Lying flat keeps the current angle; wobbles under 3
 // degrees are ignored, and anything within 5 degrees of straight snaps to it so text stays crisp.
-// The square turns only in quarter turns (a tilted square would lose its corners), once it's tipped well
-// past 45 degrees, and only after a tilt calibration has mapped how its sensor sits.
-static void update_orientation(void)
+// The square turns like a phone: in quarter turns (a tilted square would lose its corners), once it's tipped well
+// past 45 degrees (60 from where it faces) and has stayed there half a second, so a bump or a wobble doesn't turn it.
+// at_once: starting up or waking, face the right way straight away.
+static void update_orientation(bool at_once)
 {
-#if SQUARE_HW
-    if (imu_cal.magic != IMU_CAL_MAGIC) return;      // (uncalibrated: stays upright)
-#endif
     float up[3];
     imu_up(up);
     float gx = -up[0], gy = -up[1];                   // gravity on the glass
+#if SQUARE_HW
+    static float want = -1000;                        // the quarter turn it's been tipped to, and since when
+    static int64_t want_since;
+    if (sqrtf(gx * gx + gy * gy) < 0.45f) { want = -1000; return; }   // too flat to tell
+    float a = atan2f(-gx, gy) * 180 / (float)M_PI, q = wrap180(roundf(a / 90) * 90);
+    if (fabsf(wrap180(a - ang_target)) <= 60) { want = -1000; return; }
+    int64_t now = esp_timer_get_time();
+    if (q != want && !at_once) { want = q; want_since = now; return; }
+    if (at_once || now - want_since >= 500000) {
+        if (q != ang_target) ESP_LOGI(TAG, "turned to %d degrees", (int)q);
+        ang_target = q;
+        want = -1000;
+    }
+#else
+    (void)at_once;
     if (sqrtf(gx * gx + gy * gy) < 0.45f) return;     // too flat to tell
     float a = atan2f(-gx, gy) * 180 / (float)M_PI;    // content down = (-sin a, cos a)
     float nearest = roundf(a / 90) * 90;
-#if SQUARE_HW
-    if (fabsf(wrap180(a - ang_target)) > 60) ang_target = wrap180(nearest);
-    return;
-#endif
     if (fabsf(a - nearest) < 5) a = nearest;
     if (fabsf(wrap180(a - ang_target)) > 3) ang_target = wrap180(a);
+#endif
 }
+
+void motion_turn(int degrees) { ang_target = wrap180((float)degrees); }
 
 static void animate_rotation(void)
 {
@@ -361,6 +390,7 @@ static void tilt_cal_update(int64_t now)
     tilt_since = now;
 }
 
+#if SCREEN_ROUND                                     // (the square's, in the settings' style, come after touch_cal_draw)
 static void draw_arrow(uint16_t *buf, int y0, int h, int dir, uint16_t c)   // 0 down, 1 right, 2 up, 3 left
 {
     for (int i = 0; i < 34; i++) {
@@ -403,6 +433,7 @@ static void tilt_cal_draw(uint16_t *buf, int y0, int h)
     fill_rect(buf, y0, h, CX - 100, 262, CX + 100, 272, grey);
     fill_rect(buf, y0, h, CX - 100, 262, CX - 100 + (int)(200 * (tilt_progress > 1 ? 1 : tilt_progress)), 272, accent);
 }
+#endif
 
 // ---------------------------------------------------------------- touch (FT3168)
 static i2c_master_dev_handle_t touch_dev;
@@ -616,6 +647,90 @@ static void touch_cal_draw(uint16_t *buf, int y0, int h)
     aa_disc(buf, y0, h, tx, ty, 19, rgb(8, 34, 64));
     aa_disc(buf, y0, h, tx, ty, 5, white);              // the point to hit
 }
+
+// A ring round (cx, cy), drawn clockwise from the top for frac of the way round
+static void ring(uint16_t *buf, int y0, int h, float cx, float cy, float r, float frac, float w, uint16_t col)
+{
+    float p[2 * 61];
+    int n = 2 + (int)(59 * (frac > 1 ? 1 : frac));
+    for (int i = 0; i < n; i++) {
+        float a = 2 * (float)M_PI * frac * i / (n - 1);
+        p[2 * i] = cx + r * sinf(a);
+        p[2 * i + 1] = cy - r * cosf(a);
+    }
+    aa_path(buf, y0, h, p, n, false, w, col);
+}
+
+// Tilt calibration, the same way but quieter: a blue arrow at the table (a grey line) for the four edges, the board seen
+// side on for the two flat ones, inside a ring that goes round while it's held still; what to do in a few words, and the
+// steps as dots
+static void tilt_cal_draw(uint16_t *buf, int y0, int h)
+{
+    const uint16_t white = rgb(255, 255, 255), blue = rgb(10, 132, 255), grey = rgb(150, 150, 158),
+                   dim = rgb(70, 70, 76), green = rgb(48, 209, 88), orange = rgb(255, 159, 10);
+    const float ix = CX, iy = 186;                    // the picture's middle
+    if (tilt_step >= 7) {                             // done, or the positions didn't agree
+        bool ok = tilt_step == 7;
+        aa_disc(buf, y0, h, ix, iy, 32, ok ? green : orange);
+        if (ok) {
+            const float chk[] = {ix - 13, iy + 1, ix - 4, iy + 10, ix + 14, iy - 9};
+            aa_path(buf, y0, h, chk, 3, false, 5.5f, white);
+        } else {
+            aa_rrect(buf, y0, h, ix - 3, iy - 17, ix + 3, iy + 4, 3, white);
+            aa_disc(buf, y0, h, ix, iy + 13, 3.8f, white);
+        }
+        ftext_mid(buf, y0, h, CX, 244, &font_body, ok ? "Tilt calibrated" : "Let's try again", white);
+        if (!ok) ftext_mid(buf, y0, h, CX, 288, &font_label, "The positions didn't agree", grey);
+        return;
+    }
+    static const char *title[] = {"Stand it upright", "Right edge down", "Upside down", "Left edge down",
+                                  "Lay it flat", "Now face down"};
+    int i = tilt_step - 1;
+    float p = tilt_progress > 1 ? 1 : tilt_progress < 0 ? 0 : tilt_progress;   // held still for a second
+    ring(buf, y0, h, ix, iy, 66, 1, 4, rgb(44, 44, 48));
+    if (p > 0.02f) ring(buf, y0, h, ix, iy, 66, p, 4, blue);
+    if (i < 4) {                                      // an arrow at the table: down, right, up, left
+        static const float dir[4][2] = {{0, 1}, {1, 0}, {0, -1}, {-1, 0}};
+        float vx = dir[i][0], vy = dir[i][1], px = -vy, py = vx;
+        const float shaft[] = {ix - vx * 28, iy - vy * 28, ix + vx * 23, iy + vy * 23};
+        const float head[] = {ix + vx * 6 + px * 18, iy + vy * 6 + py * 18, ix + vx * 24, iy + vy * 24,
+                              ix + vx * 6 - px * 18, iy + vy * 6 - py * 18};
+        aa_path(buf, y0, h, shaft, 2, false, 7, blue);
+        aa_path(buf, y0, h, head, 3, false, 7, blue);
+        const float table[] = {ix + vx * 38 + px * 30, iy + vy * 38 + py * 30, ix + vx * 38 - px * 30, iy + vy * 38 - py * 30};
+        aa_path(buf, y0, h, table, 2, false, 3, dim);
+    } else {                                          // the board side on, its glass (blue) up or down, on the table
+        bool up = i == 4;
+        aa_rrect(buf, y0, h, ix - 40, iy - 5, ix + 40, iy + 5, 3.5f, rgb(120, 120, 128));
+        aa_rrect(buf, y0, h, ix - 37, up ? iy - 7.5f : iy + 3.5f, ix + 37, up ? iy - 3.5f : iy + 7.5f, 2, blue);
+        const float table[] = {ix - 50, iy + 16, ix + 50, iy + 16};
+        aa_path(buf, y0, h, table, 2, false, 3, dim);
+    }
+    ftext_mid(buf, y0, h, CX, 274, &font_body, title[i], white);
+    for (int k = 0; k < TILT_POSES; k++)
+        aa_disc(buf, y0, h, CX + (k - (TILT_POSES - 1) / 2.0f) * 16, 334, k == i ? 4 : 3,
+                k == i ? blue : k < i ? white : dim);
+    ftext_mid(buf, y0, h, CX, 438, &font_small, "Press BOOT to cancel", rgb(80, 80, 88));
+}
+
+// A firmware update coming in over Wi-Fi: a download mark, a bar, how far it's got
+static void ota_draw(uint16_t *buf, int y0, int h)
+{
+    const uint16_t white = rgb(255, 255, 255), blue = rgb(10, 132, 255), grey = rgb(150, 150, 158);
+    const float ix = CX, iy = 170;
+    aa_disc(buf, y0, h, ix, iy, 40, blue);
+    const float shaft[] = {ix, iy - 20, ix, iy + 16}, head[] = {ix - 15, iy + 2, ix, iy + 17, ix + 15, iy + 2};
+    aa_path(buf, y0, h, shaft, 2, false, 6, white);
+    aa_path(buf, y0, h, head, 3, false, 6, white);
+    ftext_mid(buf, y0, h, CX, 236, &font_body, "Updating", white);
+    ftext_mid(buf, y0, h, CX, 280, &font_label, "Don't unplug Bobble", grey);
+    int p = ota_progress();
+    aa_rrect(buf, y0, h, CX - 120, 334, CX + 120, 342, 4, rgb(58, 58, 64));
+    if (p > 1) aa_rrect(buf, y0, h, CX - 120, 334, CX - 120 + 240 * (p > 100 ? 100 : p) / 100.0f, 342, 4, blue);
+    char t[8];
+    snprintf(t, sizeof t, "%d%%", p);
+    ftext_mid(buf, y0, h, CX, 356, &font_label, t, grey);
+}
 #else
 static void touch_cal_draw(uint16_t *buf, int y0, int h)
 {
@@ -776,6 +891,10 @@ static void draw_overlay(uint16_t *buf, int y0, int h)
 {
     int fs = frame_sheet;
     if (ota_progress() >= 0) {                        // firmware update in progress
+#if !SCREEN_ROUND
+        ota_draw(buf, y0, h);
+        return;
+#endif
         char p[24];
         snprintf(p, sizeof p, "%d%%", ota_progress());
         text_c(buf, y0, h, 180, 3, "Updating", rgb(255, 255, 255));
@@ -1080,6 +1199,7 @@ static uint16_t *frame;   // whole upright frame in PSRAM, only used when the co
 
 // Per-frame rotation snapshot for the sampler
 static int32_t rs_cos, rs_sin;   // 16.16 fixed point
+static int rs_quarter;           // turned exactly 90, 180 or 270 degrees: 1, 2, 3 (0: any other angle)
 static bool rs_smooth;
 static int cmp_off;       // mid-swipe: how far the current page has moved
 static bool rs_slide;     // mid-swipe at an angle: read the two page snapshots directly (no assembled frame)
@@ -1115,9 +1235,9 @@ static void sample_rows(uint16_t *dst, int y0, int y1)
     const int32_t c = (W - 1) * 32768;                 // centre, 16.16
     const int R = W / 2;
     int xa_row[STRIP], xb_row[STRIP];
-    for (int py = y0; py < y1; py++) {                 // visible span of each glass row (it's round)
+    for (int py = y0; py < y1; py++) {                 // visible span of each glass row (round: a chord; square: all)
         int dyi = 2 * py - (W - 1);
-        int half = (int)sqrtf((float)(R * R) - dyi * dyi / 4.0f);
+        int half = SCREEN_ROUND ? (int)sqrtf((float)(R * R) - dyi * dyi / 4.0f) : W / 2;
         int xa = W / 2 - half, xb = W / 2 + half;
         xa_row[py - y0] = xa < win_x0 ? win_x0 : xa;
         xb_row[py - y0] = xb > win_x1 ? win_x1 : xb;
@@ -1135,7 +1255,16 @@ static void sample_rows(uint16_t *dst, int y0, int y1)
             int32_t dx0 = (2 * xa - (W - 1)) * 32768, dy = (2 * py - (W - 1)) * 32768;
             int32_t qx = c + (int32_t)(((int64_t)rs_cos * dx0 + (int64_t)rs_sin * dy) >> 16);
             int32_t qy = c + (int32_t)(((int64_t)-rs_sin * dx0 + (int64_t)rs_cos * dy) >> 16);
-            if (rs_smooth) {
+            if (rs_quarter == 1) {                     // exact quarter turns: just where each pixel comes from
+                const uint16_t *src = frame + (W - 1 - xa) * W + py;
+                for (int px = xa; px < xb; px++, src -= W) d[px] = *src;
+            } else if (rs_quarter == 2) {
+                const uint16_t *src = frame + (H - 1 - py) * W + (W - 1 - xa);
+                for (int px = xa; px < xb; px++) d[px] = *src--;
+            } else if (rs_quarter == 3) {
+                const uint16_t *src = frame + xa * W + (W - 1 - py);
+                for (int px = xa; px < xb; px++, src += W) d[px] = *src;
+            } else if (rs_smooth) {
                 for (int px = xa; px < xb; px++, qx += rs_cos, qy -= rs_sin) {
                     int ix = qx >> 16, iy = qy >> 16;
                     if ((unsigned)ix >= W - 1 || (unsigned)iy >= H - 1) { d[px] = 0; continue; }
@@ -1322,23 +1451,35 @@ static void render_frame(bool content)
 #endif
         bool part = part_on && frame_valid && !rs_slide;
         int64_t p0 = esp_timer_get_time();
+        int bi = 0;
         for (int y0 = 0; y0 < H && !rs_slide && (content || !frame_valid); y0 += STRIP) {   // draw upright into the frame...
             int h = (y0 + STRIP > H) ? H - y0 : STRIP;
             if (part && !strip_in_rects(y0, h)) continue;
-            uint16_t *buf = frame + y0 * W;
-            draw_strip(buf, y0, h);
+#if SQUARE_HW   // (in internal RAM, then the DMA copies it over: drawing straight into PSRAM took three times as long)
+            xSemaphoreTake(buf_free, portMAX_DELAY);
+            draw_strip(bufs[bi], y0, h);
+            sq_copy(frame + y0 * W, bufs[bi], W * h * 2, buf_free);
+            bi = (bi + 1) % NBUF;
+#else
+            draw_strip(frame + y0 * W, y0, h);
+#endif
         }
+#if SQUARE_HW
+        for (int i = 0; i < NBUF; i++) xSemaphoreTake(buf_free, portMAX_DELAY);   // (all landed before it's turned)
+        for (int i = 0; i < NBUF; i++) xSemaphoreGive(buf_free);
+#endif
         if (!rs_slide) frame_valid = true;
         int64_t p1 = esp_timer_get_time();
         prof_draw_us += p1 - p0;
         float r = ang * (float)M_PI / 180;
         rs_cos = (int32_t)lroundf(cosf(r) * 65536);
         rs_sin = (int32_t)lroundf(sinf(r) * 65536);
+        rs_quarter = rs_slide || fmodf(fabsf(ang), 90) != 0 ? 0 : rs_sin == 65536 ? 1 : rs_cos == -65536 ? 2 : rs_sin == -65536 ? 3 : 0;
         // smooth (bilinear) only when everything is still; in motion the quick lookup looks the same
         rs_smooth = ang == ang_target && fmodf(fabsf(ang), 90) != 0 && !pages_sliding() && !card_drag && target < 0 && !quick_frame;
         // ...then turn it onto the glass: everything, or just where each changed area lands (its corners turned the
         // other way give the box on the glass, rows and columns)
-        int bi = 0;
+        bi = 0;
         for (int k = 0; k < (part ? part_cnt : 1); k++) {
             int ga = 0, gb = H, gx0 = 0, gx1 = W;
             if (part) {
@@ -1354,10 +1495,10 @@ static void render_frame(bool content)
                 int h = (y0 + STRIP > H) ? H - y0 : STRIP;
                 if (part && strip_skipped(y0, h, ga, gb)) continue;
                 strip_window(y0, h, &win_x0, &win_x1);
-                if (part) {                            // (only the columns the area covers; even edges for the panel)
-                    int a = gx0 & ~1, b = (gx1 + 1) & ~1;
-                    if (a > win_x0) win_x0 = a;
-                    if (b < win_x1) win_x1 = b;
+                if (part && SCREEN_ROUND) {            // (only the columns the area covers; even edges for the panel.
+                    int a = gx0 & ~1, b = (gx1 + 1) & ~1;   // The square sends whole rows: its DMA copies only those,
+                    if (a > win_x0) win_x0 = a;              // and the CPU writing part rows into PSRAM itself stalls
+                    if (b < win_x1) win_x1 = b;              // everything, which glitched the voice chat's orb)
                 }
                 if (win_x1 <= win_x0) continue;
                 xSemaphoreTake(buf_free, portMAX_DELAY);
@@ -1420,10 +1561,14 @@ void app_main(void)
     touch_cal_load();                                  // none saved: the panel's own mapping, fine out of the box
                                                        // (recalibrate from Settings, or hold BOOT for 3 s)
     if (locked) power = PW_FADING_OUT;                 // restarted while locked: straight back to sleep
+#if SQUARE_HW
+    frame = heap_caps_aligned_alloc(64, W * H * 2, MALLOC_CAP_SPIRAM);   // (cache-line aligned: the DMA copies into it)
+#else
     frame = heap_caps_malloc(W * H * 2, MALLOC_CAP_SPIRAM);
+#endif
     for (int i = 0; i < 3; i++) snap_buf[i] = heap_caps_malloc(W * H * 2, MALLOC_CAP_SPIRAM);
     for (int i = 0; i < 20; i++) { imu_read(); vTaskDelay(pdMS_TO_TICKS(5)); }
-    update_orientation();
+    update_orientation(true);
     ang = ang_target;                                 // start in the right orientation, no spin
 
     job_go = xSemaphoreCreateBinary();
@@ -1498,7 +1643,7 @@ void app_main(void)
             if (page != PAGE_PET && SCREEN_ROUND) { page = PAGE_PET; page_auto = false; cal_ui_enter(); }   // wakes to the eyes (home)
             // (the square wakes where it was left: it shouldn't pull you off a page you chose)
             power_screen_on();
-            update_orientation();                      // face the right way straight away, no spin
+            update_orientation(true);                  // face the right way straight away, no spin
             ang = ang_target;
             render_frame(true);                        // fresh picture before the light comes on
             panel_power(true);
@@ -1549,7 +1694,7 @@ void app_main(void)
             if (!empty_at) { empty_at = now; show_empty = true; force_redraw = true; }
             else if (now - empty_at > 4000000) sleep_until_charged();
         }
-        if (!card_drag && !was_down && !pg_drag && pg_off == 0) update_orientation();   // never turn under a finger or mid-swipe
+        if (!card_drag && !was_down && !pg_drag && pg_off == 0) update_orientation(false);   // never turn under a finger or mid-swipe
         animate_rotation();
 
         int tx = -1, ty = -1;

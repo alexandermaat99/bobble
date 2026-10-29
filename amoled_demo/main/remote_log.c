@@ -11,6 +11,7 @@
 #include "secrets.h"
 #include "agent.h"
 #include "battery.h"
+#include "screen.h"
 
 #define RING (16 * 1024)
 static char *ring;
@@ -97,12 +98,33 @@ static esp_err_t get_battery(httpd_req_t *req)
     return httpd_resp_sendstr(req, out);
 }
 
+// The motion sensor (GET /motion): what it reads, and which way the screen is turned
+static esp_err_t get_motion(httpd_req_t *req)
+{
+    if (!token_ok(req)) return ESP_OK;
+    char q[24], v[8];
+    if (httpd_req_get_url_query_str(req, q, sizeof q) == ESP_OK && httpd_query_key_value(q, "turn", v, sizeof v) == ESP_OK)
+        motion_turn(atoi(v));
+    float raw[3], up[3], ang, R[9];
+    bool cal;
+    motion_get(raw, up, &ang, &cal, R);
+    char out[360];
+    snprintf(out, sizeof out, "{\"raw\":[%.3f,%.3f,%.3f],\"up\":[%.3f,%.3f,%.3f],\"angle\":%.0f,\"calibrated\":%s,"
+             "\"R\":[%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f]}\n",
+             raw[0], raw[1], raw[2], up[0], up[1], up[2], ang, cal ? "true" : "false",
+             R[0], R[1], R[2], R[3], R[4], R[5], R[6], R[7], R[8]);
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, out);
+}
+
 void remote_log_register(httpd_handle_t server)
 {
     const httpd_uri_t a = {.uri = "/log", .method = HTTP_GET, .handler = get_log};
     const httpd_uri_t b = {.uri = "/spotify/cmd", .method = HTTP_POST, .handler = post_cmd};
     const httpd_uri_t c = {.uri = "/battery", .method = HTTP_GET, .handler = get_battery};
+    const httpd_uri_t d = {.uri = "/motion", .method = HTTP_GET, .handler = get_motion};
     httpd_register_uri_handler(server, &a);
     httpd_register_uri_handler(server, &b);
     httpd_register_uri_handler(server, &c);
+    httpd_register_uri_handler(server, &d);
 }

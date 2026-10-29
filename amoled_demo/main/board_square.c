@@ -215,15 +215,21 @@ static bool copied(async_memcpy_handle_t m, async_memcpy_event_t *e, void *arg)
     return hp == pdTRUE;
 }
 
+void sq_copy(uint16_t *dst, uint16_t *px, int bytes, SemaphoreHandle_t done)
+{
+    copy_t *c = &copies[copy_next];
+    copy_next = (copy_next + 1) % 4;
+    *c = (copy_t){dst, bytes, done};
+    if (mcp && esp_async_memcpy(mcp, dst, px, bytes, copied, c) == ESP_OK) return;
+    memcpy(dst, px, bytes);
+    esp_cache_msync(dst, bytes, ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
+    xSemaphoreGive(done);
+}
+
 void sq_draw(int x0, int y0, int x1, int y1, uint16_t *px, SemaphoreHandle_t done)
 {
     int w = x1 - x0;
-    if (mcp && w == 480) {
-        copy_t *c = &copies[copy_next];
-        copy_next = (copy_next + 1) % 4;
-        *c = (copy_t){fb + y0 * 480, w * (y1 - y0) * 2, done};
-        if (esp_async_memcpy(mcp, c->dst, px, c->bytes, copied, c) == ESP_OK) return;
-    }
+    if (mcp && w == 480) { sq_copy(fb + y0 * 480, px, w * (y1 - y0) * 2, done); return; }
     for (int y = y0; y < y1; y++, px += w) memcpy(fb + y * 480 + x0, px, w * 2);   // (part of a row: by hand)
     esp_cache_msync(fb + y0 * 480, (y1 - y0) * 480 * 2, ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
     xSemaphoreGive(done);

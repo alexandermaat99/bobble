@@ -19,6 +19,8 @@ void sq_display_init(void);             // panel reset and setup, frame buffer, 
 // Put rows y0..y1 (columns x0..x1, rows packed) of big-endian RGB565 into the frame buffer; `done` is given once px
 // is free again, which may be after this returns
 void sq_draw(int x0, int y0, int x1, int y1, uint16_t *px, SemaphoreHandle_t done);
+// The same DMA copy into any PSRAM buffer (dst and bytes on 64-byte cache lines): `done` once it has landed
+void sq_copy(uint16_t *dst, uint16_t *px, int bytes, SemaphoreHandle_t done);
 void sq_backlight(int level);           // 0 (off) .. 255
 void sq_touch_init(void);
 bool sq_touch_read(int *x, int *y);     // a finger is down (screen pixels)
