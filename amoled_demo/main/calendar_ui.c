@@ -315,7 +315,7 @@ static int agenda_rows(int *types, int *idx, int max)
 }
 
 // Agenda layout (rows and their heights), worked out once per data refresh rather than per strip
-EXT_RAM_BSS_ATTR static int ag_types[MAX_ITEMS * 2], ag_idx[MAX_ITEMS * 2], ag_h[MAX_ITEMS * 2];
+static int ag_types[MAX_ITEMS * 2], ag_idx[MAX_ITEMS * 2], ag_h[MAX_ITEMS * 2];   // (every frame: internal RAM)
 static int ag_n, ag_total;
 static uint32_t ag_ver = 0xFFFFFFFF;
 static uint32_t data_version;              // bumped whenever items/reminders are re-read

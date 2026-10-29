@@ -41,7 +41,7 @@ typedef struct { char id[40], qid[24]; int choice; } answer_t;
 EXT_RAM_BSS_ATTR static answer_t answers[ANSWERS_MAX];
 static int n_answers;
 
-EXT_RAM_BSS_ATTR static sess_t sess[MAX_SESS];
+static sess_t sess[MAX_SESS];   // (read every frame by the eyes and the crowd: internal RAM)
 static uint32_t attention, activity;
 static char pinned[40];                       // the session picked with a tap, until pin_until
 static int64_t pin_until;

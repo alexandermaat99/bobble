@@ -37,7 +37,7 @@ static uint16_t *art[2];              // double buffer: screen reads one while t
 static int art_cur = -1;
 static uint32_t art_version;
 
-typedef struct { int cmd; char arg[96]; } sp_cmd_t;
+typedef struct { int cmd; char arg[96]; int64_t at; } sp_cmd_t;   // at: when it was asked for
 #define MAX_PL 51
 #define MAX_DEV 10
 EXT_RAM_BSS_ATTR static sp_playlist_t playlists[MAX_PL];
@@ -73,7 +73,7 @@ const uint16_t *spotify_art(uint32_t *version)
 void spotify_command_arg(int cmd, const char *arg)
 {
     if (!cmds) return;
-    sp_cmd_t c = {.cmd = cmd};
+    sp_cmd_t c = {.cmd = cmd, .at = esp_timer_get_time()};
     if (arg) strlcpy(c.arg, arg, sizeof c.arg);
     xQueueSend(cmds, &c, 0);
 }
@@ -411,6 +411,8 @@ static bool art_wanted(const char *url)
     return url && strcmp(url, art_url) && (strcmp(url, art_failed) || esp_timer_get_time() - art_failed_at > 15000000);
 }
 
+static int img_get(const char *url);
+
 static void load_art(const char *url)
 {
     for (int i = 0; i < 2; i++)
@@ -421,7 +423,8 @@ static void load_art(const char *url)
     bool preloaded = pre_len > 0 && !strcmp(url, pre_url);
     int len;
     if (preloaded) memcpy(jpg, pre_jpg, len = pre_len);
-    else len = download(url, jpg, JPG_CAP, false);
+    else len = img_get(url);                          // (over the kept-open connection the Library's covers use:
+                                                      // a new one's handshake cost seconds on a slow link)
     if (len < 100) { art_fail(url, "download failed"); return; }
 
     int64_t t1 = esp_timer_get_time();
@@ -574,21 +577,22 @@ static body_t img_body;
 
 static int img_get(const char *url)
 {
-    img_body = (body_t){(char *)jpg, 0, JPG_CAP};
-    if (!img_http) {
-        esp_http_client_config_t cfg = {
-            .url = url, .crt_bundle_attach = esp_crt_bundle_attach, .timeout_ms = 8000,
-            .keep_alive_enable = true, .event_handler = on_http, .user_data = &img_body, .buffer_size = 4096,
-        };
-        if (!(img_http = esp_http_client_init(&cfg))) return -1;
-    }
-    esp_http_client_set_url(img_http, url);
-    if (esp_http_client_perform(img_http) != ESP_OK) {
+    for (int attempt = 0; attempt < 2; attempt++) {   // (a kept connection the server has since closed: once more, new)
+        img_body = (body_t){(char *)jpg, 0, JPG_CAP};
+        if (!img_http) {
+            esp_http_client_config_t cfg = {
+                .url = url, .crt_bundle_attach = esp_crt_bundle_attach, .timeout_ms = 8000,
+                .keep_alive_enable = true, .event_handler = on_http, .user_data = &img_body, .buffer_size = 4096,
+            };
+            if (!(img_http = esp_http_client_init(&cfg))) return -1;
+        }
+        esp_http_client_set_url(img_http, url);
+        if (esp_http_client_perform(img_http) == ESP_OK)
+            return esp_http_client_get_status_code(img_http) == 200 ? img_body.len : -1;
         esp_http_client_cleanup(img_http);
         img_http = NULL;
-        return -1;
     }
-    return esp_http_client_get_status_code(img_http) == 200 ? img_body.len : -1;
+    return -1;
 }
 
 // Decode jpg (len bytes) and shrink its middle square to SP_THUMB px into out, averaging the pixels each one covers
@@ -1163,7 +1167,11 @@ static void sp_task(void *arg)
         if (got && c.cmd != SP_POLL) {
             char before[96];
             strlcpy(before, st.title, sizeof before);
+            int64_t t0 = esp_timer_get_time();
             run_command(c.cmd, c.arg);
+            if (c.cmd != SP_LOAD_LIBRARY && c.cmd != SP_LOAD_EPISODES)   // (how long a tap waited, then took: for the log)
+                ESP_LOGI(TAG, "command %d: waited %d ms, took %d ms", c.cmd, (int)((t0 - c.at) / 1000),
+                         (int)((esp_timer_get_time() - t0) / 1000));
             vTaskDelay(pdMS_TO_TICKS(250));            // give Spotify a moment before re-reading
             if (c.cmd == SP_NEXT || c.cmd == SP_PREV || c.cmd == SP_PLAY_CONTEXT)
                 for (int i = 0; i < 8 && !strcmp(before, st.title); i++) {   // Spotify takes a moment to switch songs:

@@ -1031,14 +1031,16 @@ static bool agent_calls(void)
     agent_seen = ag.activity;
     return call;
 }
-// On USB the radio stays fully awake so agent updates land at once (modem sleep adds up to ~1 s per packet and
-// drops some); on battery it naps between beacons as usual. Re-applied every few seconds (the radio can restart).
+// The radio stays fully awake on USB, and on battery while the screen's on (modem sleep adds up to ~1 s to every
+// packet: a skip, which is a few HTTPS requests in a row, took seconds, and so did its cover); it naps between beacons
+// only while the screen sleeps on battery. Checked every second (the radio can restart), set only when it changes.
 static void wifi_power_update(int64_t now)
 {
     static int64_t last;
-    if (now - last < 5000000) return;
+    if (now - last < 1000000) return;
     last = now;
-    esp_wifi_set_ps(battery_charging() ? WIFI_PS_NONE : WIFI_PS_MIN_MODEM);
+    wifi_ps_type_t want = battery_charging() || power != PW_ASLEEP ? WIFI_PS_NONE : WIFI_PS_MIN_MODEM, cur;
+    if (esp_wifi_get_ps(&cur) != ESP_OK || cur != want) esp_wifi_set_ps(want);
 }
 static bool locked, auto_locked;   // auto_locked: by the 2-hour timer (a meeting may still wake it), not by hand
 
@@ -1110,9 +1112,13 @@ static void brightness_load(void)
 }
 
 // Picked up / moved: the reading drifts away from where it has been resting
+static int64_t still_until;   // (a press of the PWR button nudges the board: don't take that for being picked up)
+static bool slept_by_hand;    // the PWR button put it to sleep: the "stay on" reasons don't count till it's woken
+
 static bool board_moved(void)
 {
     float d = fabsf(acc_x - rest[0]) + fabsf(acc_y - rest[1]) + fabsf(acc_z - rest[2]);
+    if (esp_timer_get_time() < still_until) { memcpy(rest, (float[3]){acc_x, acc_y, acc_z}, sizeof rest); return false; }
     rest[0] += (acc_x - rest[0]) * 0.03f;
     rest[1] += (acc_y - rest[1]) * 0.03f;
     rest[2] += (acc_z - rest[2]) * 0.03f;
@@ -1123,6 +1129,7 @@ static bool board_moved(void)
 // Awake: flat out at 240 MHz for smooth animation. Screen off: the processor naps between checks (Wi-Fi stays
 // joined in its low-power mode) and the display chip sleeps. Locked: the radio and motion sensor go off too.
 static bool hw_locked;
+static bool touch_off;        // the touch chip's asleep (locked by the PWR button)
 
 static void panel_cmd(uint8_t cmd)
 {
@@ -1148,6 +1155,9 @@ static void power_screen_off(void)
         hw_locked = true;
         wifi_suspend(true);
         imu_power(false);
+#if SQUARE_HW
+        if (slept_by_hand) { sq_touch_sleep(true); touch_off = true; }   // (the button: only it wakes the board)
+#endif
     }
 }
 
@@ -1159,6 +1169,9 @@ static void power_screen_on(void)
         hw_locked = false;
         imu_power(true);
         wifi_suspend(false);
+#if SQUARE_HW
+        if (touch_off) { sq_touch_sleep(false); touch_off = false; }
+#endif
     }
     panel_cmd(0x11);                                   // sleep out: the chip wants a moment before showing anything
     vTaskDelay(pdMS_TO_TICKS(80));
@@ -1612,6 +1625,30 @@ void app_main(void)
         // BOOT: short press opens/closes Wi-Fi, hold 3 s to recalibrate the touch screen
         int boot = gpio_get_level(PIN_BOOT);
         bool boot_press = !boot && boot_prev;
+        // PWR (the square): a short press puts the screen to sleep, or wakes it (unlocking too), like a phone's side
+        // button. Holding it ~6 s still cuts the power (the power chip does that by itself).
+        bool pwr_press = false;
+#if SQUARE_HW
+        static int64_t pwr_at;
+        if (now - pwr_at > 100000) {
+            pwr_at = now;
+            pwr_press = sq_power_key() == 1;
+            if (pwr_press) { still_until = now + 3000000; ESP_LOGI(TAG, "power button: %s", power == PW_ASLEEP ? "wake" : "sleep"); }
+        }
+        if (pwr_press && power == PW_FADING_OUT) {     // pressed again while it fades: back on
+            power = PW_FADING_IN;
+            if (slept_by_hand) set_locked(false);
+            slept_by_hand = false;
+            last_use = now;
+            pwr_press = false;
+        }
+        if (pwr_press && power != PW_ASLEEP && !calibrating && !tilt_step) {   // awake: fade out now, and stay off (a
+            power = PW_FADING_OUT;                                             // message up, a chat waiting: those keep
+            slept_by_hand = true;                                              // it on otherwise) till something wakes it
+            set_locked(true);   // (for travel: Wi-Fi, the motion sensor and the touch screen off; only the button wakes it)
+            pwr_press = false;
+        }
+#endif
 
         // asleep: screen off, just watch for a touch, BOOT, or the board being picked up
         if (power == PW_ASLEEP) {
@@ -1635,7 +1672,8 @@ void app_main(void)
                          battery_charging() ? ", charging" : "");
             }
             int rx, ry;
-            bool touch = read_touch_raw(&rx, &ry), moved = board_moved();
+            bool touch = read_touch_raw(&rx, &ry), moved = board_moved() && !slept_by_hand;   // (put to sleep by the
+                                                                                          // button: not by being handled)
             boot_prev = boot;
             bool updating = ota_progress() >= 0;
             // a meeting about to start: the screen comes on by itself (once per meeting), unless locked by hand
@@ -1651,6 +1689,7 @@ void app_main(void)
             if (meeting && locked) set_locked(false);
             bool agent = !locked && (agent_calls() || agent_pairing(NULL));   // a message from Claude, or a pairing code: show it
             meeting = meeting || agent;
+            if (locked && pwr_press) { set_locked(false); moved = false; }   // (the button's a deliberate press: unlocks)
             if (locked && !updating) {                 // locked: only a finger held on the glass for 3 s
                 static int64_t hold_from, seen_at;
                 if (touch) {
@@ -1661,9 +1700,10 @@ void app_main(void)
                 hold_from = 0;
                 moved = false;
                 set_locked(false);
-            } else if (!touch && !moved && !boot_press && !updating && !meeting) { vTaskDelay(pdMS_TO_TICKS(50)); continue; }
+            } else if (!touch && !moved && !boot_press && !pwr_press && !updating && !meeting) { vTaskDelay(pdMS_TO_TICKS(50)); continue; }
             asleep_from = 0;
-            ESP_LOGI(TAG, "wake (%s)", agent ? "agent" : meeting ? "meeting" : touch ? (hw_locked ? "unlocked" : "touch") : moved ? "picked up" : updating ? "update" : "button");
+            slept_by_hand = false;
+            ESP_LOGI(TAG, "wake (%s)", agent ? "agent" : meeting ? "meeting" : touch ? (hw_locked ? "unlocked" : "touch") : moved ? "picked up" : updating ? "update" : pwr_press ? "power button" : "button");
             if (page != PAGE_PET && SCREEN_ROUND) { page = PAGE_PET; page_auto = false; cal_ui_enter(); }   // wakes to the eyes (home)
             // (the square wakes where it was left: it shouldn't pull you off a page you chose)
             power_screen_on();
@@ -1733,7 +1773,7 @@ void app_main(void)
         bool moved = board_moved();
         if (!locked && (down || boot_press || moved || swallow_touch)) {   // (locking: nothing stops the fade)
             last_use = now;
-            if (power == PW_FADING_OUT) power = PW_FADING_IN;
+            if (power == PW_FADING_OUT) { power = PW_FADING_IN; slept_by_hand = false; }
         }
         // from 3 minutes before a meeting to 2 minutes in: stay on, and show the eyes if the board isn't in use
         static time_t mt_shown;
@@ -1744,24 +1784,24 @@ void app_main(void)
             }
             mt_shown = mt;
             last_use = now;
-            if (power == PW_FADING_OUT) power = PW_FADING_IN;
+            if (power == PW_FADING_OUT && !slept_by_hand) power = PW_FADING_IN;   // (not after the PWR button)
         }
         // a message from the agent: the screen stays on for it (a minute from the last one, like a touch), and the
         // eyes come up if the board isn't in use; while it waits for you, stay on (up to 10 min)
         if (!locked && (agent_pairing(NULL) || agent_just_paired())) {   // pairing: the code's on the eyes page; stay on
             if (page != PAGE_PET && sheet <= 0 && !pg_drag && pg_off == 0 && !card_drag) { page = PAGE_PET; page_auto = false; force_redraw = true; }
             last_use = now;
-            if (power == PW_FADING_OUT) power = PW_FADING_IN;
+            if (power == PW_FADING_OUT && !slept_by_hand) power = PW_FADING_IN;   // (not after the PWR button)
         }
         chat_status_t cst;
         chat_get(&cst);
         if (!locked && cst.active) {                   // talking with Claude: stay on
             last_use = now;
-            if (power == PW_FADING_OUT) power = PW_FADING_IN;
+            if (power == PW_FADING_OUT && !slept_by_hand) power = PW_FADING_IN;   // (not after the PWR button)
         }
         if (!locked && page == PAGE_PET && pet_ui_bubble_open()) {   // a message is up on the eyes: don't sleep under it
             last_use = now;
-            if (power == PW_FADING_OUT) power = PW_FADING_IN;
+            if (power == PW_FADING_OUT && !slept_by_hand) power = PW_FADING_IN;   // (not after the PWR button)
         }
         // first run: no Wi-Fi yet (nothing saved, or none after 20 s), then no Mac yet: the eyes say what's next
         bool offline = wifi_state() == WS_PORTAL || (wifi_state() != WS_CONNECTED && now > 20000000);
@@ -1772,14 +1812,14 @@ void app_main(void)
                 page = PAGE_PET; page_auto = false; force_redraw = true;
             }
             last_use = now;
-            if (power == PW_FADING_OUT) power = PW_FADING_IN;
+            if (power == PW_FADING_OUT && !slept_by_hand) power = PW_FADING_IN;   // (not after the PWR button)
         }
         {
             agent_status_t ag;
             agent_get(&ag);
             if (!locked && ag.state == AG_WAITING && now - ag.since < 600000000) {
                 last_use = now;
-                if (power == PW_FADING_OUT) power = PW_FADING_IN;
+                if (power == PW_FADING_OUT && !slept_by_hand) power = PW_FADING_IN;   // (not after the PWR button)
             }
         }
         if (power == PW_AWAKE && now - last_use > SLEEP_AFTER_US && !card_drag) power = PW_FADING_OUT;
@@ -1838,6 +1878,11 @@ void app_main(void)
         // swipe left/right between pages: once a drag is clearly sideways, the page lets go of the finger
         // (so no button underneath gets pressed) and follows it, with the neighbour sliding in
         if (down && !was_down) { sw_x0 = tx; sw_y0 = ty; }
+        if (down && !was_down && tx >= 0 && !pg_drag && pg_off != 0 && sheet <= 0 && target < 0 && !card_drag) {
+            pg_drag = true;                            // a finger on a page still settling: catch it where it is (a
+            sw_x0 = tx + (int)lroundf(pg_off);         // swipe made then used to be ignored till it came to rest)
+            pg_vel = 0;
+        }
         if (page_has_touch && down && tx >= 0 && !pg_drag) {
             int dx = tx - sw_x0, dy = ty - sw_y0;
             if (abs(dx) > 16 && abs(dx) * 2 > abs(dy) * 3) {
