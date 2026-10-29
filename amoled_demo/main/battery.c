@@ -426,7 +426,8 @@ bool battery_charging_now(const battery_diag_t *d) { return d->chip ? d->dir == 
 
 const char *battery_stage_text(int stage)
 {
-    static const char *s[] = {"Trickle", "Pre-charge", "Constant current", "Constant voltage", "Done", "Stopped"};
+    static const char *s[] = {"Trickle", "Pre-charge", "Fast", "Topping up", "Full", "Not charging"};   // (the last
+                                                                  // three: constant current, constant voltage, done)
     return stage >= 0 && stage < 6 ? s[stage] : "-";
 }
 

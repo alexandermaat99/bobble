@@ -883,60 +883,70 @@ static void volts_text(char *out, size_t cap, int mv)
     else snprintf(out, cap, "%d.%02d V", mv / 1000, (mv % 1000) / 10);
 }
 
-// Battery: what the charger says (the square's power chip), row by row, then which board this is and what it runs
+// The firmware's version, short: "build-2610282329-4-gf259f2c-dirty" (git describe) is "f259f2c, modified"
+static void version_text(char *out, size_t cap)
+{
+    const char *v = esp_app_get_description()->version, *g = strstr(v, "-g");
+    if (!g) { strlcpy(out, v, cap); return; }
+    int n = strcspn(g + 2, "-");
+    snprintf(out, cap, "%.*s%s", n, g + 2, strstr(g, "-dirty") ? ", modified" : "");
+}
+
+// a group of label / value rows, the value on the right in grey
+static void rows(uint16_t *buf, int y0, int h, int top, int rh, int n, const char *const *lab, char (*val)[32])
+{
+    aa_rrect(buf, y0, h, ROW_X0, top, ROW_X1, top + n * rh, 14, SQ_GROUP);
+    for (int i = 0; i < n; i++) {
+        int t = top + i * rh, my = t + rh / 2;
+        if (t + rh <= y0 || t >= y0 + h) continue;
+        if (i) fill_rect(buf, y0, h, 32, t, ROW_X1, t + 1, SQ_SEP);
+        draw_ftext(buf, y0, h, 32, my - font_label.line_h / 2, &font_label, lab[i], C_WHITE);
+        int room = ROW_X1 - 16 - 200, vw = ftext_width(&font_label, val[i]);
+        vw = vw < room ? vw : room;
+        draw_fit(buf, y0, h, ROW_X1 - 16 - vw, my - font_label.line_h / 2, &font_label, val[i], room, SQ_TEXT2);
+    }
+}
+
+// Battery: what the charger's doing (the square's power chip), then which board this is and what it runs
 static void draw_battery(uint16_t *buf, int y0, int h)
 {
     nav(buf, y0, h, &battery_buttons[0], "Battery");
     battery_diag_t d;
     battery_diag(&d);
     ftext_mid(buf, y0, h, CX, 106, &font_body, battery_state_text(&d), battery_charging_now(&d) ? CC_GREEN : C_WHITE);
-    char head[64] = "";
-    int pct = battery_percent();
-    if (pct >= 0 && d.gauge_pct >= 0) snprintf(head, sizeof head, "%d%% shown, %d%% by the power chip", pct, d.gauge_pct);
-    else if (pct >= 0) snprintf(head, sizeof head, "%d%%", pct);
-    ftext_mid(buf, y0, h, CX, 137, &font_small, head, SQ_TEXT2);
+    char head[16] = "";
+    if (battery_percent() >= 0) snprintf(head, sizeof head, "%d%%", battery_percent());
+    ftext_mid(buf, y0, h, CX, 136, &font_label, head, SQ_TEXT2);
 
-    static const char *lab[8] = {"Battery", "Charging", "USB power", "System", "Charge current", "Charges to",
-                                 "USB input limit", "Chip temperature"};
-    char v[8][32];
+    static const char *lab[6] = {"Battery", "Charging", "USB power", "Charge current", "Charges to", "Chip temperature"};
+    char v[6][32];
     volts_text(v[0], sizeof v[0], d.vbat_mv);
-    strlcpy(v[1], !d.chip ? "-" : !d.charge_on ? "Switched off" : battery_stage_text(d.stage), sizeof v[1]);
+    strlcpy(v[1], !d.chip ? "-" : !d.usb ? "Not plugged in" : !d.charge_on ? "Switched off" : battery_stage_text(d.stage),
+            sizeof v[1]);
     if (d.usb && d.vbus_mv >= 0) volts_text(v[2], sizeof v[2], d.vbus_mv);
     else strlcpy(v[2], d.usb ? "Connected" : "Not connected", sizeof v[2]);
-    volts_text(v[3], sizeof v[3], d.vsys_mv);
-    if (d.charge_ma >= 0) snprintf(v[4], sizeof v[4], "%d mA", d.charge_ma); else strlcpy(v[4], "-", sizeof v[4]);
-    volts_text(v[5], sizeof v[5], d.full_mv);
-    if (d.in_limit_ma >= 0) snprintf(v[6], sizeof v[6], "%d mA", d.in_limit_ma); else strlcpy(v[6], "-", sizeof v[6]);
-    if (d.chip) snprintf(v[7], sizeof v[7], "%d  C", (int)lroundf(d.chip_c)); else strlcpy(v[7], "-", sizeof v[7]);
-    const int gt = 154, rh = 31, n = 8;               // the numbers, in a group
-    aa_rrect(buf, y0, h, ROW_X0, gt, ROW_X1, gt + n * rh, 14, SQ_GROUP);
-    for (int i = 0; i < n; i++) {
-        int top = gt + i * rh, my = top + rh / 2;
-        if (top + rh <= y0 || top >= y0 + h) continue;
-        if (i) fill_rect(buf, y0, h, 32, top, ROW_X1, top + 1, SQ_SEP);
-        draw_ftext(buf, y0, h, 32, my - font_label.line_h / 2, &font_label, lab[i], C_WHITE);
-        int vw = ftext_width(&font_label, v[i]), vx = ROW_X1 - 16 - vw;
-        draw_ftext(buf, y0, h, vx, my - font_label.line_h / 2, &font_label, v[i], SQ_TEXT2);
-        if (i == 7 && d.chip) {                       // (the font has no degree sign: a small ring before the C)
-            float dx = vx + vw - ftext_width(&font_label, "C") - 4.5f;
-            aa_disc(buf, y0, h, dx, my - 5, 2.6f, SQ_TEXT2);
-            aa_disc(buf, y0, h, dx, my - 5, 1.2f, SQ_GROUP);
-        }
+    if (d.charge_ma >= 0) snprintf(v[3], sizeof v[3], "%d mA", d.charge_ma); else strlcpy(v[3], "-", sizeof v[3]);
+    volts_text(v[4], sizeof v[4], d.full_mv);
+    if (d.chip) snprintf(v[5], sizeof v[5], "%d  C", (int)lroundf(d.chip_c)); else strlcpy(v[5], "-", sizeof v[5]);
+    const int rh = 30, g1 = 158, g2 = g1 + 6 * rh + 14;
+    rows(buf, y0, h, g1, rh, 6, lab, v);
+    if (d.chip && g1 + 5 * rh + rh / 2 + 8 > y0 && g1 + 5 * rh < y0 + h) {   // (the font has no degree sign: a ring)
+        int my = g1 + 5 * rh + rh / 2;
+        float dx = ROW_X1 - 16 - ftext_width(&font_label, "C") - 4.5f;
+        aa_disc(buf, y0, h, dx, my - 5, 2.6f, SQ_TEXT2);
+        aa_disc(buf, y0, h, dx, my - 5, 1.2f, SQ_GROUP);
     }
-    // the chip's own words, for anyone chasing a charging problem; then the board and its firmware
-    char raw[64], fw[96];
-    if (d.chip) snprintf(raw, sizeof raw, "status %02x %02x   TS %02x   irq %02x %02x %02x", d.st1, d.st2, d.ts,
-                         d.irq[0], d.irq[1], d.irq[2]);
-    else strlcpy(raw, "No power chip on this board", sizeof raw);
-    ftext_mid(buf, y0, h, CX, gt + n * rh + 16, &font_small, raw, rgb(100, 100, 108));
+
+    static const char *about[3] = {"Name", "Firmware", "Built"};
+    char a[3][32];
+    strlcpy(a[0], agent_device_name(), sizeof a[0]);
 #if defined(BOBBLE_BUILD) && BOBBLE_BUILD
-    snprintf(fw, sizeof fw, "%s   Firmware %s   Build %lld", agent_device_name(), esp_app_get_description()->version,
-             (long long)BOBBLE_BUILD);
+    snprintf(a[1], sizeof a[1], "Build %lld", (long long)BOBBLE_BUILD);
 #else
-    snprintf(fw, sizeof fw, "%s   Firmware %s   Built %s", agent_device_name(), esp_app_get_description()->version,
-             ota_build_time());
+    version_text(a[1], sizeof a[1]);
 #endif
-    ftext_mid(buf, y0, h, CX, gt + n * rh + 38, &font_small, fw, CC_TEXT2);
+    strlcpy(a[2], ota_build_time(), sizeof a[2]);
+    rows(buf, y0, h, g2, rh, 3, about, a);
 }
 
 static void draw_reset(uint16_t *buf, int y0, int h)
