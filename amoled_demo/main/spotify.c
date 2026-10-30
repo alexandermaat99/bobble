@@ -120,7 +120,7 @@ static bool lib_seen;                                 // the Library's been open
 void spotify_set_library_visible(bool v) { lib_visible = v; if (v) lib_seen = true; }
 bool spotify_library_visible(void) { return lib_visible; }
 
-// Screen off: check every 30 s instead of every 1-5 s. On waking, check straight away.
+// Screen off: check less often (see asleep_wait_ms). On waking, check straight away.
 void spotify_set_awake(bool on)
 {
     if (on && !awake) spotify_command_arg(SP_POLL, NULL);
@@ -1154,6 +1154,20 @@ static void poll_player(void)
     }
 }
 
+// Screen off, how long till the next look: playing, just after the song should end (its cover then loads while the
+// screen's off, ready when it wakes: checking every 3 minutes, the song had usually changed by then and the cover
+// started loading only on waking), and at least once a minute (a song skipped on the phone); otherwise every 3 minutes
+static int asleep_wait_ms(void)
+{
+    xSemaphoreTake(lock, portMAX_DELAY);
+    bool playing = st.active && st.playing && st.duration_ms > 0;
+    int64_t left = playing ? st.duration_ms - st.progress_ms - (esp_timer_get_time() - st.fetched_us) / 1000 : 0;
+    xSemaphoreGive(lock);
+    if (!playing) return 180000;
+    left += 2000;                                     // (Spotify takes a moment to move on)
+    return left < 3000 ? 3000 : left > 60000 ? 60000 : (int)left;
+}
+
 static void sp_task(void *arg)
 {
     resp.cap = 192 * 1024;                            // a page of 50 playlists is ~100 KB of JSON
@@ -1161,7 +1175,7 @@ static void sp_task(void *arg)
     for (;;) {
         sp_cmd_t c;
         static bool preloading;                       // (the start-up covers, below: on till they're in)
-        int wait_ms = preloading ? 2000 : !awake ? 180000 : fast || lib_visible ? 1000 : 5000;   // screen off: every 3 minutes
+        int wait_ms = preloading ? 2000 : !awake ? asleep_wait_ms() : fast || lib_visible ? 1000 : 5000;
         bool got = xQueueReceive(cmds, &c, pdMS_TO_TICKS(wait_ms)) == pdTRUE;
         if (!st.configured || wifi_state() != WS_CONNECTED || !wifi_time_synced()) continue;
         if (got && c.cmd != SP_POLL) {

@@ -1447,6 +1447,7 @@ static void send_strip(uint16_t *buf, int y0, int h)
 }
 
 static int why_lib, why_music, why_slide, why_rot;   // redraw reasons, for the status log
+static int why_force, why_touch, why_card, why_cal, why_ota, why_timer, why_pet;
 static bool quick_frame;   // an animation is playing: turn the picture with the quick lookup (the next still frame smooths it)
 static bool frame_valid;   // `frame` holds the current content (false after drawing straight to the glass)
 // Only this part of the content changed (the pet's eyes): redraw just the strips it touches. Off = whole screen.
@@ -2068,6 +2069,13 @@ void app_main(void)
             if (music_dirty) why_music++;
             if (pg_off != 0 || pg_drag) why_slide++;
             if (ang != last_ang) why_rot++;
+            if (force_redraw) why_force++;
+            if ((down || prev_down) && page != PAGE_PET) why_touch++;
+            if (card_drag || target >= 0 || sheet > 0) why_card++;
+            if (cal_ui_animating()) why_cal++;
+            if (ota_progress() >= 0) why_ota++;
+            if (now - last_full >= full_every) why_timer++;
+            if (pet_dirty) why_pet++;
         }
         prev_down = down;
         force_redraw = false;
@@ -2083,8 +2091,10 @@ void app_main(void)
         }
 
         if (now - log_t > 5000000) {
-            ESP_LOGI(TAG, "page %d: redraws lib %d music %d slide %d rot %d, pg_off %d", page, why_lib, why_music, why_slide, why_rot, (int)pg_off);
-            why_lib = why_music = why_slide = why_rot = 0;
+            ESP_LOGI(TAG, "page %d: redraws lib %d music %d pet %d slide %d rot %d force %d touch %d card %d cal %d ota %d timer %d, "
+                     "pg_off %d", page, why_lib, why_music, why_pet, why_slide, why_rot, why_force, why_touch, why_card, why_cal,
+                     why_ota, why_timer, (int)pg_off);
+            why_lib = why_music = why_pet = why_slide = why_rot = why_force = why_touch = why_card = why_cal = why_ota = why_timer = 0;
             ESP_LOGI(TAG, "%s %d frames/s, angle %d, battery %.2f V (%d%%%s, curve from %d runs%s), free internal %u, psram %u KB (largest %u KB), calendar: %s", sheet >= H ? "wifi" : "calendar",
                      frames / 5, (int)ang, battery_volts(), battery_percent(), battery_charging() ? ", charging" : "", battery_learned_runs(), battery_logging() ? ", logging" : "", (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
                      (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024), (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM) / 1024),

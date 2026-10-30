@@ -894,9 +894,17 @@ bool pet_ui_wants_wifi(void)
 
 bool pet_ui_dirty(void)
 {
-    bool d = dirty;
+    if (!dirty) return false;
+#if !SCREEN_ROUND
+    // The crowd is the whole page each time, and turned onto the glass that's every row: at 20+ a second the panel's
+    // scan-out out of PSRAM fell behind (broken rows). Its poses change 3-7 times a second: 10 frames is plenty.
+    static int64_t last;
+    int64_t now = esp_timer_get_time();
+    if (crowd_on && now - last < 100000) return false;   // (stays dirty: it goes out next time)
+    last = now;
+#endif
     dirty = false;
-    return d;
+    return true;
 }
 
 bool pet_ui_take_rect(int *x0, int *y0, int *x1, int *y1)
