@@ -12,6 +12,7 @@
 #include "nvs.h"
 #include "driver/usb_serial_jtag.h"
 #include "battery.h"
+#include "audio.h"
 #include "board_square.h"
 #include "esp_attr.h"
 #include "esp_heap_caps.h"
@@ -356,6 +357,11 @@ void battery_update(void)
     volts = volts < 2.5f ? v : volts * 0.9f + v * 0.1f;  // smooth out ADC noise
     bool usb = plugged_in();
     if (have_usb_prev && usb != usb_prev) { usb_edge_at = now; usb_edge_v = before; }   // plugged in / unplugged
+    static int64_t chimed_at;
+    if (have_usb_prev && usb && !usb_prev && (!chimed_at || now - chimed_at > 3000000)) {   // plugged in: a chime (once,
+        chimed_at = now;                                                                     // if the plug jitters)
+        audio_chime();
+    }
     if (!usb && (usb_prev || !have_usb_prev)) unplugged_at = now;
     usb_prev = usb;
     have_usb_prev = true;
