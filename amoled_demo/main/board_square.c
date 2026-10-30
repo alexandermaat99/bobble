@@ -183,7 +183,10 @@ static void display_init_here(void)
     esp_lcd_rgb_panel_config_t rc = {
         .clk_src = LCD_CLK_SRC_DEFAULT,
         .timings = {
-            .pclk_hz = 16 * 1000 * 1000, .h_res = 480, .v_res = 480,
+            // 13 MHz: 49 frames a second (60 at 16 MHz). The panel reads its picture out of PSRAM all the time, and at 60
+            // that left too little room for drawing (broken rows while pages redraw); this is a fifth less, with a
+            // quarter longer for each bounce refill. (An LCD holds its picture: no flicker at 49.)
+            .pclk_hz = 13 * 1000 * 1000, .h_res = 480, .v_res = 480,
             .hsync_pulse_width = 10, .hsync_back_porch = 10, .hsync_front_porch = 20,
             .vsync_pulse_width = 10, .vsync_back_porch = 10, .vsync_front_porch = 10,
         },
