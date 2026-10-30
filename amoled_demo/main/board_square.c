@@ -212,9 +212,25 @@ static void display_init_here(void)
     if (esp_async_memcpy_install_gdma_ahb(&mc, &mcp) != ESP_OK) { mcp = NULL; ESP_LOGW(TAG, "no DMA copy: the CPU copies"); }
 }
 
-void sq_amp(bool on)
+// The amplifier's line, checked: the bus is busy with touch and the power chip, and a write that didn't land left the
+// speaker silent (the sound played into nothing). Read the output register back; try again if it isn't so.
+bool sq_amp(bool on)
 {
-    if (ex_dev) ex_set(EX_AMP, on);
+    if (!ex_dev) return false;
+    ex_out = on ? ex_out | EX_AMP : ex_out & ~EX_AMP;
+    for (int i = 0; i < 4; i++) {
+        uint8_t b[2] = {0x01, ex_out}, reg = 0x01, got = 0;
+        esp_err_t w = i2c_master_transmit(ex_dev, b, 2, 50);
+        esp_err_t r = i2c_master_transmit_receive(ex_dev, &reg, 1, &got, 1, 50);
+        if (w == ESP_OK && r == ESP_OK && !!(got & EX_AMP) == on) {
+            if (i) ESP_LOGW(TAG, "amp %s took %d tries", on ? "on" : "off", i + 1);
+            return true;
+        }
+        ESP_LOGW(TAG, "amp %s: try %d failed (write %s, read %s, line %d)", on ? "on" : "off", i + 1, esp_err_to_name(w),
+                 esp_err_to_name(r), !!(got & EX_AMP));
+        vTaskDelay(pdMS_TO_TICKS(5));
+    }
+    return false;
 }
 
 // DMA copies each strip into the frame in PSRAM while the next one is drawn (copying with the CPU stalled on every

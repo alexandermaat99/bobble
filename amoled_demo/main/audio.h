@@ -19,5 +19,6 @@ void audio_flush(void);                  // drop whatever's still queued (you ta
 int audio_queued_ms(void);               // how much is still to play
 void audio_set_speaker_mute(bool mute);  // keeps playing (silently), so replies stay in step
 void audio_click(void);                  // a short tick (Settings, letting go of the volume slider), chat or not
+void audio_chime(void);                  // the plugged-in sound: a soft octave drop, like the Mac's
 float audio_mic_level(void);             // 0..1: how loud the microphone is now (after echo cancelling)
 float audio_out_level(void);             // 0..1: how loud what's playing is now

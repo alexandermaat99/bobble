@@ -520,7 +520,7 @@ static void start_web(void)
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.stack_size = 6144;   // (in internal RAM: /ota maps flash to check the image, which freezes the cache: a PSRAM stack asserts)
     cfg.lru_purge_enable = true;
-    cfg.max_uri_handlers = 24;
+    cfg.max_uri_handlers = 28;
     if (httpd_start(&httpd, &cfg) != ESP_OK) return;
     const httpd_uri_t uris[] = {
         {.uri = "/", .method = HTTP_GET, .handler = page_get},

@@ -60,8 +60,18 @@ static int16_t *ring;
 static int ring_cap;                     // samples it holds: a few seconds of reply waiting to be played (the Mac keeps 2 s ahead)
 static volatile int ring_r, ring_n;      // read position, how many queued
 EXT_RAM_BSS_ATTR static int16_t click[AUDIO_RATE * 60 / 1000], quiet[AUDIO_RATE * 30 / 1000];
-static volatile bool click_wanted;       // audio_click() asked for one...
-static int click_at = -1;                // ...and how far into it a chat's frames have got (-1: not playing)
+EXT_RAM_BSS_ATTR static int16_t chime[AUDIO_RATE * 700 / 1000];
+static int chime_n;                      // samples in chime[]
+enum { SND_NONE, SND_CLICK, SND_CHIME };
+static volatile int snd_wanted;          // audio_click() / audio_chime() asked for one...
+static const int16_t *snd;               // ...what a chat's frames are mixing in,
+static int snd_n, snd_at = -1;           // how long it is, and how far they've got (-1: not playing)
+static const int16_t *snd_pcm(int k, int *n)
+{
+    if (k == SND_CHIME) { *n = chime_n; return chime; }
+    *n = sizeof click / sizeof click[0];
+    return click;
+}
 static bool out_only;                    // just the speaker is open, for ticks (no chat)
 static int vol_set = -1;                 // the volume the codec was last given
 
@@ -76,6 +86,39 @@ static void make_click(void)
         ph += 2 * (float)M_PI * f / AUDIO_RATE;
         click[i] = (int16_t)(14000 * env * sinf(ph));
     }
+}
+
+// ---- the plugged-in sound, "landing": built like the Mac's own (measured from connect_power.aif): pure tones, no noise
+// or clashing overtones (a small speaker makes those harsh), a soft swell rather than a strike, falling an octave so it
+// settles. An octave over the Mac's: this speaker gives next to nothing under ~800 Hz (sounds down there played in full
+// and weren't heard). C7 swells in and hands over to C6, which pulses twice and rings out.
+#define CHIME_S 0.70f
+
+static float smooth01(float x) { x = x < 0 ? 0 : x > 1 ? 1 : x; return x * x * (3 - 2 * x); }
+
+static void make_chime(void)
+{
+    int n = (int)(CHIME_S * AUDIO_RATE);
+    float ph[2] = {0}, peak = 0;
+    for (int pass = 0; pass < 2; pass++) {            // (the first finds the peak, the second scales to it)
+        ph[0] = ph[1] = 0;
+        for (int i = 0; i < n; i++) {
+            float t = (float)i / AUDIO_RATE;
+            ph[0] += 2 * (float)M_PI * 2093 / AUDIO_RATE;
+            ph[1] += 2 * (float)M_PI * 1047 / AUDIO_RATE;
+            float hi = t < 0.07f ? powf(t / 0.07f, 1.5f) : expf(-(t - 0.07f) / 0.07f);
+            float u = t - 0.065f, lo = 0;
+            if (u > 0) {
+                float second = u < 0.135f ? smooth01((u - 0.05f) / 0.085f) : expf(-(u - 0.135f) / 0.1f);
+                lo = (u < 0.01f ? u / 0.01f : 1) * (0.9f * expf(-u / 0.045f) + second);
+            }
+            float x = 0.8f * hi * sinf(ph[0]) + lo * sinf(ph[1]);
+            x *= t > CHIME_S - 0.03f ? (CHIME_S - t) / 0.03f : 1;   // (to silence by the end)
+            if (!pass) { if (fabsf(x) > peak) peak = fabsf(x); }
+            else chime[i] = (int16_t)(x * 22000 / peak);
+        }
+    }
+    chime_n = n;
 }
 
 // Give the codec the volume picked in Settings, if it's changed (0: silent)
@@ -218,10 +261,11 @@ static void ring_take(int16_t *out, int n)
     if (speaker_mute) memset(out, 0, n * sizeof(int16_t));
 }
 
-// A tick while no chat is open: just the speaker, on for it and off again once it's been quiet a while
+// A tick (or the plug-in sound) while no chat is open: just the speaker, on for it and off again once it's been quiet a while
 static void tick_alone(void)
 {
-    click_wanted = false;
+    int k = snd_wanted, n;
+    snd_wanted = SND_NONE;
     if (device_volume_get() <= 0) return;
     if (!out_only) {
         esp_codec_dev_sample_info_t fs = {.bits_per_sample = 16, .channel = 1, .sample_rate = AUDIO_RATE};
@@ -229,17 +273,18 @@ static void tick_alone(void)
         out_only = true;
         vol_set = -1;
         follow_volume();
-        sq_amp(true);
+        if (!sq_amp(true)) ESP_LOGE(TAG, "the amplifier didn't come on");
         for (int i = 0; i < WAKE_MS / 30; i++) esp_codec_dev_write(out_dev, quiet, sizeof quiet);   // (30 ms each)
     }
     follow_volume();
-    esp_codec_dev_write(out_dev, click, sizeof click);
+    const int16_t *pcm = snd_pcm(k, &n);
+    if (esp_codec_dev_write(out_dev, (void *)pcm, n * sizeof(int16_t)) != ESP_CODEC_DEV_OK) ESP_LOGE(TAG, "couldn't play a sound");
     esp_codec_dev_write(out_dev, quiet, sizeof quiet);       // (so the tick's tail isn't cut off when it closes)
 }
 
 // During a chat, the speaker has a task of its own: small pieces, one after another, so its buffer never runs dry
 // while the echo canceller works through a 32 ms frame (doing both in one loop left a gap every frame: a crackle all
-// through the voice). A tick from the volume slider is mixed in.
+// through the voice). A tick from the volume slider (or the plug-in sound) is mixed in.
 #define PLAY_N 128                               // 8 ms a piece
 static SemaphoreHandle_t play_wake;
 static volatile bool play_parked = true;        // the speaker task is waiting (not writing): safe to close the codec
@@ -257,10 +302,14 @@ static void play_task(void *arg)
         follow_volume();
         ring_take(piece, PLAY_N);
         level_update(&out_lvl, piece, PLAY_N);
-        if (click_wanted) { click_wanted = false; click_at = device_volume_get() > 0 ? 0 : -1; }
-        for (int i = 0, n = sizeof click / sizeof click[0]; click_at >= 0 && i < PLAY_N; i++, click_at++) {   // a tick over it
-            if (click_at >= n) { click_at = -1; break; }
-            int v = piece[i] + click[click_at];
+        if (snd_wanted) {
+            snd = snd_pcm(snd_wanted, &snd_n);
+            snd_wanted = SND_NONE;
+            snd_at = device_volume_get() > 0 ? 0 : -1;
+        }
+        for (int i = 0; snd_at >= 0 && i < PLAY_N; i++, snd_at++) {   // a tick over it
+            if (snd_at >= snd_n) { snd_at = -1; break; }
+            int v = piece[i] + snd[snd_at];
             piece[i] = v > 32767 ? 32767 : (v < -32768 ? -32768 : v);
         }
         esp_codec_dev_write(out_dev, piece, sizeof piece);   // (waits for room: that's what keeps it in time)
@@ -269,6 +318,7 @@ static void play_task(void *arg)
 
 static void audio_task(void *arg)
 {
+    make_chime();                                     // (here, not on the caller's task: it takes a moment)
     for (;;) {
         if (want != running) {
             if (want) {
@@ -288,8 +338,8 @@ static void audio_task(void *arg)
             xSemaphoreGive(opened);
         }
         if (!running) {
-            if (click_wanted) { tick_alone(); continue; }
-            if (xSemaphoreTake(wake, out_only ? pdMS_TO_TICKS(IDLE_MS) : portMAX_DELAY) != pdTRUE && out_only && !click_wanted) {
+            if (snd_wanted) { tick_alone(); continue; }
+            if (xSemaphoreTake(wake, out_only ? pdMS_TO_TICKS(IDLE_MS) : portMAX_DELAY) != pdTRUE && out_only && !snd_wanted) {
                 sq_amp(false);                        // been quiet: the speaker off again
                 esp_codec_dev_close(out_dev);
                 out_only = false;
@@ -325,7 +375,14 @@ static bool task_up(void)
 void audio_click(void)
 {
     if (!task_up()) return;
-    click_wanted = true;
+    snd_wanted = SND_CLICK;
+    xSemaphoreGive(wake);
+}
+
+void audio_chime(void)
+{
+    if (!task_up()) return;
+    snd_wanted = SND_CHIME;
     xSemaphoreGive(wake);
 }
 
@@ -396,6 +453,7 @@ void audio_flush(void) { queued_until = 0; }
 int audio_queued_ms(void) { int64_t d = queued_until - esp_timer_get_time(); return d > 0 ? (int)(d / 1000) : 0; }
 void audio_set_speaker_mute(bool m) { (void)m; }
 void audio_click(void) {}
+void audio_chime(void) {}
 float audio_mic_level(void) { return 0; }
 float audio_out_level(void) { return audio_queued_ms() > 0 ? 0.5f : 0; }
 static inline void level_unused(void) { (void)level_update; }
@@ -410,6 +468,7 @@ void audio_flush(void) {}
 int audio_queued_ms(void) { return 0; }
 void audio_set_speaker_mute(bool m) { (void)m; }
 void audio_click(void) {}
+void audio_chime(void) {}
 float audio_mic_level(void) { return 0; }
 float audio_out_level(void) { return 0; }
 static inline void level_unused(void) { (void)level_update; }
