@@ -18,6 +18,7 @@
 #include "esp_attr.h"
 #include "gfx.h"
 #include "wifi_setup.h"
+#include "stb_jpeg.h"
 #include "spotify.h"
 #include "chat.h"
 #include "calendar.h"
@@ -371,13 +372,28 @@ static void jpeg_bufs_free(void)
 // Decode jpg (len bytes), shrunk by the decoder as far as it can while staying at least min_side px across, into a
 // buffer just big enough for it (the caller frees it). A fixed 640 x 640 buffer was 800 KB in one piece, which PSRAM
 // often doesn't have: then no cover loaded at all.
+// A progressive JPEG (some of Spotify's covers): esp_jpeg can't (JDR_FMT3), so stb_image does it, at full size
+static uint16_t *decode_other(int len, esp_jpeg_image_output_t *im)
+{
+    int w, h;
+    int64_t t0 = esp_timer_get_time();
+    uint16_t *out = stb_jpeg_rgb565(jpg, len, &w, &h);
+    if (!out) return NULL;
+    im->width = w;
+    im->height = h;
+    im->output_len = (size_t)w * h * 2;
+    ESP_LOGI(TAG, "a JPEG esp_jpeg can't read (progressive?): decoded %dx%d another way in %d ms", w, h,
+             (int)((esp_timer_get_time() - t0) / 1000));
+    return out;
+}
+
 static uint16_t *decode_jpg(int len, int min_side, esp_jpeg_image_output_t *im)
 {
     esp_jpeg_image_cfg_t jc = {
         .indata = jpg, .indata_size = len, .out_format = JPEG_IMAGE_FORMAT_RGB565, .out_scale = JPEG_IMAGE_SCALE_0,
         .flags = {.swap_color_bytes = 1},
     };
-    if (esp_jpeg_get_image_info(&jc, im) != ESP_OK || !im->width || !im->height) return NULL;
+    if (esp_jpeg_get_image_info(&jc, im) != ESP_OK || !im->width || !im->height) return decode_other(len, im);
     int sc = 0, side = im->width < im->height ? im->width : im->height;
     while (sc < 3 && side >> (sc + 1) >= min_side) sc++;
     size_t bytes = (size_t)(((im->width + 15) >> sc) + 2) * (((im->height + 15) >> sc) + 2) * 2;   // (room for the decoder's rounding)
@@ -386,7 +402,7 @@ static uint16_t *decode_jpg(int len, int min_side, esp_jpeg_image_output_t *im)
     jc.outbuf = (uint8_t *)out;
     jc.outbuf_size = bytes;
     jc.out_scale = sc;
-    if (esp_jpeg_decode(&jc, im) != ESP_OK || !im->width) { heap_caps_free(out); return NULL; }
+    if (esp_jpeg_decode(&jc, im) != ESP_OK || !im->width) { heap_caps_free(out); return decode_other(len, im); }
     return out;
 }
 

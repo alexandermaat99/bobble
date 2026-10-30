@@ -38,6 +38,15 @@ static const btn_t btns[] = {
     {CX + 80 - 26, CTRL_Y - 26, CX + 80 + 26, CTRL_Y + 26, ID_NEXT},
 };
 #define NBTN 3
+// The Field look's: the times either side of the progress (a tape counter), which leaves room for the buttons to sit
+// clear of both the progress and the bottom edge
+#define F_BAR_Y  372                               // the progress row's middle
+#define F_CTRL_Y 428
+static const btn_t fbtns[] = {
+    {CX - 84 - 24, F_CTRL_Y - 24, CX - 84 + 24, F_CTRL_Y + 24, ID_PREV},
+    {CX - 30, F_CTRL_Y - 30, CX + 30, F_CTRL_Y + 30, ID_PLAY},
+    {CX + 84 - 24, F_CTRL_Y - 24, CX + 84 + 24, F_CTRL_Y + 24, ID_NEXT},
+};
 #else
 // volume up top, track name in the middle (where swipes between pages cross), playback controls below
 #define CTRL_Y 332
@@ -377,44 +386,44 @@ static void draw_field(uint16_t *buf, int y0, int h)
     strlcpy(line, s.title, sizeof line);
     ascii(line);
     fitw(l1, sizeof l1, line, &font_label, W - 72);
-    ftext_c(buf, y0, h, ART_Y + ART_SZ + 12, &font_label, l1, C_WHITE);
+    ftext_c(buf, y0, h, ART_Y + ART_SZ + 8, &font_label, l1, C_WHITE);
     strlcpy(line, s.artist, sizeof line);
     ascii(line);
     upper(line);
     fitw(l1, sizeof l1, line, &font_mono_s, W - 72);
-    ftext_c(buf, y0, h, ART_Y + ART_SZ + 42, &font_mono_s, l1, F_ORANGE);
-    // the progress: segments, lit as far as it's got (the one it's in: orange), and the times over the ends
-    if (s.note[0]) ftext_c(buf, y0, h, BAR_Y - 28, &font_small, s.note, F_ORANGE);
-    if (s.duration_ms > 0) {
-        if (!s.note[0]) {
-            fmt_time(line, sizeof line, (int)(progress * s.duration_ms));
-            draw_ftext(buf, y0, h, BAR_X0, BAR_Y - 26, &font_mono_s, line, F_GREY);
-            fmt_time(line, sizeof line, s.duration_ms);
-            draw_ftext(buf, y0, h, BAR_X1 - ftext_width(&font_mono_s, line), BAR_Y - 26, &font_mono_s, line, F_GREY);
-        }
-        const int n = 48;
-        float sw = (BAR_X1 - BAR_X0) / (float)n;
+    ftext_c(buf, y0, h, ART_Y + ART_SZ + 34, &font_mono_s, l1, F_ORANGE);
+    // the progress: the time so far, segments lit as far as it's got (the one it's in: orange), the length; a note
+    // (Spotify needs Premium...) takes the row instead
+    int ty = F_BAR_Y - 10;                            // (the mono capitals' middle on the segments')
+    if (s.note[0]) ftext_c(buf, y0, h, F_BAR_Y - font_small.line_h / 2, &font_small, s.note, F_ORANGE);
+    else if (s.duration_ms > 0) {
+        fmt_time(line, sizeof line, (int)(progress * s.duration_ms));
+        draw_ftext(buf, y0, h, BAR_X0, ty, &font_mono_s, line, F_GREY);
+        fmt_time(l1, sizeof l1, s.duration_ms);
+        draw_ftext(buf, y0, h, BAR_X1 - ftext_width(&font_mono_s, l1), ty, &font_mono_s, l1, F_GREY);
+        const int x0 = BAR_X0 + 60, x1 = BAR_X1 - 60, n = 36;   // (room for "1:02:33" either side)
+        float sw = (x1 - x0) / (float)n;
         int lit = (int)(progress * n);
         for (int i = 0; i < n; i++) {
-            float x = BAR_X0 + i * sw;
-            aa_rrect(buf, y0, h, x, BAR_Y - 3, x + sw - 3, BAR_Y + 7, 1.2f, i < lit ? C_WHITE : i == lit ? F_ORANGE : rgb(40, 40, 44));
+            float x = x0 + i * sw;
+            aa_rrect(buf, y0, h, x, F_BAR_Y - 5, x + sw - 3, F_BAR_Y + 5, 1.2f, i < lit ? C_WHITE : i == lit ? F_ORANGE : rgb(40, 40, 44));
         }
     }
     // controls: square buttons, the middle one orange
     for (int i = 0; i < 3; i += 2) {
-        field_btn(buf, y0, h, &btns[i], false, pressed(btns[i].id));
-        float cx = (btns[i].x0 + btns[i].x1) / 2.0f;
-        if (s.episode) ftext_cx(buf, y0, h, (int)cx, CTRL_Y - 10, &font_mono_s, "10", C_WHITE);
-        else draw_skip(buf, y0, h, cx, CTRL_Y, i == 2, C_WHITE);
+        field_btn(buf, y0, h, &fbtns[i], false, pressed(fbtns[i].id));
+        float cx = (fbtns[i].x0 + fbtns[i].x1) / 2.0f;
+        if (s.episode) ftext_cx(buf, y0, h, (int)cx, F_CTRL_Y - 10, &font_mono_s, "10", C_WHITE);
+        else draw_skip(buf, y0, h, cx, F_CTRL_Y, i == 2, C_WHITE);
     }
-    field_btn(buf, y0, h, &btns[1], true, pressed(ID_PLAY));
+    field_btn(buf, y0, h, &fbtns[1], true, pressed(ID_PLAY));
     if (s.playing) {
         static const float l[] = {9, 5, 9, 19}, r[] = {15, 5, 15, 19};
-        aa_icon(buf, y0, h, CX, CTRL_Y, 26, l, 2, false, 2.4f, 0);
-        aa_icon(buf, y0, h, CX, CTRL_Y, 26, r, 2, false, 2.4f, 0);
+        aa_icon(buf, y0, h, CX, F_CTRL_Y, 24, l, 2, false, 2.4f, 0);
+        aa_icon(buf, y0, h, CX, F_CTRL_Y, 24, r, 2, false, 2.4f, 0);
     } else {
         static const float tri[] = {7, 4, 19, 12, 7, 20};
-        aa_icon(buf, y0, h, CX + 1.5f, CTRL_Y, 26, tri, 3, true, 2.4f, 0);
+        aa_icon(buf, y0, h, CX + 1.5f, F_CTRL_Y, 24, tri, 3, true, 2.4f, 0);
     }
 }
 #endif
@@ -497,9 +506,13 @@ void spotify_ui_draw(uint16_t *buf, int y0, int h)
 // ---------------------------------------------------------------- input
 static int hit(int x, int y)
 {
+    const btn_t *b = btns;
+#if !SCREEN_ROUND
+    if (ui_field()) b = fbtns;
+#endif
     for (int i = 0; i < NBTN; i++) {
         if (i >= 3 && s.volume < 0) break;
-        if (x >= btns[i].x0 - 6 && x < btns[i].x1 + 6 && y >= btns[i].y0 - 8 && y < btns[i].y1 + 10) return btns[i].id;
+        if (x >= b[i].x0 - 6 && x < b[i].x1 + 6 && y >= b[i].y0 - 8 && y < b[i].y1 + 10) return b[i].id;
     }
     return ID_NONE;
 }

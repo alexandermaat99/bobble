@@ -325,11 +325,41 @@ static void touch_task(void *arg)
     }
 }
 
+// Touch sensitivity: the chip's own thresholds (config 0x8053, how strong a touch must be to count; 0x8054, how weak
+// before it lets go), a little lower than Waveshare's 80 / 60, so a light tap with a dry finger counts (on battery the
+// board isn't grounded through USB, and every touch reads weaker). Lower again picks up touches that aren't there. The
+// config (0x8047-0x80FE, then its checksum and an "update" flag) is kept in the chip: written only when it's above these.
+#define GT_TOUCH_LEVEL 68
+#define GT_LEAVE_LEVEL 50
+static void gt_tune(void)
+{
+    uint8_t b[2 + 186] = {0x80, 0x47}, *cfg = b + 2;
+    if (!gt_read(0x8047, cfg, 185)) { ESP_LOGW(TAG, "touch: couldn't read its config"); return; }
+    uint8_t sum = 0;
+    for (int i = 0; i < 184; i++) sum += cfg[i];
+    uint8_t *t = &cfg[0x8053 - 0x8047], *l = &cfg[0x8054 - 0x8047];
+    ESP_LOGI(TAG, "touch chip config v%d: touch level %d, leave level %d", cfg[0], *t, *l);
+    if ((uint8_t)(~sum + 1) != cfg[184]) { ESP_LOGW(TAG, "touch: its config's checksum is off: leaving it be"); return; }
+    if (*t <= GT_TOUCH_LEVEL && *l <= GT_LEAVE_LEVEL) return;
+    *t = GT_TOUCH_LEVEL;
+    *l = GT_LEAVE_LEVEL;
+    sum = 0;
+    for (int i = 0; i < 184; i++) sum += cfg[i];
+    cfg[184] = ~sum + 1;
+    cfg[185] = 1;                                      // (0x8100: take the new config)
+    esp_err_t e = i2c_master_transmit(gt_dev, b, sizeof b, 100);
+    vTaskDelay(pdMS_TO_TICKS(150));
+    uint8_t got[2] = {0};
+    gt_read(0x8053, got, 2);
+    ESP_LOGI(TAG, "touch: thresholds now %d / %d (%s)", got[0], got[1], e == ESP_OK ? "written" : esp_err_to_name(e));
+}
+
 void sq_touch_init(void)
 {
     gt_dev = add_dev(0x5D);
     if (!gt_dev) gt_dev = add_dev(0x14);
     if (!gt_dev) { ESP_LOGE(TAG, "no touch chip found"); return; }
+    gt_tune();
     xTaskCreatePinnedToCoreWithCaps(touch_task, "touch", 3072, NULL, 7, NULL, 0, MALLOC_CAP_SPIRAM);
 }
 
