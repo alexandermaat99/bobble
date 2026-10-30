@@ -337,10 +337,11 @@ bool sq_touch_read(int *x, int *y)
 }
 
 // ---------------------------------------------------------------- battery (AXP2101)
-// Charge current: 500 mA fills a 2000 mAh cell in ~4.5 h, and is gentler still on a bigger one. (The charger is linear:
-// what the cell doesn't take is heat in the chip. 1000 mA took it to 61 C even near full, ~0.7 W; from empty it's twice
-// that.) The chip's codes are 25 mA steps to 200 mA (8), then 100 mA steps to 1000 mA (16); its own default is 200 mA.
-#define CHARGE_MA 500
+// Charge current: 800 mA fills the two-18650 pack (1S, ~5000-7000 mAh) in ~7-9 h; 500 mA took 10-14. (The charger is
+// linear: what the cell doesn't take is heat in the chip. 1000 mA took it to 61 C even near full, ~0.7 W; from empty
+// it's twice that, for hours with a pack this size.) The chip's codes are 25 mA steps to 200 mA (8), then 100 mA steps
+// to 1000 mA (16); its own default is 200 mA.
+#define CHARGE_MA 800
 #define CHARGE_CODE (CHARGE_MA <= 200 ? CHARGE_MA / 25 : CHARGE_MA / 100 + 6)
 
 static bool pmu_reg(uint8_t reg, uint8_t *v)
