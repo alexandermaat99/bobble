@@ -12,6 +12,7 @@
 #include "agent.h"
 #include "battery.h"
 #include "screen.h"
+#include "board_square.h"
 
 #define RING (16 * 1024)
 static char *ring;
@@ -121,6 +122,23 @@ static esp_err_t get_motion(httpd_req_t *req)
     return httpd_resp_sendstr(req, out);
 }
 
+// POST /display?do=lcd|panel: put a shifted or broken picture right without a restart (the square), to learn which
+// side lost track: this chip's LCD controller, or the panel chip
+static esp_err_t post_display(httpd_req_t *req)
+{
+    if (!token_ok(req)) return ESP_OK;
+#if SQUARE_HW
+    char q[32], v[8];
+    if (httpd_req_get_url_query_str(req, q, sizeof q) != ESP_OK || httpd_query_key_value(q, "do", v, sizeof v) != ESP_OK ||
+        (strcmp(v, "lcd") && strcmp(v, "panel")))
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "need ?do=lcd or ?do=panel");
+    sq_display_recover(strcmp(v, "lcd") ? 2 : 1);
+    return httpd_resp_sendstr(req, "done\n");
+#else
+    return httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "the square only");
+#endif
+}
+
 void remote_log_register(httpd_handle_t server)
 {
     const httpd_uri_t a = {.uri = "/log", .method = HTTP_GET, .handler = get_log};
@@ -131,4 +149,6 @@ void remote_log_register(httpd_handle_t server)
     httpd_register_uri_handler(server, &b);
     httpd_register_uri_handler(server, &c);
     httpd_register_uri_handler(server, &d);
+    const httpd_uri_t e = {.uri = "/display", .method = HTTP_POST, .handler = post_display};
+    httpd_register_uri_handler(server, &e);
 }

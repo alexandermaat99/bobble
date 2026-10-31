@@ -201,6 +201,7 @@ final class VoiceChat {
         turn = Task { @MainActor [weak self] in
             guard let self else { return }
             do {
+                var stripped = false
                 for _ in 0..<8 {                      // (a few rounds of tools at most)
                     let m = Claude.models[modelIndex]
                     var body: [String: Any] = [
@@ -213,12 +214,26 @@ final class VoiceChat {
                     ]
                     var beta: [String] = []
                     if m.id != "claude-haiku-5-5" { body["fallbacks"] = "default"; beta.append("server-side-fallback-2026-07-01") }
-                    let reply = try await Claude.stream(body, beta: beta, block: { [weak self] type in
-                        DispatchQueue.main.async { if self?.turnID == id, type == "server_tool_use" { self?.status("Searching the web") } }
-                    }) { [weak self] t in
-                        DispatchQueue.main.async { if self?.turnID == id { self?.streamed(t) } }
+                    var reply: Claude.Reply
+                    do {
+                        reply = try await Claude.stream(body, beta: beta, block: { [weak self] type in
+                            DispatchQueue.main.async { if self?.turnID == id, type == "server_tool_use" { self?.status("Searching the web") } }
+                        }) { [weak self] t in
+                            DispatchQueue.main.async { if self?.turnID == id { self?.streamed(t) } }
+                        }
+                    } catch let e as Claude.Failure where e.status == 400 && e.message.contains("signature") && !stripped {
+                        // a thinking block in the history no longer checks out (one kept from a reply that declined
+                        // partway, before the fix below): once, the conversation goes on without the thinking
+                        NSLog("voice chat: %@ - going on without the thinking blocks", e.message)
+                        stripped = true
+                        self.messages = Claude.withoutThinking(self.messages)
+                        continue
                     }
                     try Task.checkCancellation()
+                    // declined, with no other model to carry on: what came of it is dropped (a partial reply's thinking
+                    // can't go back), and your words stay in for whatever you say next
+                    if reply.stop == "refusal" { self.speak("Sorry, I can't help with that one."); break }
+                    reply.content = Claude.echoable(reply.content)
                     if reply.content.isEmpty { break }    // (nothing more to say, e.g. after end_chat: nothing to keep)
                     // (a paused turn carries on in the same assistant message: its blocks are added to it)
                     if var last = self.messages.last, last["role"] as? String == "assistant", var c = last["content"] as? [[String: Any]] {
@@ -228,7 +243,6 @@ final class VoiceChat {
                     } else {
                         self.messages.append(["role": "assistant", "content": reply.content])
                     }
-                    if reply.stop == "refusal" { self.speak("Sorry, I can't help with that one.") }
                     let calls = reply.content.filter { $0["type"] as? String == "tool_use" }
                     if calls.isEmpty {
                         if reply.stop == "pause_turn" { continue }   // (a web search still going: carry on)
