@@ -102,6 +102,38 @@ enum Claude {
         return reply
     }
 
+    // What of a reply can go back in the conversation. After a fallback partway through (the first model declined,
+    // and another carried on in the same stream, after a "fallback" block), what came before the switch can go back
+    // only as text: that attempt's thinking and tool calls (and a search with no result) would fail their signatures,
+    // and every request after would be turned away. The fallback block itself is only a marker.
+    static func echoable(_ content: [[String: Any]]) -> [[String: Any]] {
+        guard let f = content.lastIndex(where: { $0["type"] as? String == "fallback" }) else { return content }
+        let before = content[..<f]
+        let answered = Set(before.compactMap { $0["tool_use_id"] as? String })
+        let searches = Set(before.filter { $0["type"] as? String == "server_tool_use" }.compactMap { $0["id"] as? String })
+        let kept = before.filter { b in
+            switch b["type"] as? String {
+            case "text": return true
+            case "server_tool_use": return answered.contains(b["id"] as? String ?? "")
+            default: return searches.contains(b["tool_use_id"] as? String ?? "")   // (a search's result, with its search)
+            }
+        }
+        return Array(kept) + content[(f + 1)...]
+    }
+
+    // The conversation without any thinking blocks: the one-time way back when the API turns a thinking block away
+    // (its signature no longer matches what came before it). The turns' words and tool calls all stay.
+    static func withoutThinking(_ messages: [[String: Any]]) -> [[String: Any]] {
+        messages.compactMap { m in
+            guard m["role"] as? String == "assistant", let c = m["content"] as? [[String: Any]] else { return m }
+            let kept = c.filter { !["thinking", "redacted_thinking"].contains($0["type"] as? String ?? "") }
+            if kept.isEmpty { return nil }
+            var m = m
+            m["content"] = kept
+            return m
+        }
+    }
+
     private static func errorMessage(_ raw: Data) -> String? {
         guard let j = (try? JSONSerialization.jsonObject(with: raw)) as? [String: Any] else { return nil }
         return (j["error"] as? [String: Any])?["message"] as? String
