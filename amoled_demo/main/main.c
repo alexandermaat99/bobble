@@ -18,6 +18,8 @@
 #include "esp_timer.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
+#include "esp_cache.h"
+#include "esp_private/esp_clk.h"
 #include "esp_attr.h"
 #include "esp_lcd_panel_io.h"
 #include "esp_lcd_panel_ops.h"
@@ -1147,6 +1149,27 @@ static bool board_moved(void)
     return d > 0.06f;
 }
 
+// How fast PSRAM reads right now (MB/s, best of 3 x 32 KB with the cache dropped first): the panel scans out of it, so
+// if this falls, rows are refilled late and break (the status line shows it, to catch that happening)
+static int psram_read_mbps(void)
+{
+    static uint32_t *buf;
+    const size_t n = 32 * 1024;
+    if (!buf && !(buf = heap_caps_aligned_alloc(64, n, MALLOC_CAP_SPIRAM))) return -1;
+    int best = 0;
+    for (int k = 0; k < 3; k++) {
+        esp_cache_msync(buf, n, ESP_CACHE_MSYNC_FLAG_DIR_M2C);
+        int64_t t0 = esp_timer_get_time();
+        uint32_t sum = 0;
+        for (size_t i = 0; i < n / 4; i++) sum += ((volatile uint32_t *)buf)[i];
+        int64_t us = esp_timer_get_time() - t0;
+        (void)sum;
+        int mbps = us > 0 ? (int)(n / us) : 0;
+        if (mbps > best) best = mbps;
+    }
+    return best;
+}
+
 // ---------------------------------------------------------------- power while the screen is off
 // Awake: flat out at 240 MHz for smooth animation. Screen off: the processor naps between checks (Wi-Fi stays
 // joined in its low-power mode) and the display chip sleeps. Locked: the radio and motion sensor go off too.
@@ -1170,7 +1193,11 @@ static void imu_power(bool on)
 static void power_screen_off(void)
 {
     panel_cmd(0x10);                                   // display chip: sleep in
-    esp_pm_config_t pm = {.max_freq_mhz = 80, .min_freq_mhz = 40, .light_sleep_enable = true};
+    // (the square: not down to 40 MHz. There the chip takes PSRAM out of its tuned 120 MHz mode, and back on every
+    // idle moment, with the panel scanning out of it all the while; the panel's own lock keeps it out of light sleep
+    // anyway. Coming back once left PSRAM slow: rows refilled late, the left of rows showed what was there before,
+    // on every page until a restart.)
+    esp_pm_config_t pm = {.max_freq_mhz = 80, .min_freq_mhz = SQUARE_HW ? 80 : 40, .light_sleep_enable = true};
     esp_err_t e = esp_pm_configure(&pm);
     if (e != ESP_OK) ESP_LOGW(TAG, "power saving: %s", esp_err_to_name(e));
     if (locked && !hw_locked) {
@@ -2095,10 +2122,13 @@ void app_main(void)
                      "pg_off %d", page, why_lib, why_music, why_pet, why_slide, why_rot, why_force, why_touch, why_card, why_cal,
                      why_ota, why_timer, (int)pg_off);
             why_lib = why_music = why_pet = why_slide = why_rot = why_force = why_touch = why_card = why_cal = why_ota = why_timer = 0;
-            ESP_LOGI(TAG, "%s %d frames/s, angle %d, battery %.2f V (%d%%%s, curve from %d runs%s), free internal %u, psram %u KB (largest %u KB), calendar: %s", sheet >= H ? "wifi" : "calendar",
+            ESP_LOGI(TAG, "%s %d frames/s, angle %d, battery %.2f V (%d%%%s, curve from %d runs%s), free internal %u, psram %u KB (largest %u KB), psram reads %d MB/s, cpu %d MHz, calendar: %s", sheet >= H ? "wifi" : "calendar",
                      frames / 5, (int)ang, battery_volts(), battery_percent(), battery_charging() ? ", charging" : "", battery_learned_runs(), battery_logging() ? ", logging" : "", (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
                      (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024), (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM) / 1024),
-                     calendar_loaded() ? "loaded" : calendar_error());
+                     psram_read_mbps(), esp_clk_cpu_freq() / 1000000, calendar_loaded() ? "loaded" : calendar_error());
+#if SQUARE_HW
+            sq_expander_check();
+#endif
             if (frames > part_n) ESP_LOGI(TAG, "render %d ms/full frame, %d eyes-only frames at %d ms (all frames: draw %d ms, turn+send %d ms)",
                                           (int)(render_us / (frames - part_n) / 1000), part_n, part_n ? (int)(part_us / part_n / 1000) : 0,
                                           (int)(prof_draw_us / frames / 1000), (int)(prof_turn_us / frames / 1000));

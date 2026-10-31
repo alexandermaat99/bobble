@@ -31,4 +31,6 @@ bool sq_plugged_in(void);               // USB power is present (a computer or a
 int sq_power_key(void);                 // the PWR button since last asked: 0 none, 1 short press, 2 long press
 #include "battery.h"
 void sq_power_read(battery_diag_t *d);  // everything the power chip says about charging (a dozen register reads)
+void sq_display_recover(int what);     // 1: the LCD controller set up again, 2: the panel chip's setup sent again
+void sq_expander_check(void);          // logs the expander's state when it changes (and if it isn't as left)
 bool sq_amp(bool on);                   // the speaker's amplifier (through the expander): off unless something's playing

@@ -215,6 +215,48 @@ static void display_init_here(void)
     if (esp_async_memcpy_install_gdma_ahb(&mc, &mcp) != ESP_OK) { mcp = NULL; ESP_LOGW(TAG, "no DMA copy: the CPU copies"); }
 }
 
+// Putting the picture right without a restart, to learn which side lost track when it's shifted or broken (asked for
+// over Wi-Fi: POST /display?do=lcd or ?do=panel). 1: this chip's LCD controller set up again (its pixel stream is
+// already restarted every frame). 2: the panel chip's own setup sent again (as at start-up, without the reset line,
+// which the touch chip shares).
+void sq_display_recover(int what)
+{
+    if (!panel) return;
+    if (what == 1) {
+        esp_lcd_panel_reset(panel);
+        esp_lcd_panel_init(panel);
+        ESP_LOGW(TAG, "display: LCD controller set up again (asked)");
+    } else if (what == 2) {
+        panel_cmd(0x01, NULL, 0);                       // software reset
+        vTaskDelay(pdMS_TO_TICKS(120));
+        for (int i = 0; i < sizeof st7701_init / sizeof *st7701_init; i++) {
+            panel_cmd(st7701_init[i].cmd, st7701_init[i].data, st7701_init[i].n);
+            if (st7701_init[i].delay_ms) vTaskDelay(pdMS_TO_TICKS(st7701_init[i].delay_ms));
+        }
+        ESP_LOGW(TAG, "display: panel chip set up again (asked)");
+    }
+}
+
+// The expander drives the panel's reset and setup lines: says so if it isn't as it was left (a reset of its own puts
+// every line back to an input), once, and again when it changes
+void sq_expander_check(void)
+{
+    static int last = -1;
+    if (!ex_dev) return;
+    uint8_t reg = 0x03, dir = 0, out = 0;
+    bool ok = i2c_master_transmit_receive(ex_dev, &reg, 1, &dir, 1, 50) == ESP_OK;
+    reg = 0x01;
+    ok = ok && i2c_master_transmit_receive(ex_dev, &reg, 1, &out, 1, 50) == ESP_OK;
+    if (!ok) { ESP_LOGW(TAG, "expander: couldn't read it"); return; }
+    uint8_t want_dir = (uint8_t)~(EX_CS | EX_SDA | EX_SCL | EX_AMP | EX_RST);
+    int now = dir << 8 | (out & ~EX_AMP);
+    if (now == last) return;
+    last = now;
+    bool fine = dir == want_dir && (out & EX_RST) && (out & EX_CS);
+    ESP_LOGI(TAG, "expander: direction %02x (want %02x), outputs %02x (we last wrote %02x)%s", dir, want_dir, out, ex_out,
+             fine ? "" : ": NOT as left");
+}
+
 // The amplifier's line, checked: the bus is busy with touch and the power chip, and a write that didn't land left the
 // speaker silent (the sound played into nothing). Read the output register back; try again if it isn't so.
 bool sq_amp(bool on)
