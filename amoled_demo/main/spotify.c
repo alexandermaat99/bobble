@@ -122,9 +122,10 @@ void spotify_set_library_visible(bool v) { lib_visible = v; if (v) lib_seen = tr
 bool spotify_library_visible(void) { return lib_visible; }
 
 // Screen off: check less often (see asleep_wait_ms). On waking, check straight away.
+static volatile int64_t wake_poll_us;   // when the screen came on, till that first look is done (for the log)
 void spotify_set_awake(bool on)
 {
-    if (on && !awake) spotify_command_arg(SP_POLL, NULL);
+    if (on && !awake) { wake_poll_us = esp_timer_get_time(); spotify_command_arg(SP_POLL, NULL); }
     awake = on;
 }
 
@@ -244,8 +245,12 @@ static int api_call_once(esp_http_client_method_t method, const char *path, cons
 static int api_call(esp_http_client_method_t method, const char *path, const char *body)
 {
     bool reused = api != NULL;
+    int64_t t0 = esp_timer_get_time();
     int status = api_call_once(method, path, body);
-    if (status == 0 && reused) status = api_call_once(method, path, body);
+    if (status == 0 && reused) {
+        ESP_LOGI(TAG, "kept connection had closed (%d ms to find out): reconnecting", (int)((esp_timer_get_time() - t0) / 1000));
+        status = api_call_once(method, path, body);
+    }
     return status;
 }
 
@@ -1211,6 +1216,10 @@ static void sp_task(void *arg)
         }
         if (lib_visible && esp_timer_get_time() - lib_loaded_us > 60000000) load_library();   // devices come and go
         poll_player();
+        if (wake_poll_us) {
+            ESP_LOGI(TAG, "first look after waking: %d ms", (int)((esp_timer_get_time() - wake_poll_us) / 1000));
+            wake_poll_us = 0;
+        }
         if (want_prefetch && awake && st.active && !uxQueueMessagesWaiting(cmds)) prefetch_next();
         // The Library's first covers, ready before it's opened: once, after start-up's calendar download (or 90 s) and
         // the first poll, with no voice chat going: the list, then the first 10 playlists' and the first 10
