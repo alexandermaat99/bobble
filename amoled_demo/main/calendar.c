@@ -35,6 +35,8 @@ static int cache_n[MAX_CAL];
 static bool cache_ok[MAX_CAL];
 #define REFRESH_US (5 * 60 * 1000000LL)
 #define ASLEEP_REFRESH_US (30 * 60 * 1000000LL)   // nobody's looking: each fetch is ~375 KB of downloading and parsing
+#define WAKE_HOLD_US (15 * 1000000LL)             // just woken: Spotify gets the radio and CPU first (a tap on play/skip
+                                                 // waits on its first look, and a fetch alongside made that ~4 s, not ~1)
 static volatile bool awake = true;
 
 static SemaphoreHandle_t lock;
@@ -43,6 +45,7 @@ static int n_items;
 static time_t window_start;
 static char error[64] = "Loading calendar...";
 static volatile bool loaded, refresh_now;
+static volatile int64_t woke_us;
 static TaskHandle_t task;
 
 int calendar_items(ical_item_t *out, int max)
@@ -287,7 +290,8 @@ static void cal_task(void *arg)
         int64_t now = esp_timer_get_time();
         bool online = wifi_state() == WS_CONNECTED && wifi_time_synced();
         bool new_day = loaded && today_midnight() != last_day;
-        if (online && (refresh_now || !loaded || new_day || now - last_ok > (awake ? REFRESH_US : ASLEEP_REFRESH_US))) {
+        bool settling = loaded && awake && now - woke_us < WAKE_HOLD_US;   // (what's loaded is on screen meanwhile)
+        if (online && (refresh_now || (!settling && (!loaded || new_day || now - last_ok > (awake ? REFRESH_US : ASLEEP_REFRESH_US))))) {
             refresh_now = false;
             if (fetch()) { last_ok = now; last_day = today_midnight(); }
             else last_ok = now - REFRESH_US + 60 * 1000000LL;   // retry in a minute
@@ -301,9 +305,10 @@ static void cal_task(void *arg)
     }
 }
 
-// Screen on/off: sync less while asleep; on waking, anything older than 5 minutes is fetched straight away
+// Screen on/off: sync less while asleep; on waking, anything older than 5 minutes is fetched once Spotify's had 15 s
 void calendar_set_awake(bool on)
 {
+    if (on && !awake) woke_us = esp_timer_get_time();
     awake = on;
     if (on && task) xTaskNotifyGive(task);
 }
