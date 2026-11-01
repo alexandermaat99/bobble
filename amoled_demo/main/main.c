@@ -1224,6 +1224,12 @@ static void power_screen_on(void)
         if (touch_off) { sq_touch_sleep(false); touch_off = false; }
 #endif
     }
+#if SQUARE_HW
+    // The broken or shifted picture: this chip's LCD controller loses its place (its DMA is restarted every frame, which
+    // doesn't put it right; setting the controller up again does). It can't be seen from here, so it's done on every
+    // wake while the light's still off: a picture that broke is right again after PWR twice.
+    sq_display_recover(1, "waking");
+#endif
     panel_cmd(0x11);                                   // sleep out: the chip wants a moment before showing anything
     vTaskDelay(pdMS_TO_TICKS(80));
 }
@@ -1889,6 +1895,13 @@ void app_main(void)
             }
         }
         if (power == PW_AWAKE && now - last_use > SLEEP_AFTER_US && !card_drag) power = PW_FADING_OUT;
+#if SQUARE_HW
+        static bool resynced;                          // and once after start-up's rush (Wi-Fi, calendars, covers: it
+        if (!resynced && now > 20000000) {             // broke in the first half minute after one, 2026-11-01)
+            resynced = true;
+            sq_display_recover(1, "after start-up");
+        }
+#endif
         if (power == PW_FADING_OUT) {
             set_brightness(brightness - 20);
             if (brightness == 0) {

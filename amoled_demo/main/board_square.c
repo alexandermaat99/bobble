@@ -219,13 +219,13 @@ static void display_init_here(void)
 // over Wi-Fi: POST /display?do=lcd or ?do=panel). 1: this chip's LCD controller set up again (its pixel stream is
 // already restarted every frame). 2: the panel chip's own setup sent again (as at start-up, without the reset line,
 // which the touch chip shares).
-void sq_display_recover(int what)
+void sq_display_recover(int what, const char *why)
 {
     if (!panel) return;
     if (what == 1) {
         esp_lcd_panel_reset(panel);
         esp_lcd_panel_init(panel);
-        ESP_LOGW(TAG, "display: LCD controller set up again (asked)");
+        ESP_LOGW(TAG, "display: LCD controller set up again (%s)", why);
     } else if (what == 2) {
         panel_cmd(0x01, NULL, 0);                       // software reset
         vTaskDelay(pdMS_TO_TICKS(120));
@@ -233,7 +233,7 @@ void sq_display_recover(int what)
             panel_cmd(st7701_init[i].cmd, st7701_init[i].data, st7701_init[i].n);
             if (st7701_init[i].delay_ms) vTaskDelay(pdMS_TO_TICKS(st7701_init[i].delay_ms));
         }
-        ESP_LOGW(TAG, "display: panel chip set up again (asked)");
+        ESP_LOGW(TAG, "display: panel chip set up again (%s)", why);
     }
 }
 

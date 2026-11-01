@@ -191,7 +191,7 @@ static esp_err_t post_display(httpd_req_t *req)
     if (httpd_req_get_url_query_str(req, q, sizeof q) != ESP_OK || httpd_query_key_value(q, "do", v, sizeof v) != ESP_OK ||
         (strcmp(v, "lcd") && strcmp(v, "panel")))
         return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "need ?do=lcd or ?do=panel");
-    sq_display_recover(strcmp(v, "lcd") ? 2 : 1);
+    sq_display_recover(strcmp(v, "lcd") ? 2 : 1, "asked");
     return httpd_resp_sendstr(req, "done\n");
 #else
     return httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "the square only");
