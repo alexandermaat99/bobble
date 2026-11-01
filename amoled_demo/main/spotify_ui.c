@@ -43,6 +43,8 @@ static const btn_t btns[] = {
 // clear of both the progress and the bottom edge
 #define F_BAR_Y  372                               // the progress row's middle
 #define F_CTRL_Y 428
+#define F_KNOB_X (W - 58)                          // the volume knob, in the corner right of the keys
+#define F_KNOB_R 20
 static const btn_t fbtns[] = {
     {CX - 84 - 24, F_CTRL_Y - 24, CX - 84 + 24, F_CTRL_Y + 24, ID_PREV},
     {CX - 30, F_CTRL_Y - 30, CX + 30, F_CTRL_Y + 30, ID_PLAY},
@@ -385,6 +387,26 @@ static void field_btn(uint16_t *buf, int y0, int h, const btn_t *b, bool main, b
     if (!main) aa_rrect(buf, y0, h, b->x0 + 2, b->y0 + 2, b->x1 - 2, b->y1 - 2, 7, fill);
 }
 
+// the volume as a knob: a ring of ticks lit orange as far as it's turned up, the number in the middle (drag it up and
+// down, as a knob in music software)
+static void field_knob(uint16_t *buf, int y0, int h, int vol, bool on)
+{
+    const float cx = F_KNOB_X, cy = F_CTRL_Y;
+    if (vol < 0 || cy + F_KNOB_R + 12 <= y0 || cy - F_KNOB_R - 12 >= y0 + h) return;   // (a device without volume: none)
+    const int n = 11;                                 // ticks over 270 degrees, the gap at the bottom
+    int lit = (int)lroundf(vol / 100.0f * (n - 1)) + (vol > 0);
+    for (int k = 0; k < n; k++) {
+        float a = (-135 + 270.0f * k / (n - 1)) * (float)M_PI / 180;
+        float p[4] = {cx + (F_KNOB_R + 4) * sinf(a), cy - (F_KNOB_R + 4) * cosf(a), cx + (F_KNOB_R + 9) * sinf(a), cy - (F_KNOB_R + 9) * cosf(a)};
+        aa_path(buf, y0, h, p, 2, false, 2, k < lit ? F_ORANGE : F_DIM);
+    }
+    aa_disc(buf, y0, h, cx, cy, F_KNOB_R, on ? rgb(110, 110, 118) : F_DIM);
+    aa_disc(buf, y0, h, cx, cy, F_KNOB_R - 2, on ? rgb(50, 50, 56) : F_PANEL);
+    char t[12];
+    snprintf(t, sizeof t, "%d", vol);
+    ftext_cx(buf, y0, h, (int)cx, (int)cy - font_mono_s.line_h / 2, &font_mono_s, t, C_WHITE);
+}
+
 static void draw_field_idle(uint16_t *buf, int y0, int h)
 {
     field_grid(buf, y0, h);
@@ -435,6 +457,7 @@ static void draw_field(uint16_t *buf, int y0, int h)
         else draw_skip(buf, y0, h, cx, F_CTRL_Y, i == 2, C_WHITE);
     }
     field_btn(buf, y0, h, &fbtns[1], true, pressed(ID_PLAY));
+    field_knob(buf, y0, h, shown_volume(), pressed(ID_VOL));
     if (s.playing) {
         static const float l[] = {9, 5, 9, 19}, r[] = {15, 5, 15, 19};
         aa_icon(buf, y0, h, CX, F_CTRL_Y, 24, l, 2, false, 2.4f, 0);
@@ -665,6 +688,7 @@ static int hit(int x, int y)
     else if (ui_tiles()) b = tbtns;
 #endif
 #if !SCREEN_ROUND
+    if (ui_field() && s.volume >= 0 && hypotf(x - F_KNOB_X, y - F_CTRL_Y) < F_KNOB_R + 22) return ID_VOL;
     if (ui_tiles() && s.volume >= 0 && x >= ART_X + ART_SZ + 4 && x < ART_X + ART_SZ + 16 + T_SIDE && y >= ART_Y - 8 &&
         y < ART_Y + ART_SZ + 8) return ID_VOL;
 #endif
@@ -705,14 +729,14 @@ void spotify_ui_update(int tx, int ty, int64_t now_us)
             if (abs(tx - press_x) > 24 && abs(tx - press_x) > abs(ty - press_y)) spotify_ui_cancel_touch();   // (a swipe)
             else {
                 if (abs(ty - press_y) > drag_moved) drag_moved = abs(ty - press_y);
-                int v = drag_from + (press_y - ty) * 100 / ART_SZ;
+                int v = drag_from + (press_y - ty) * 100 / (ui_field() ? 120 : ART_SZ);   // (the knob: quicker, near the edge)
                 drag_vol = v < 0 ? 0 : v > 100 ? 100 : v;
             }
         } else if (abs(tx - press_x) > 16 || abs(ty - press_y) > 16) press_id = ID_NONE;   // it's a swipe, not a tap
     } else if (down) {
         down = false;
         if (press_id == ID_VOL) {
-            if (drag_moved <= 8) {                     // a tap: to where it was tapped
+            if (drag_moved <= 8 && ui_tiles()) {       // a tap on the tile: to where it was tapped (the knob: nothing)
                 int v = (ART_Y + ART_SZ - press_y) * 100 / ART_SZ;
                 drag_vol = v < 0 ? 0 : v > 100 ? 100 : v;
             }
@@ -745,7 +769,7 @@ bool spotify_ui_dirty(void)
     spotify_art(&ver);
     int sec = (int)(progress * s.duration_ms / 1000);
     bool d = ver != seen_art || sec != seen_sec || s.playing != seen_playing || strcmp(seen_title, s.title) ||
-             (ui_tiles() && shown_volume() != seen_vol);
+             ((ui_tiles() || ui_field()) && shown_volume() != seen_vol);
     seen_art = ver;
     seen_sec = sec;
     seen_playing = s.playing;
