@@ -12,6 +12,7 @@ amoled_demo/main/secrets.h
 # Built or downloaded
 build/
 build-release/
+build-release-square/
 build-square/
 *.log
 .build/

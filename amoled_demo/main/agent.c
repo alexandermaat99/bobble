@@ -255,6 +255,7 @@ static esp_err_t info_get(httpd_req_t *req)
     cJSON_AddNumberToObject(j, "fw", (double)BOBBLE_BUILD);   // which release build (0: an everyday build)
     if (chat_port()) cJSON_AddNumberToObject(j, "chat", chat_port());
     cJSON_AddNumberToObject(j, "rssi", wifi_rssi());   // the Wi-Fi signal now (dBm, 0: not connected)   // it can talk: where the Mac connects for that
+    cJSON_AddStringToObject(j, "board", SCREEN_ROUND ? "round" : "square");   // (which firmware it takes)
     if (!SCREEN_ROUND) cJSON_AddStringToObject(j, "look", look_names[ui_look()]);   // (the square's style)
 #ifdef BOBBLE_RELEASE
     cJSON_AddBoolToObject(j, "release", true);
