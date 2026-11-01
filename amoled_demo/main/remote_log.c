@@ -89,14 +89,73 @@ static esp_err_t get_battery(httpd_req_t *req)
     snprintf(out, sizeof out,
              "{\"state\":\"%s\",\"chip\":%s,\"usb\":%s,\"battery\":%s,\"charge_on\":%s,\"current\":\"%s\","
              "\"stage\":\"%s\",\"battery_mv\":%d,\"usb_mv\":%d,\"system_mv\":%d,\"gauge_pct\":%d,\"shown_pct\":%d,"
-             "\"charge_ma\":%d,\"full_mv\":%d,\"usb_limit_ma\":%d,\"chip_c\":%.1f,"
+             "\"charge_ma\":%d,\"full_mv\":%d,\"usb_limit_ma\":%d,\"chip_c\":%.1f,\"learned_runs\":%d,\"logging\":%s,"
              "\"raw\":{\"status1\":\"%02x\",\"status2\":\"%02x\",\"ts\":\"%02x\",\"irq\":\"%02x %02x %02x\"}}\n",
              battery_state_text(&d), d.chip ? "true" : "false", d.usb ? "true" : "false", d.battery ? "true" : "false",
              d.charge_on ? "true" : "false", d.dir == 1 ? "charging" : d.dir == 2 ? "discharging" : d.dir == 0 ? "none" : "-",
              battery_stage_text(d.stage), d.vbat_mv, d.vbus_mv, d.vsys_mv, d.gauge_pct, battery_percent(),
-             d.charge_ma, d.full_mv, d.in_limit_ma, d.chip_c, d.st1, d.st2, d.ts, d.irq[0], d.irq[1], d.irq[2]);
+             d.charge_ma, d.full_mv, d.in_limit_ma, d.chip_c, battery_learned_runs(), battery_logging() ? "true" : "false", d.st1, d.st2, d.ts, d.irq[0], d.irq[1], d.irq[2]);
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_sendstr(req, out);
+}
+
+// GET /battery/run: the last discharge run (kept until the next one ends), {"step_min": 8, "mv": [4149, ...]} from full.
+// POST /battery/run with the same: learn from it (a run recorded before, e.g. one that wasn't learned from)
+static esp_err_t get_run(httpd_req_t *req)
+{
+    if (!token_ok(req)) return ESP_OK;
+    enum { MAX = 240 };
+    uint16_t *mv = heap_caps_malloc(MAX * sizeof *mv, MALLOC_CAP_SPIRAM);
+    char *out = heap_caps_malloc(MAX * 6 + 64, MALLOC_CAP_SPIRAM);
+    int step = 0, n = mv && out ? battery_last_run(mv, MAX, &step) : 0;
+    esp_err_t r;
+    if (!n) r = httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "no run kept");
+    else {
+        int o = snprintf(out, 64, "{\"step_min\":%d,\"mv\":[", step);
+        for (int i = 0; i < n; i++) o += snprintf(out + o, 8, "%s%d", i ? "," : "", mv[i]);
+        strcpy(out + o, "]}\n");
+        httpd_resp_set_type(req, "application/json");
+        r = httpd_resp_sendstr(req, out);
+    }
+    heap_caps_free(mv);
+    heap_caps_free(out);
+    return r;
+}
+
+static esp_err_t post_run(httpd_req_t *req)
+{
+    if (!token_ok(req)) return ESP_OK;
+    enum { MAX = 240, CAP = 4096 };
+    if (req->content_len <= 0 || req->content_len >= CAP) return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad size");
+    char *body = heap_caps_malloc(CAP, MALLOC_CAP_SPIRAM);
+    uint16_t *mv = heap_caps_malloc(MAX * sizeof *mv, MALLOC_CAP_SPIRAM);
+    int got = 0, n = 0, step = 0;
+    while (body && mv && got < (int)req->content_len) {
+        int r = httpd_req_recv(req, body + got, req->content_len - got);
+        if (r <= 0) break;
+        got += r;
+    }
+    bool ok = false;
+    if (body && mv && got == (int)req->content_len) {   // (by hand: cJSON would want a node per reading, in internal RAM)
+        body[got] = 0;
+        char *p = strstr(body, "\"step_min\""), *a = strstr(body, "\"mv\"");
+        if (p && (p = strchr(p, ':'))) step = atoi(p + 1);
+        if (a && (a = strchr(a, '['))) {
+            for (a++; n < MAX;) {
+                char *e;
+                long v = strtol(a, &e, 10);
+                if (e == a) break;
+                mv[n++] = (uint16_t)v;
+                a = e;
+                while (*a == ' ' || *a == ',' || *a == '\n') a++;
+            }
+        }
+        ok = battery_teach_run(mv, n, step);
+    }
+    heap_caps_free(body);
+    heap_caps_free(mv);
+    if (!ok) return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "not a run (or one's already waiting)");
+    return httpd_resp_sendstr(req, "learning from it\n");
 }
 
 // The motion sensor (GET /motion): what it reads, and which way the screen is turned
@@ -132,7 +191,7 @@ static esp_err_t post_display(httpd_req_t *req)
     if (httpd_req_get_url_query_str(req, q, sizeof q) != ESP_OK || httpd_query_key_value(q, "do", v, sizeof v) != ESP_OK ||
         (strcmp(v, "lcd") && strcmp(v, "panel")))
         return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "need ?do=lcd or ?do=panel");
-    sq_display_recover(strcmp(v, "lcd") ? 2 : 1);
+    sq_display_recover(strcmp(v, "lcd") ? 2 : 1, "asked");
     return httpd_resp_sendstr(req, "done\n");
 #else
     return httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "the square only");
@@ -151,4 +210,8 @@ void remote_log_register(httpd_handle_t server)
     httpd_register_uri_handler(server, &d);
     const httpd_uri_t e = {.uri = "/display", .method = HTTP_POST, .handler = post_display};
     httpd_register_uri_handler(server, &e);
+    const httpd_uri_t f = {.uri = "/battery/run", .method = HTTP_GET, .handler = get_run};
+    const httpd_uri_t g = {.uri = "/battery/run", .method = HTTP_POST, .handler = post_run};
+    httpd_register_uri_handler(server, &f);
+    httpd_register_uri_handler(server, &g);
 }

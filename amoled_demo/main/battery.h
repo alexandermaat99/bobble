@@ -1,5 +1,6 @@
 #pragma once
 #include <stdbool.h>
+#include <stdint.h>
 
 // Battery on the board's 3.7 V lithium connector, read through GPIO4 (ADC1 channel 3, divided by 3)
 void battery_init(void);
@@ -13,6 +14,12 @@ bool battery_logging(void);      // currently recording a discharge from full
 bool battery_empty(void);         // at 0% on battery for a minute: time to shut down until it's charged
 float battery_empty_volts(void);  // where 0% is
 float battery_read_now(void);     // one immediate reading (no smoothing), for the check at power-up
+// The last discharge run (learned from or not; kept until the next one ends): its readings, one every step_min
+// minutes from full. 0: none kept.
+int battery_last_run(uint16_t *mv, int max, int *step_min);
+// Learn from a run recorded earlier (as battery_last_run gives it): done shortly, between runs. false: not a run
+// (too long, readings out of range) or one is already waiting.
+bool battery_teach_run(const uint16_t *mv, int n, int step_min);
 
 // What the charger says, for Settings > Battery and GET /battery: the square's power chip (AXP2101) reports all of it;
 // elsewhere only usb and vbat_mv are known (chip false). -1: not known.

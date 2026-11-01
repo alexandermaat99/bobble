@@ -28,9 +28,12 @@ void sq_touch_fast(bool on);            // read the chip every 10 ms (screen on)
 void sq_touch_sleep(bool on);           // stop reading the touch chip (the PWR button's off) / start again
 float sq_battery_volts(void);           // the cell's voltage from the power chip; 0 if no battery
 bool sq_plugged_in(void);               // USB power is present (a computer or a wall charger)
+void sq_power_off(void);                // off, battery and all, until USB is plugged in or PWR is pressed
 int sq_power_key(void);                 // the PWR button since last asked: 0 none, 1 short press, 2 long press
 #include "battery.h"
 void sq_power_read(battery_diag_t *d);  // everything the power chip says about charging (a dozen register reads)
-void sq_display_recover(int what);     // 1: the LCD controller set up again, 2: the panel chip's setup sent again
+// 1: the LCD controller set up again, 2: the panel chip's setup sent again (why: for the log). 1 is what put a broken
+// or shifted picture right (2026-11-01): main.c does it on every wake, before the light comes on, and once after start-up
+void sq_display_recover(int what, const char *why);
 void sq_expander_check(void);          // logs the expander's state when it changes (and if it isn't as left)
 bool sq_amp(bool on);                   // the speaker's amplifier (through the expander): off unless something's playing

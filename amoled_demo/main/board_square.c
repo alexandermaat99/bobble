@@ -219,13 +219,13 @@ static void display_init_here(void)
 // over Wi-Fi: POST /display?do=lcd or ?do=panel). 1: this chip's LCD controller set up again (its pixel stream is
 // already restarted every frame). 2: the panel chip's own setup sent again (as at start-up, without the reset line,
 // which the touch chip shares).
-void sq_display_recover(int what)
+void sq_display_recover(int what, const char *why)
 {
     if (!panel) return;
     if (what == 1) {
         esp_lcd_panel_reset(panel);
         esp_lcd_panel_init(panel);
-        ESP_LOGW(TAG, "display: LCD controller set up again (asked)");
+        ESP_LOGW(TAG, "display: LCD controller set up again (%s)", why);
     } else if (what == 2) {
         panel_cmd(0x01, NULL, 0);                       // software reset
         vTaskDelay(pdMS_TO_TICKS(120));
@@ -233,7 +233,7 @@ void sq_display_recover(int what)
             panel_cmd(st7701_init[i].cmd, st7701_init[i].data, st7701_init[i].n);
             if (st7701_init[i].delay_ms) vTaskDelay(pdMS_TO_TICKS(st7701_init[i].delay_ms));
         }
-        ESP_LOGW(TAG, "display: panel chip set up again (asked)");
+        ESP_LOGW(TAG, "display: panel chip set up again (%s)", why);
     }
 }
 
@@ -448,6 +448,14 @@ static bool pmu_reg(uint8_t reg, uint8_t *v)
         if (pmu_reg(0x62, &icc[1])) { icc[1] = (icc[1] & 0xE0) | CHARGE_CODE; i2c_master_transmit(pmu_dev, icc, 2, 50); }
     }
     return i2c_master_transmit_receive(pmu_dev, &reg, 1, v, 1, 20) == ESP_OK;
+}
+
+// Everything off: the power chip's soft power-off (common config, bit 0) cuts the board from the battery, leaving only
+// the chip's own standby. Plugging USB in starts it again, as does the PWR button.
+void sq_power_off(void)
+{
+    uint8_t v[2] = {0x10, 0};
+    if (pmu_reg(0x10, &v[1])) { v[1] |= 0x01; i2c_master_transmit(pmu_dev, v, 2, 50); }
 }
 
 float sq_battery_volts(void)

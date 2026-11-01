@@ -1224,12 +1224,20 @@ static void power_screen_on(void)
         if (touch_off) { sq_touch_sleep(false); touch_off = false; }
 #endif
     }
+#if SQUARE_HW
+    // The broken or shifted picture: this chip's LCD controller loses its place (its DMA is restarted every frame, which
+    // doesn't put it right; setting the controller up again does). It can't be seen from here, so it's done on every
+    // wake while the light's still off: a picture that broke is right again after PWR twice.
+    sq_display_recover(1, "waking");
+#endif
     panel_cmd(0x11);                                   // sleep out: the chip wants a moment before showing anything
     vTaskDelay(pdMS_TO_TICKS(80));
 }
 
 // Battery empty: everything off (deep sleep), looking every 5 minutes for the charger. Charging lifts the
-// reading well above the empty point, and then the board starts up as usual.
+// reading well above the empty point, and then the board starts up as usual. The square powers off instead: in deep
+// sleep the rest of its board kept drawing, and took the cells from 3.70 V down to 3.13 V overnight. Its power chip
+// starts it again when USB is plugged in.
 #define EMPTY_CHECK_US (5 * 60 * 1000000LL)
 
 // The 4" panel has no on/off line: there the backlight is the switch
@@ -1250,6 +1258,11 @@ static void sleep_until_charged(void)
     imu_power(false);
     wifi_suspend(true);
     vTaskDelay(pdMS_TO_TICKS(50));
+#if SQUARE_HW
+    vTaskDelay(pdMS_TO_TICKS(500));                    // (the battery log's last write lands first)
+    sq_power_off();
+    vTaskDelay(pdMS_TO_TICKS(2000));                   // still here (plugged in just now?): sleep as below
+#endif
     esp_sleep_enable_timer_wakeup(EMPTY_CHECK_US);
     esp_deep_sleep_start();
 }
@@ -1882,6 +1895,13 @@ void app_main(void)
             }
         }
         if (power == PW_AWAKE && now - last_use > SLEEP_AFTER_US && !card_drag) power = PW_FADING_OUT;
+#if SQUARE_HW
+        static bool resynced;                          // and once after start-up's rush (Wi-Fi, calendars, covers: it
+        if (!resynced && now > 20000000) {             // broke in the first half minute after one, 2026-11-01)
+            resynced = true;
+            sq_display_recover(1, "after start-up");
+        }
+#endif
         if (power == PW_FADING_OUT) {
             set_brightness(brightness - 20);
             if (brightness == 0) {

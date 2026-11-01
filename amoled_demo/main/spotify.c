@@ -55,6 +55,7 @@ static volatile bool lib_visible;
 static int64_t lib_loaded_us;
 static char user_id[64];
 static int64_t shuffle_hold_until;   // after a toggle, trust our value until Spotify's reports catch up
+static int64_t vol_hold_until;       // likewise after setting the volume
 
 void spotify_get(spotify_state_t *out)
 {
@@ -809,6 +810,7 @@ static void parse_player(const char *json)
         ESP_LOGI(TAG, "now: %s on \"%s\" (%s)%s", s.episode ? "podcast" : "music", s.device,
                  cJSON_IsString(dt) ? dt->valuestring : "?", cJSON_IsTrue(sm) ? ", smart shuffle on" : "");
     }
+    if (esp_timer_get_time() < vol_hold_until && s.volume >= 0) s.volume = st.volume;
     if (esp_timer_get_time() < shuffle_hold_until) s.shuffle = st.shuffle;   // stale report right after a toggle
     else if (s.shuffle != st.shuffle) ESP_LOGI(TAG, "Spotify reports shuffle %s", s.shuffle ? "on" : "off");
     bool paused_now = st.playing && !s.playing;
@@ -967,15 +969,17 @@ static void run_command(int cmd, const char *arg)
         authed_call(HTTP_METHOD_POST, "/me/player/previous", NULL, &status);
         retry_on_device(HTTP_METHOD_POST, "/me/player/previous", &status);
         break;
+    case SP_VOL_SET:
     case SP_VOL_UP:
     case SP_VOL_DOWN: {
         if (s.volume < 0) { set_note("This device has no volume control"); return; }
-        int v = s.volume + (cmd == SP_VOL_UP ? 10 : -10);
+        int v = cmd == SP_VOL_SET ? atoi(arg) : s.volume + (cmd == SP_VOL_UP ? 10 : -10);
         v = v < 0 ? 0 : (v > 100 ? 100 : v);
         snprintf(path, sizeof path, "/me/player/volume?volume_percent=%d", v);
         if (authed_call(HTTP_METHOD_PUT, path, NULL, &status) && status < 300) {
             xSemaphoreTake(lock, portMAX_DELAY);
             st.volume = v;
+            vol_hold_until = esp_timer_get_time() + 3000000;
             xSemaphoreGive(lock);
         }
         break;

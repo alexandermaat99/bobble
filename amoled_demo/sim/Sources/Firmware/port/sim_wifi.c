@@ -200,7 +200,7 @@ static esp_err_t input_post(httpd_req_t *req)
 static void start_web(void)
 {
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
-    cfg.max_uri_handlers = 24;
+    cfg.max_uri_handlers = 32;
     if (httpd_start(&httpd, &cfg) != ESP_OK) return;
     const httpd_uri_t status = {.uri = "/status", .method = HTTP_GET, .handler = status_get};
     httpd_register_uri_handler(httpd, &status);
