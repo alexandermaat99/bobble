@@ -1766,6 +1766,11 @@ static const float field_pal[2][6] = {{20, 20, 23, 235, 235, 240}, {20, 20, 23, 
 static const int field_rim[5][3] = {{56, 56, 62}, {36, 130, 255}, {255, 102, 26}, {38, 208, 124}, {118, 118, 126}};
 static const char *const field_tag[5] = {"", "WORKING", "NEEDS YOU", "DONE", "STOPPED"};
 
+// The Tiles look: each bubble a tile in its state's colour (blue working, orange needs you, yellow done, dark grey
+// stopped) with black words, and the choices in black tiles set into it
+static const float tiles_pal[5][6] = {{232, 232, 234, 16, 16, 16}, {112, 182, 252, 16, 16, 16}, {248, 150, 50, 16, 16, 16},
+                                      {250, 222, 62, 16, 16, 16}, {48, 48, 48, 160, 160, 160}};   // (0: the host's)
+
 static void crowd_field_bg(uint16_t *buf, int y0, int h)
 {
     for (int y = y0 - y0 % 24 + 12; y < y0 + h; y += 24) {
@@ -1778,7 +1783,7 @@ static void crowd_field_bg(uint16_t *buf, int y0, int h)
 static void crowd_draw(uint16_t *buf, int y0, int h)
 {
     const font_t *f = &font_label;
-    bool fl = ui_field();
+    bool fl = ui_field(), tl = ui_tiles();
     if (fl) crowd_field_bg(buf, y0, h);
     for (int pass = 0; pass < 2 * CROWD_POOL; pass++) {   // the waiting line first (behind), then the ones up front
         int i = pass % CROWD_POOL;
@@ -1799,7 +1804,8 @@ static void crowd_draw(uint16_t *buf, int y0, int h)
         int st = c->state >= AG_WORKING && c->state <= AG_STOPPED ? c->state : AG_WORKING;
         const float *pal = host ? (c->state == AG_WAITING ? crowd_pal[AG_WAITING] : quiet) : resting ? crowd_pal[AG_STOPPED] : crowd_pal[st];
         if (fl) pal = field_pal[!host && (resting || st == AG_STOPPED)];
-        bool light = pal[0] > 128;
+        if (tl) pal = tiles_pal[host ? (c->state == AG_WAITING ? AG_WAITING : 0) : resting ? AG_STOPPED : st];
+        bool light = pal[0] > 128 || (tl && pal[1] > 128);   // (Tiles: its blue too)
         float dimk = st == AG_STOPPED && !host ? 0.5f : resting ? 0.6f : 1;
         if (host && !c->bubble) {                     // the host with nothing to say: just itself
             sprite_draw(buf, y0, h, HOST_WHO, &ms->pose, ms->x, CROWD_FEET - ms->dy, CROWD_PX * k * ms->sc, fminf(1, k * 1.5f));
@@ -1848,11 +1854,12 @@ static void crowd_draw(uint16_t *buf, int y0, int h)
                 draw_ftext(buf, y0, h, x1 - 16 - gw, yb0 + 1 - font_mono_s.line_h / 2, &font_mono_s, tag, rim);
             }
         } else {
-            fill_rrect(buf, y0, h, x0, yb0, x1, y1, 16, bg);
+            fill_rrect(buf, y0, h, x0, yb0, x1, y1, tl ? 22 : 16, bg);
             fill_tri(buf, y0, h, tx - 9, y1 - 1, tx + 9, y1 - 1, tx, y1 + 12, bg);
         }
         int lc[3];                                    // the logo and title in the chat's colour (darker on a light bubble)
         for (int q = 0; q < 3; q++) lc[q] = (int)(cc[q] * (light ? 0.5f : 1) * a);
+        if (tl && light) for (int q = 0; q < 3; q++) lc[q] = (int)(pal[3 + q] * a);   // (Tiles: black on the colour)
         int ty = yb0 + CROWD_PAD + inner;
         if (!host) crowd_logo(buf, y0, h, c->agent, x0 + CROWD_PAD + 11, ty + tf->line_h / 2, lc);
         uint16_t tc = rgb(lc[0], lc[1], lc[2]);
@@ -1878,7 +1885,9 @@ static void crowd_draw(uint16_t *buf, int y0, int h)
             for (int q = 0; q < 3; q++) { pc[q] = (int)(lc[q] + (pal[q] * a - lc[q]) * mix); tcol[q] = (int)((255 + (pal[q] - 255) * mix) * a); }
             if (fl)                                   // (Field: orange keys, dark lettering)
                 for (int q = 0; q < 3; q++) { pc[q] = (int)((field_rim[AG_WAITING][q] + (pal[q] - field_rim[AG_WAITING][q]) * mix) * a); tcol[q] = (int)((14 + 136 * mix) * a); }
-            fill_rrect(buf, y0, h, px0, pt, px1, pb, fl ? 4 : ph / 2, rgb(pc[0], pc[1], pc[2]));
+            if (tl)                                   // (Tiles: black keys, white lettering)
+                for (int q = 0; q < 3; q++) { pc[q] = (int)((16 + (pal[q] - 16) * mix) * a); tcol[q] = (int)((255 + (16 - 255) * mix) * a); }
+            fill_rrect(buf, y0, h, px0, pt, px1, pb, fl ? 4 : tl ? 14 : ph / 2, rgb(pc[0], pc[1], pc[2]));
             strlcpy(lab, c->opt[o], sizeof lab);
 #else
             static const int green[3] = {80, 210, 110};

@@ -19,6 +19,7 @@
 #include "calendar_ui.h"
 #include "reminders.h"
 #include "battery.h"
+#include "tiles.h"
 
 #define C_WHITE  rgb(255, 255, 255)
 #define C_GREY   rgb(140, 140, 160)
@@ -272,7 +273,7 @@ void cal_ui_enter(void)
 
 // ---------------------------------------------------------------- agenda layout
 #if !SCREEN_ROUND
-#define LIST_TOP 242
+#define LIST_TOP (ui_tiles() ? 262 : 242)   // (Tiles: its timeline is a tile of its own, a little lower)
 #define LIST_BOT H
 #else
 #define LIST_TOP 68
@@ -1113,6 +1114,232 @@ static void draw_field(uint16_t *buf, int y0, int h)
     }
 }
 
+// ---------------------------------------------------------------- the Tiles look (Settings > Look)
+// Like a phone's widgets: on the left the time in a black tile set in a blue one, with the date and the month under
+// it; on the right what's on or next in a light tile (a big countdown, as a weather widget has its temperature); the
+// day's timeline in a dark tile; the agenda as tiles in their calendar's colour, each with a black tile for its time.
+// Same rows as the other looks, so scrolling and taps work the same.
+#define TT_TOP 46                                   // the top tiles (clear of the status bar's Wi-Fi and battery)
+#define TT_BOT 196
+#define TT_MID 246                                  // the left tile's right edge
+#define TT_TL_Y0 204                                // the timeline's tile
+#define TT_TL_Y1 254
+#define TT_TRACK 218                                // its track's middle
+
+static uint16_t tiles_color(int i)
+{
+    const uint16_t c[6] = {T_SKY, T_ORANGE, T_YELLOW, T_MIST, T_RED, T_BLUE};
+    return c[(calendar_count() > 1 ? items[i].cal : i) % 6];
+}
+
+// the top of a line of f that puts its capitals' middle at cy
+static int tiles_mid(const font_t *f, float cy) { return (int)lroundf(cy - f->ascent + 0.3f * f->line_h); }
+
+static void tiles_clock(uint16_t *buf, int y0, int h, struct tm *tm)
+{
+    if (TT_BOT <= y0 || TT_TOP >= y0 + h) return;
+    char t[16];
+    aa_rrect(buf, y0, h, 14, TT_TOP, TT_MID, TT_BOT, 30, T_BLUE);
+    aa_rrect(buf, y0, h, 22, TT_TOP + 8, TT_MID - 8, TT_TOP + 92, 23, T_INK);
+    snprintf(t, sizeof t, "%d:%02d", tm->tm_hour % 12 ? tm->tm_hour % 12 : 12, tm->tm_min);
+    ftext_cx(buf, y0, h, (22 + TT_MID - 8) / 2, tiles_mid(&font_clock, TT_TOP + 50), &font_clock, t, C_WHITE);
+    // the day in an orange tile, the month in a navy disc
+    const float ry0 = TT_TOP + 100, ry1 = TT_BOT - 8, r = (ry1 - ry0) / 2;
+    aa_rrect(buf, y0, h, 22, ry0, TT_MID - 16 - 2 * r, ry1, 18, T_ORANGE);
+    strftime(t, sizeof t, "%a %e", tm);
+    char *p = strstr(t, "  ");                        // (%e pads single days)
+    if (p) memmove(p + 1, p + 2, strlen(p + 2) + 1);
+    ftext_cx(buf, y0, h, (int)(22 + TT_MID - 16 - 2 * r) / 2, tiles_mid(&font_body, (ry0 + ry1) / 2), &font_body, t, T_INK);
+    float dx = TT_MID - 8 - r;
+    aa_disc(buf, y0, h, dx, (ry0 + ry1) / 2, r, T_NAVY);
+    strftime(t, sizeof t, "%b", tm);
+    ftext_cx(buf, y0, h, (int)dx, tiles_mid(&font_label, (ry0 + ry1) / 2), &font_label, t, C_WHITE);
+}
+
+// a small calendar page (the next tile's label)
+static void tiles_cal_icon(uint16_t *buf, int y0, int h, float cx, float cy, uint16_t c, uint16_t bg)
+{
+    aa_rrect(buf, y0, h, cx - 8, cy - 7, cx + 8, cy + 8, 3, c);
+    aa_rrect(buf, y0, h, cx - 6, cy - 2, cx + 6, cy + 6, 1.5f, bg);
+    aa_rrect(buf, y0, h, cx - 5, cy - 10, cx - 3, cy - 5, 1, c);
+    aa_rrect(buf, y0, h, cx + 3, cy - 10, cx + 5, cy - 5, 1, c);
+}
+
+// what's on (yellow) or next (blue): "Next 9:00 AM", a big "in 49m", its name
+static void tiles_next(uint16_t *buf, int y0, int h)
+{
+    if (TT_BOT <= y0 || TT_TOP >= y0 + h) return;
+    const int x0 = TT_MID + 10, x1 = W - 14, tw = x1 - x0 - 36;
+    int cur = calendar_loaded() ? item_at(now_t) : -1, nxt = calendar_loaded() ? next_item(now_t) : -1;
+    int show = cur >= 0 ? cur : nxt;
+    uint16_t bg = cur >= 0 ? T_YELLOW : show >= 0 ? T_SKY : T_PAPER;
+    aa_rrect(buf, y0, h, x0, TT_TOP, x1, TT_BOT, 30, bg);
+    char t[80], l2[80], when[32];
+    if (!calendar_loaded() || show < 0) {
+        tiles_cal_icon(buf, y0, h, x0 + 28, TT_TOP + 28, T_INK, bg);
+        wrap2w_cal(!calendar_loaded() ? (calendar_count() ? calendar_error() : "Add a calendar in the Bobble app")
+                   : "Nothing coming up", &font_label, tw, t, l2, sizeof t);
+        draw_ftext(buf, y0, h, x0 + 18, TT_BOT - 68, &font_label, t, T_INK);
+        if (l2[0]) draw_ftext(buf, y0, h, x0 + 18, TT_BOT - 44, &font_label, l2, T_INK);
+        return;
+    }
+    ical_item_t *it = &items[show];
+    tiles_cal_icon(buf, y0, h, x0 + 28, TT_TOP + 26, T_INK, bg);
+    fmt_time(when, sizeof when, cur >= 0 ? it->end : it->start, false);
+    snprintf(t, sizeof t, cur >= 0 ? "Until %s" : "Next  %s", when);
+    if (cur < 0 && !same_day(it->start, now_t)) {     // (another day: which)
+        struct tm tm;
+        localtime_r(&it->start, &tm);
+        strftime(when, sizeof when, "%a", &tm);
+        snprintf(t, sizeof t, "%s %d:%02d", when, tm.tm_hour % 12 ? tm.tm_hour % 12 : 12, tm.tm_min);
+    }
+    draw_ftext(buf, y0, h, x0 + 44, tiles_mid(&font_small, TT_TOP + 26), &font_small, t, T_INK);
+    fmt_short(when, sizeof when, "", cur >= 0 ? it->end - now_t : it->start - now_t);
+    if (cur >= 0) strlcat(when, " left", sizeof when);
+    else if (it->start - now_t >= 24 * 3600) {        // ("in 1 days")
+        int d = (int)((it->start - now_t) / 86400);
+        snprintf(when, sizeof when, "%d day%s", d, d == 1 ? "" : "s");
+    }
+    const font_t *bf = ftext_width(&font_big, when) <= x1 - x0 - 36 ? &font_big : &font_body;
+    draw_ftext(buf, y0, h, x0 + 16, tiles_mid(bf, TT_TOP + 70), bf, when, T_INK);
+    wrap2w_cal(it->title, &font_label, x1 - x0 - 34, t, l2, sizeof t);
+    int ty = l2[0] ? TT_BOT - 54 : TT_BOT - 36;
+    draw_ftext(buf, y0, h, x0 + 18, ty, &font_label, t, T_INK);
+    if (l2[0]) draw_ftext(buf, y0, h, x0 + 18, ty + 22, &font_label, l2, T_INK);
+}
+
+// the day: a black track in a dark tile, meetings as pills on it (dimmed once they're gone), a white "now"
+static void tiles_timeline(uint16_t *buf, int y0, int h)
+{
+    if (TT_TL_Y1 <= y0 || TT_TL_Y0 >= y0 + h) return;
+    draw_timeline_span();                              // (sets tl_day0 / tl_day1 as the other looks' do)
+    aa_rrect(buf, y0, h, 14, TT_TL_Y0, W - 14, TT_TL_Y1, 25, T_CASE);
+    const float tx0 = TL_X0 + 6, tx1 = TL_X1 - 6;
+    #define TTX(t) (tx0 + (float)((t) - tl_day0) * (tx1 - tx0) / (float)(tl_day1 - tl_day0))
+    aa_rrect(buf, y0, h, tx0 - 4, TT_TRACK - 8, tx1 + 4, TT_TRACK + 8, 8, rgb(0, 0, 0));
+    float xn = TTX(now_t);
+    for (int i = 0; i < n_items; i++) {
+        ical_item_t *it = &items[i];
+        if (it->all_day || it->end <= tl_day0 || it->start >= tl_day1) continue;
+        float xa = fmaxf(tx0, TTX(it->start)), xb = fminf(tx1, TTX(it->end));
+        if (xb - xa < 8) { float m = (xa + xb) / 2; xa = m - 4; xb = m + 4; }
+        float hh = it->free ? 2.5f : 5;
+        uint16_t c = tiles_color(i);
+        aa_rrect(buf, y0, h, xa, TT_TRACK - hh, xb, TT_TRACK + hh, hh, xb <= xn ? dimmed(c) : c);
+        if (xa < xn && xn < xb) aa_rrect(buf, y0, h, xa, TT_TRACK - hh, xn, TT_TRACK + hh, hh, dimmed(c));
+    }
+    int span = (int)((tl_day1 - tl_day0) / 3600), step = span <= 8 ? 2 : span <= 12 ? 3 : span <= 16 ? 4 : 6;
+    for (int k = 0; k <= span; k += step) {
+        time_t t = tl_day0 + k * 3600;
+        struct tm tm;
+        localtime_r(&t, &tm);
+        char l[8];
+        snprintf(l, sizeof l, "%d%s", tm.tm_hour % 12 ? tm.tm_hour % 12 : 12, tm.tm_hour < 12 ? "am" : "pm");
+        int lw = ftext_width(&font_small, l), lx = (int)TTX(t) - lw / 2;
+        lx = lx < tx0 - 4 ? (int)tx0 - 4 : lx + lw > tx1 + 4 ? (int)tx1 + 4 - lw : lx;
+        if (fabsf(TTX(t) - xn) > 30) draw_ftext(buf, y0, h, lx, TT_TRACK + 11, &font_small, l, T_GREY);
+    }
+    aa_disc(buf, y0, h, xn, TT_TRACK, 8, C_WHITE);
+    aa_disc(buf, y0, h, xn, TT_TRACK, 4, T_RED);
+    ftext_cx(buf, y0, h, (int)xn, TT_TRACK + 11, &font_small, "Now", C_WHITE);
+    #undef TTX
+}
+
+// the agenda: days as words, meetings as tiles in their colour with a black tile for the time, reminders dark
+static void tiles_list(uint16_t *buf, int y0, int h)
+{
+    char line[64], t1[16], l1[96];
+    compute_agenda();
+    gfx_clip(LIST_TOP, LIST_BOT);
+    int y = LIST_TOP - scroll;
+    for (int r = 0; r < ag_n; r++) {
+        int rh = ag_h[r], type = ag_types[r], ix = ag_idx[r];
+        if (y + rh > y0 && y < y0 + h && y + rh > LIST_TOP && y < LIST_BOT) {
+            if (type == 0) {                              // "Tomorrow" and its date in a pill
+                time_t d = calendar_window_start() + ix * 86400 + 3600;
+                struct tm tm;
+                localtime_r(&d, &tm);
+                char wd[16], date[16];
+                strftime(wd, sizeof wd, "%A", &tm);
+                strftime(date, sizeof date, "%b %e", &tm);
+                char *p = strstr(date, "  ");
+                if (p) memmove(p + 1, p + 2, strlen(p + 2) + 1);
+                const char *day = ix == 0 ? "Today" : ix == 1 ? "Tomorrow" : wd;
+                draw_ftext(buf, y0, h, 20, y + 14, &font_label, day, C_WHITE);
+                int x = 20 + ftext_width(&font_label, day) + 10, dw = ftext_width(&font_small, date);
+                aa_rrect(buf, y0, h, x, y + 14, x + dw + 20, y + 38, 12, T_CASE2);
+                draw_ftext(buf, y0, h, x + 10, tiles_mid(&font_small, y + 26), &font_small, date, T_PAPER);
+            } else if (type == 2) {
+                aa_rrect(buf, y0, h, 14, y + 3, W - 14, y + rh - 3, 19, T_CASE);
+                draw_ftext(buf, y0, h, 30, tiles_mid(&font_small, y + rh / 2.0f), &font_small, "Nothing scheduled", T_GREY);
+            } else {
+                const int x0 = 14, x1 = W - 14, ya = y + 3, yb = y + rh - 3;
+                float mid = (ya + yb) / 2.0f;
+                if (type == 3) {                          // a reminder: a dark tile, a ring in its list's colour
+                    reminder_t *rm = &rems[ix];
+                    uint16_t lc = rgb(rm->r, rm->g, rm->b);
+                    bool ticked = !strcmp(ticked_id, rm->id), overdue = rm->due < calendar_window_start() ||
+                                  (rm->has_time && rm->due < now_t);
+                    aa_rrect(buf, y0, h, x0, ya, x1, yb, 22, T_CASE);
+                    aa_disc(buf, y0, h, x0 + 30, mid, 12, lc);
+                    if (!ticked) aa_disc(buf, y0, h, x0 + 30, mid, 9.5f, T_CASE);
+                    else {
+                        static const float chk[] = {7, 12.5f, 10.5f, 16, 17, 8.5f};
+                        aa_icon(buf, y0, h, x0 + 30, mid, 20, chk, 3, false, 2.4f, T_CASE);
+                    }
+                    fitw(l1, sizeof l1, rm->title, &font_label, x1 - x0 - 70);
+                    draw_ftext(buf, y0, h, x0 + 54, ya + 7, &font_label, l1, ticked ? T_GREY : C_WHITE);
+                    if (rm->has_time) fmt_time(t1, sizeof t1, rm->due, false);
+                    snprintf(line, sizeof line, "%s%s", overdue ? "Overdue - " : "", rm->has_time ? t1 : rm->list);
+                    draw_ftext(buf, y0, h, x0 + 54, ya + 32, &font_small, line, overdue ? T_RED : T_GREY);
+                } else {
+                    ical_item_t *it = &items[ix];
+                    bool past = it->end <= now_t, now = !it->all_day && it->start <= now_t && now_t < it->end;
+                    uint16_t c = past ? T_CASE : tiles_color(ix), ink = past ? T_GREY : T_INK;
+                    aa_rrect(buf, y0, h, x0, ya, x1, yb, 22, c);
+                    // the time (or "Now", "All day") in a black tile on the right
+                    if (it->all_day) strlcpy(t1, "All day", sizeof t1);
+                    else if (now) strlcpy(t1, "Now", sizeof t1);
+                    else fmt_time(t1, sizeof t1, it->start, true);
+                    int tw = ftext_width(&font_label, t1), bx0 = x1 - 8 - tw - 28;
+                    aa_rrect(buf, y0, h, bx0, ya + 8, x1 - 8, yb - 8, 15, now ? C_WHITE : past ? rgb(0, 0, 0) : T_INK);
+                    draw_ftext(buf, y0, h, bx0 + 14, tiles_mid(&font_label, mid), &font_label, t1,
+                               now ? T_INK : past ? T_GREY : C_WHITE);
+                    int room = bx0 - 12 - (x0 + 20);
+                    if (it->all_day) {
+                        fitw(l1, sizeof l1, it->title, &font_label, room);
+                        draw_ftext(buf, y0, h, x0 + 20, tiles_mid(&font_label, mid), &font_label, l1, ink);
+                    } else {
+                        fitw(l1, sizeof l1, it->title, &font_label, room);
+                        draw_ftext(buf, y0, h, x0 + 20, ya + 7, &font_label, l1, ink);
+                        char t2[16];
+                        fmt_time(t1, sizeof t1, it->start, false);
+                        fmt_time(t2, sizeof t2, it->end, false);
+                        snprintf(line, sizeof line, "%s - %s", t1, t2);
+                        draw_ftext(buf, y0, h, x0 + 20, ya + 32, &font_small, line, past ? rgb(90, 90, 96) : T_INK2);
+                    }
+                }
+            }
+        }
+        y += rh;
+    }
+    gfx_clip(0, H);
+    list_fade(buf, y0, h);
+}
+
+static void draw_tiles(uint16_t *buf, int y0, int h)
+{
+    compute_face();
+    struct tm tm;
+    localtime_r(&now_t, &tm);
+    tiles_clock(buf, y0, h, &tm);
+    tiles_next(buf, y0, h);
+    if (calendar_loaded()) {
+        tiles_timeline(buf, y0, h);
+        tiles_list(buf, y0, h);
+    }
+}
+
 static void draw_square(uint16_t *buf, int y0, int h)
 {
     compute_face();
@@ -1139,6 +1366,7 @@ void cal_ui_draw(uint16_t *buf, int y0, int h)
 {
 #if !SCREEN_ROUND
     if (ui_field()) draw_field(buf, y0, h);
+    else if (ui_tiles()) draw_tiles(buf, y0, h);
     else draw_square(buf, y0, h);
     return;
 #endif

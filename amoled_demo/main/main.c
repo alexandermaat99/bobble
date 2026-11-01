@@ -997,7 +997,7 @@ static int power = PW_AWAKE, brightness = 255;
 static int bright_pref = 255;         // chosen in Settings; saved in NVS
 static int volume_pref = 50;          // likewise
 static volatile bool look_changed;      // (set from the Mac app's request: the loop redraws everything)
-static bool field_pref = true;        // the Field look (Settings > Look; the beta's default)
+static int look_pref = LOOK_FIELD;    // Settings > Look (Field: the beta's default)
 static float rest[3];                 // slowly-following accelerometer reading: where the board has been sitting
 
 static void set_brightness(int b)
@@ -1097,16 +1097,18 @@ static void set_locked(bool on)
 
 int device_volume_get(void) { return volume_pref; }
 
-bool ui_field(void) { return !SCREEN_ROUND && field_pref; }
+int ui_look(void) { return SCREEN_ROUND ? LOOK_CLASSIC : look_pref; }
+bool ui_field(void) { return ui_look() == LOOK_FIELD; }
+bool ui_tiles(void) { return ui_look() == LOOK_TILES; }
 
-void ui_field_set(bool on)
+void ui_look_set(int look)
 {
-    if (field_pref == on) return;
-    field_pref = on;
+    if (look < 0 || look >= N_LOOKS || look_pref == look) return;
+    look_pref = look;
     look_changed = true;
     nvs_handle_t h;
     if (nvs_open("demo", NVS_READWRITE, &h) != ESP_OK) return;
-    nvs_set_u8(h, "field", on);
+    nvs_set_u8(h, "field", look);                     // (the key from when there were two: 0 Classic, 1 Field)
     nvs_commit(h);
     nvs_close(h);
 }
@@ -1129,7 +1131,7 @@ static void brightness_load(void)
     if (nvs_open("demo", NVS_READONLY, &h) != ESP_OK) return;
     if (nvs_get_u8(h, "bright", &v) == ESP_OK) bright_pref = v < 10 ? 10 : v;
     if (nvs_get_u8(h, "volume", &v) == ESP_OK) volume_pref = v > 100 ? 100 : v;
-    if (nvs_get_u8(h, "field", &v) == ESP_OK) field_pref = v;
+    if (nvs_get_u8(h, "field", &v) == ESP_OK && v < N_LOOKS) look_pref = v;
     if (nvs_get_u8(h, "locked", &v) == ESP_OK) locked = v;
     nvs_close(h);
     set_brightness(bright_pref);

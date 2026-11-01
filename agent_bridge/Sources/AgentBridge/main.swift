@@ -138,7 +138,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(.separator())
 
         menu.addItem(header("Display Style"))
-        for (title, l) in [("Apple", "classic"), ("Teenage Engineering", "field")] {
+        for (title, l) in [("Apple", "classic"), ("Teenage Engineering", "field"), ("Tiles", "tiles")] {
             let it = action(title, #selector(chooseLook(_:)))
             it.representedObject = l
             it.state = look == l ? .on : .off
@@ -302,7 +302,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         KeyStore.set(k, file: "anthropic-key")
     }
 
-    // The square's look, "field" or "classic": as the board last said, or as last chosen here
+    // The square's look, "field", "classic" or "tiles": as the board last said, or as last chosen here
     private var look: String { UserDefaults.standard.string(forKey: "look") ?? "field" }
 
     @objc private func chooseLook(_ sender: NSMenuItem) {

@@ -12,6 +12,7 @@
 #include "pet_ui.h"
 #include "chat_ui.h"
 #include "screen.h"
+#include "tiles.h"
 
 // iOS's dark colours
 #define C_WHITE   rgb(255, 255, 255)
@@ -387,6 +388,110 @@ static void draw_field(uint16_t *buf, int y0, int h)
         }
     }
 }
+
+// ---------------------------------------------------------------- the Tiles look (Settings > Look)
+// Like a phone's widgets: a tile in the state's colour (blue listening, orange speaking, yellow thinking, grey-blue
+// muted) with what's going on in its corner and black bars dancing to the sound, and rounded square keys (black
+// glyphs on the lit ones) with their names under them.
+#define TV_X 92                                         // the tile: this far either side of the middle...
+#define TV_Y 66                                         // ...and above and below the orb's middle
+#define TV_BARS 9
+
+static void tiles_view(uint16_t *buf, int y0, int h)
+{
+    if (ORB_Y + TV_Y <= y0 || ORB_Y - TV_Y >= y0 + h) return;
+    bool speaking = cs.active && cs.state == CS_SPEAKING, thinking = cs.active && cs.state == CS_THINKING;
+    uint16_t bg = !cs.active ? T_ORANGE : cs.muted ? T_MIST : thinking ? T_YELLOW : speaking ? T_ORANGE : T_SKY;
+    aa_rrect(buf, y0, h, CX - TV_X, ORB_Y - TV_Y, CX + TV_X, ORB_Y + TV_Y, 30, bg);
+    const char *what = !cs.active ? "Claude" : cs.muted ? "Muted" : thinking ? "Thinking" : speaking ? "Speaking" : "Listening";
+    pet_ui_spark(buf, y0, h, CX - TV_X + 26, ORB_Y - TV_Y + 24, 16, 16, 16, 0.3f);
+    draw_ftext(buf, y0, h, CX - TV_X + 42, ORB_Y - TV_Y + 14, &font_small, what, T_INK);
+    const float bw = 12, gap = 7, cy = ORB_Y + 14, top = 40;
+    float x0 = CX - (TV_BARS * bw + (TV_BARS - 1) * gap) / 2, loud = fminf(1, 0.1f + level * 1.6f);
+    int scan = (int)(t_anim * 10) % (2 * TV_BARS - 2);
+    if (scan >= TV_BARS) scan = 2 * TV_BARS - 2 - scan;
+    for (int c = 0; c < TV_BARS; c++) {
+        float v;                                        // how tall (0..1)
+        if (!cs.active || cs.muted) v = 0;
+        else if (thinking) v = fmaxf(0, 1 - 0.45f * abs(c - scan)) * 0.7f;
+        else {
+            float e = 1 - fabsf(c - (TV_BARS - 1) / 2.0f) / (TV_BARS * 0.8f);
+            float w = 0.45f + 0.55f * fabsf(sinf(c * 1.3f + t_anim * (speaking ? 7 : 4)));
+            v = loud * e * w;
+        }
+        float hh = bw / 2 + (top - bw / 2) * v, x = x0 + c * (bw + gap);
+        aa_rrect(buf, y0, h, x, cy - hh, x + bw, cy + hh, bw / 2, T_INK);
+    }
+}
+
+// a rounded square key with its name under it
+static void tiles_key(uint16_t *buf, int y0, int h, float cx, float rad, uint16_t fill, const char *label)
+{
+    aa_rrect(buf, y0, h, cx - rad, BTN_Y - rad, cx + rad, BTN_Y + rad, rad * 0.62f, fill);
+    draw_ftext(buf, y0, h, (int)cx - ftext_width(&font_small, label) / 2, LABEL_Y, &font_small, label, T_GREY);
+}
+
+static void draw_tiles(uint16_t *buf, int y0, int h)
+{
+    tiles_view(buf, y0, h);
+
+    // the model, in a pill at the top (tap it for the menu)
+    if (cs.n_models && PILL_Y + PILL_H > y0 && PILL_Y < y0 + h) {
+        const char *m = cs.models[cs.model];
+        int tw = ftext_width(&font_small, m), pw = 22 + 8 + tw + 8 + 12 + 16, px = CX - pw / 2;
+        aa_rrect(buf, y0, h, px, PILL_Y - 4, px + pw, PILL_Y + PILL_H - 6, (PILL_H - 2) / 2.0f, pressed == B_PILL ? tile_hot(T_CASE2) : T_CASE2);
+        aa_disc(buf, y0, h, px + 18, PILL_Y + PILL_H / 2 - 5, 5, T_ORANGE);
+        draw_ftext(buf, y0, h, px + 32, PILL_Y + (PILL_H - font_small.line_h) / 2 - 5, &font_small, m, C_WHITE);
+        float vx = px + 32 + tw + 12, vy = PILL_Y + PILL_H / 2.0f - 5;
+        float v[6] = {vx - 4, vy - 2, vx, vy + 2, vx + 4, vy - 2};
+        aa_path(buf, y0, h, v, 3, false, 1.8f, T_GREY);
+    }
+
+    // what you said (or what's wrong), then what Claude's saying, or what's going on
+    if (cs.status[0]) {
+        char t[LINE_CAP + 4];
+        plain(t, sizeof t, cs.status);
+        text_mid(buf, y0, h, TEXT_TOP, &font_small, t, T_RED);
+    } else {
+        for (int i = 0; i < n_heard; i++) text_mid(buf, y0, h, TEXT_TOP + i * font_small.line_h, &font_small, heard_l[i], T_GREY);
+    }
+    if (n_said) {
+        for (int i = 0; i < n_said; i++) text_mid(buf, y0, h, said_top + i * said_f->line_h, said_f, said_l[i], C_WHITE);
+    } else if (said_top + font_label.line_h <= TEXT_BOT) {
+        const char *hint = !cs.active ? (cs.mac ? "Tap to talk to Claude" : "Open Bobble on your Mac to talk")
+                         : cs.muted ? "You're muted" : cs.state == CS_THINKING ? "Thinking..." : "Listening...";
+        text_mid(buf, y0, h, said_top + (n_heard ? 0 : 8), &font_label, hint, T_GREY);
+    }
+
+    if (BTN_Y + MIC_R + 40 >= y0 && BTN_Y - MIC_R <= y0 + h) {
+        // speaker (left), in a chat: blue when Claude's muted
+        float sx = CX - SIDE_DX;
+        bool sp = cs.speaker_muted, dn = pressed == B_SPEAKER;
+        if (cs.active) {
+            uint16_t bg = sp ? T_SKY : T_CASE2;
+            tiles_key(buf, y0, h, sx, SIDE_R, dn ? tile_hot(bg) : bg, "Speaker");
+            speaker_glyph(buf, y0, h, sx + 2, BTN_Y, 0.95f, sp ? T_INK : C_WHITE);
+            if (sp) slash(buf, y0, h, sx, BTN_Y, 0.95f, T_INK, dn ? tile_hot(bg) : bg);
+        }
+
+        // the mic (middle): orange to start a chat; in one, dark, or yellow with a slash when you're muted
+        bool mut = cs.active && cs.muted;
+        dn = pressed == B_MIC;
+        uint16_t mb = !cs.active ? T_ORANGE : mut ? T_YELLOW : T_CASE2;
+        if (dn) mb = tile_hot(mb);
+        tiles_key(buf, y0, h, CX, MIC_R, mb, !cs.active ? "Talk" : mut ? "Unmute" : "Mute");
+        mic_glyph(buf, y0, h, CX, BTN_Y + 1, 1.15f, cs.active && !mut ? C_WHITE : T_INK);
+        if (mut) slash(buf, y0, h, CX, BTN_Y, 1.15f, T_INK, mb);
+
+        // end (right), in a chat
+        if (cs.active) {
+            float ex = CX + SIDE_DX;
+            tiles_key(buf, y0, h, ex, SIDE_R, pressed == B_CLOSE ? tile_hot(T_RED) : T_RED, "End");
+            line(buf, y0, h, ex - 8, BTN_Y - 8, ex + 8, BTN_Y + 8, 3, T_INK);
+            line(buf, y0, h, ex - 8, BTN_Y + 8, ex + 8, BTN_Y - 8, 3, T_INK);
+        }
+    }
+}
 #endif
 
 // ---------------------------------------------------------------- the menu (tap the model, or hold the speaker)
@@ -460,8 +565,9 @@ static float orb_size(void)
 void chat_ui_draw(uint16_t *buf, int y0, int h)
 {
 #if !SCREEN_ROUND
-    if (ui_field()) {
-        draw_field(buf, y0, h);
+    if (ui_field() || ui_tiles()) {
+        if (ui_field()) draw_field(buf, y0, h);
+        else draw_tiles(buf, y0, h);
         if (menu) draw_menu(buf, y0, h);
         return;
     }

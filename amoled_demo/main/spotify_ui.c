@@ -11,6 +11,7 @@
 #include "spotify_ui.h"
 #include "spotify_logo.h"
 #include "screen.h"
+#include "tiles.h"
 
 #define C_WHITE  rgb(255, 255, 255)
 #define C_GREY   rgb(170, 170, 185)
@@ -46,6 +47,14 @@ static const btn_t fbtns[] = {
     {CX - 84 - 24, F_CTRL_Y - 24, CX - 84 + 24, F_CTRL_Y + 24, ID_PREV},
     {CX - 30, F_CTRL_Y - 30, CX + 30, F_CTRL_Y + 30, ID_PLAY},
     {CX + 84 - 24, F_CTRL_Y - 24, CX + 84 + 24, F_CTRL_Y + 24, ID_NEXT},
+};
+// The Tiles look's: the controls in a row of tiles along the bottom, the times at its ends
+#define T_ROW_Y0 392
+#define T_ROW_Y1 466
+static const btn_t tbtns[] = {
+    {CX - 116, T_ROW_Y0 + 4, CX - 50, T_ROW_Y1 - 4, ID_PREV},
+    {CX - 40, T_ROW_Y0, CX + 40, T_ROW_Y1, ID_PLAY},
+    {CX + 50, T_ROW_Y0 + 4, CX + 116, T_ROW_Y1 - 4, ID_NEXT},
 };
 #else
 // volume up top, track name in the middle (where swipes between pages cross), playback controls below
@@ -202,7 +211,7 @@ static void draw_skip(uint16_t *buf, int y0, int h, float cx, float cy, bool nex
 // Not connected, or nothing playing: the Spotify logo (main/spotify_logo.h, its own SVG rasterised) and what to do
 #define LOGO_Y 168
 #define LOGO_R (SPOTIFY_LOGO_SIZE / 2)
-static void draw_square_idle(uint16_t *buf, int y0, int h)
+static void draw_logo(uint16_t *buf, int y0, int h)
 {
     uint16_t g = SWAP16(C_GREEN);                       // the mask in Spotify green, over the black
     int gr = g >> 11, gg = (g >> 5) & 63, gb = g & 31, ox = CX - LOGO_R, oy = LOGO_Y - LOGO_R;
@@ -218,6 +227,11 @@ static void draw_square_idle(uint16_t *buf, int y0, int h)
             row[x] = SWAP16((uint16_t)((dr << 11) | (dg << 5) | db));
         }
     }
+}
+
+static void draw_square_idle(uint16_t *buf, int y0, int h)
+{
+    draw_logo(buf, y0, h);
     ftext_c(buf, y0, h, LOGO_Y + LOGO_R + 22, &font_body, "Spotify", C_WHITE);
     ftext_c(buf, y0, h, LOGO_Y + LOGO_R + 76, &font_label, s.configured ? "Nothing playing" : "Not connected", rgb(150, 150, 158));
     ftext_c(buf, y0, h, LOGO_Y + LOGO_R + 106, &font_small,
@@ -428,12 +442,135 @@ static void draw_field(uint16_t *buf, int y0, int h)
 }
 #endif
 
+#if !SCREEN_ROUND
+// ---------------------------------------------------------------- the Tiles look (Settings > Look)
+// Like a phone's widgets: the cover with a tall tile either side of it (how far the song's got, filling up in orange;
+// the volume, in blue), the song in a light tile under it, and a row of tiles: the time so far, the three keys (play
+// in yellow) and the time left.
+#define T_SIDE 86                                     // the side tiles' width
+
+static int tiles_mid(const font_t *f, float cy) { return (int)lroundf(cy - f->ascent + 0.3f * f->line_h); }
+
+// a tall tile filled from the bottom to frac (0..1) in c
+static void tiles_level(uint16_t *buf, int y0, int h, float x0, float x1, float frac, uint16_t c)
+{
+    aa_rrect(buf, y0, h, x0, ART_Y, x1, ART_Y + ART_SZ, 26, T_CASE);
+    float fy = ART_Y + ART_SZ - ART_SZ * (frac < 0 ? 0 : frac > 1 ? 1 : frac);
+    if (ART_Y + ART_SZ - fy < 2) return;
+    int ct, cb;
+    gfx_get_clip(&ct, &cb);
+    gfx_clip((int)fy > ct ? (int)fy : ct, cb);
+    aa_rrect(buf, y0, h, x0, ART_Y, x1, ART_Y + ART_SZ, 26, c);
+    gfx_clip(ct, cb);
+}
+
+// a speaker with waves (none when silent)
+static void tiles_speaker(uint16_t *buf, int y0, int h, float cx, float cy, int waves, uint16_t c)
+{
+    static const float cone[] = {3, 9, 7, 9, 12, 4.5f, 12, 19.5f, 7, 15, 3, 15};
+    aa_icon(buf, y0, h, cx, cy, 24, cone, 6, true, 2, c);
+    for (int k = 1; k <= waves; k++) {
+        float p[2 * 8], r = 4.5f + 4.5f * k;
+        for (int i = 0; i < 8; i++) {
+            float a = (-45 + 90 * i / 7.0f) * (float)M_PI / 180;
+            p[2 * i] = cx + 1 + r * cosf(a);
+            p[2 * i + 1] = cy + r * sinf(a);
+        }
+        aa_path(buf, y0, h, p, 8, false, 2, c);
+    }
+}
+
+// a time in a tile: in the bigger font when it fits
+static void tiles_time(uint16_t *buf, int y0, int h, int x0, int x1, const char *t, uint16_t bg)
+{
+    aa_rrect(buf, y0, h, x0, T_ROW_Y0, x1, T_ROW_Y1, 26, bg);
+    const font_t *f = ftext_width(&font_body, t) <= x1 - x0 - 16 ? &font_body : &font_label;
+    ftext_cx(buf, y0, h, (x0 + x1) / 2, tiles_mid(f, (T_ROW_Y0 + T_ROW_Y1) / 2.0f), f, t, T_INK);
+}
+
+// the logo in a dark tile, what to do in a light one
+static void draw_tiles_idle(uint16_t *buf, int y0, int h)
+{
+    aa_rrect(buf, y0, h, 14, ART_Y, W - 14, ART_Y + ART_SZ, 30, T_CASE);
+    draw_logo(buf, y0, h);
+    ftext_c(buf, y0, h, LOGO_Y + LOGO_R + 22, &font_body, "Spotify", C_WHITE);
+    const int iy0 = ART_Y + ART_SZ + 10, iy1 = iy0 + 76;
+    aa_rrect(buf, y0, h, 14, iy0, W - 14, iy1, 24, T_PAPER);
+    draw_ftext(buf, y0, h, 32, iy0 + 11, &font_label, s.configured ? "Nothing playing" : "Not connected", T_INK);
+    draw_ftext(buf, y0, h, 32, iy0 + 37, &font_small,
+               s.configured ? "Play something on any device" : "Connect it from the Bobble menu on your Mac", T_INK2);
+    if (s.note[0]) ftext_c(buf, y0, h, iy1 + 16, &font_small, s.note, T_RED);
+}
+
+static void draw_tiles(uint16_t *buf, int y0, int h)
+{
+    char line[96], l1[96];
+    if (!spotify_art(&(uint32_t){0}))                   // cover still loading: a dark tile where it goes
+        fill_rrect(buf, y0, h, ART_X, ART_Y, ART_X + ART_SZ, ART_Y + ART_SZ, 18, T_CASE);
+    tiles_level(buf, y0, h, ART_X - 10 - T_SIDE, ART_X - 10, s.duration_ms > 0 ? progress : 0, T_ORANGE);
+    float vx = ART_X + ART_SZ + 10 + T_SIDE / 2.0f, vy = ART_Y + ART_SZ - 32;
+    tiles_level(buf, y0, h, ART_X + ART_SZ + 10, ART_X + ART_SZ + 10 + T_SIDE, s.volume >= 0 ? s.volume / 100.0f : 0, T_SKY);
+    tiles_speaker(buf, y0, h, vx - 4, vy, s.volume == 0 ? 0 : s.volume < 50 ? 1 : 2,
+                  s.volume >= 0 && vy > ART_Y + ART_SZ * (1 - s.volume / 100.0f) ? T_INK : C_WHITE);
+    static const float note[] = {9, 17, 9, 5, 18, 3, 18, 15};   // (a note at the foot of the song's tile)
+    float nx = ART_X - 10 - T_SIDE / 2.0f, ny = vy;
+    uint16_t nc = s.duration_ms > 0 && progress > 32.0f / ART_SZ ? T_INK : C_WHITE;
+    aa_icon(buf, y0, h, nx, ny, 24, note, 4, false, 2, nc);
+    aa_disc(buf, y0, h, nx - 5.5f, ny + 5, 2.8f, nc);
+    aa_disc(buf, y0, h, nx + 3.5f, ny + 3, 2.8f, nc);
+
+    // the song and who it's by, in a light tile (a note, Spotify needs Premium..., in place of who)
+    const int iy0 = ART_Y + ART_SZ + 10, iy1 = T_ROW_Y0 - 10;
+    aa_rrect(buf, y0, h, 14, iy0, W - 14, iy1, 24, T_PAPER);
+    strlcpy(line, s.title, sizeof line);
+    ascii(line);
+    fitw(l1, sizeof l1, line, &font_label, W - 72);
+    draw_ftext(buf, y0, h, 32, iy0 + 11, &font_label, l1, T_INK);
+    strlcpy(line, s.note[0] ? s.note : s.artist, sizeof line);
+    ascii(line);
+    fitw(l1, sizeof l1, line, &font_small, W - 72);
+    draw_ftext(buf, y0, h, 32, iy0 + 37, &font_small, l1, s.note[0] ? T_RED : T_INK2);
+
+    // the row: times either end, the keys between
+    if (s.duration_ms > 0) {
+        fmt_time(line, sizeof line, (int)(progress * s.duration_ms));
+        tiles_time(buf, y0, h, 14, tbtns[0].x0 - 10, line, T_ORANGE);
+        int left = s.duration_ms - (int)(progress * s.duration_ms);
+        line[0] = '-';
+        fmt_time(line + 1, sizeof line - 1, left);
+        tiles_time(buf, y0, h, tbtns[2].x1 + 10, W - 14, line, T_RED);
+    } else {
+        tiles_time(buf, y0, h, 14, tbtns[0].x0 - 10, "", T_CASE);
+        tiles_time(buf, y0, h, tbtns[2].x1 + 10, W - 14, "", T_CASE);
+    }
+    for (int i = 0; i < 3; i += 2) {
+        const btn_t *b = &tbtns[i];
+        aa_rrect(buf, y0, h, b->x0, b->y0, b->x1, b->y1, 22, pressed(b->id) ? tile_hot(T_CASE2) : T_CASE2);
+        float cx = (b->x0 + b->x1) / 2.0f, cy = (b->y0 + b->y1) / 2.0f;
+        if (s.episode) ftext_cx(buf, y0, h, (int)cx, tiles_mid(&font_label, cy), &font_label, "10", C_WHITE);
+        else draw_skip(buf, y0, h, cx, cy, i == 2, C_WHITE);
+    }
+    const btn_t *pb = &tbtns[1];
+    float py = (pb->y0 + pb->y1) / 2.0f;
+    aa_rrect(buf, y0, h, pb->x0, pb->y0, pb->x1, pb->y1, 26, pressed(ID_PLAY) ? tile_hot(T_YELLOW) : T_YELLOW);
+    if (s.playing) {
+        static const float l[] = {9, 5, 9, 19}, r[] = {15, 5, 15, 19};
+        aa_icon(buf, y0, h, CX, py, 30, l, 2, false, 2.2f, T_INK);
+        aa_icon(buf, y0, h, CX, py, 30, r, 2, false, 2.2f, T_INK);
+    } else {
+        static const float tri[] = {7, 4, 19, 12, 7, 20};
+        aa_icon(buf, y0, h, CX + 2, py, 30, tri, 3, true, 2.2f, T_INK);
+    }
+}
+#endif
+
 void spotify_ui_draw(uint16_t *buf, int y0, int h)
 {
     char line[64], l1[48], l2[48];
     if (!s.configured || !s.active) {
 #if !SCREEN_ROUND
         if (ui_field()) draw_field_idle(buf, y0, h);
+        else if (ui_tiles()) draw_tiles_idle(buf, y0, h);
         else draw_square_idle(buf, y0, h);
         return;
 #endif
@@ -451,6 +588,7 @@ void spotify_ui_draw(uint16_t *buf, int y0, int h)
 
 #if !SCREEN_ROUND
     if (ui_field()) draw_field(buf, y0, h);
+    else if (ui_tiles()) draw_tiles(buf, y0, h);
     else draw_square(buf, y0, h);
 #else
     // track
@@ -509,6 +647,7 @@ static int hit(int x, int y)
     const btn_t *b = btns;
 #if !SCREEN_ROUND
     if (ui_field()) b = fbtns;
+    else if (ui_tiles()) b = tbtns;
 #endif
     for (int i = 0; i < NBTN; i++) {
         if (i >= 3 && s.volume < 0) break;
@@ -555,14 +694,17 @@ bool spotify_ui_dirty(void)
     static uint32_t seen_art;
     static int seen_sec = -1;
     static bool seen_playing;
+    static int seen_vol;                               // (the Tiles look shows it)
     static char seen_title[96];
     uint32_t ver;
     spotify_art(&ver);
     int sec = (int)(progress * s.duration_ms / 1000);
-    bool d = ver != seen_art || sec != seen_sec || s.playing != seen_playing || strcmp(seen_title, s.title);
+    bool d = ver != seen_art || sec != seen_sec || s.playing != seen_playing || strcmp(seen_title, s.title) ||
+             (ui_tiles() && s.volume != seen_vol);
     seen_art = ver;
     seen_sec = sec;
     seen_playing = s.playing;
+    seen_vol = s.volume;
     strlcpy(seen_title, s.title, sizeof seen_title);
     return d;
 }

@@ -11,6 +11,7 @@
 #include "spotify.h"
 #include "library_ui.h"
 #include "screen.h"
+#include "tiles.h"
 
 #define C_WHITE  rgb(255, 255, 255)
 #define C_GREY   rgb(150, 150, 168)
@@ -215,13 +216,18 @@ static void shuffle_icon(uint16_t *buf, int y0, int h, float cx, float cy, uint1
     aa_icon(buf, y0, h, cx, cy, 20, bh, 3, false, 2, c);
 }
 
-static void speaker_icon(uint16_t *buf, int y0, int h, float cx, float cy, float sz, uint16_t c)
+static void speaker_icon_on(uint16_t *buf, int y0, int h, float cx, float cy, float sz, uint16_t c, uint16_t bg)
 {
     float k = sz / 24;
     aa_rrect(buf, y0, h, cx - 7 * k, cy - 10 * k, cx + 7 * k, cy + 10 * k, 2.5f * k, c);
-    aa_rrect(buf, y0, h, cx - 7 * k + 1.8f, cy - 10 * k + 1.8f, cx + 7 * k - 1.8f, cy + 10 * k - 1.8f, 1.5f * k, C_FILL);
+    aa_rrect(buf, y0, h, cx - 7 * k + 1.8f, cy - 10 * k + 1.8f, cx + 7 * k - 1.8f, cy + 10 * k - 1.8f, 1.5f * k, bg);
     circle_icon(buf, y0, h, cx, cy + 3 * k, 3.6f * k, 1.8f, c);
     aa_disc(buf, y0, h, cx, cy - 5.5f * k, 1.3f * k, c);
+}
+
+static void speaker_icon(uint16_t *buf, int y0, int h, float cx, float cy, float sz, uint16_t c)
+{
+    speaker_icon_on(buf, y0, h, cx, cy, sz, c, C_FILL);
 }
 
 static void laptop_icon(uint16_t *buf, int y0, int h, float cx, float cy, float sz, uint16_t c)
@@ -291,11 +297,11 @@ static void tile(uint16_t *buf, int y0, int h, int x, int y, int kind, const cha
 }
 
 // a small green "now playing" mark: three bars
-static void playing_mark(uint16_t *buf, int y0, int h, int x, int cy)
+static void playing_mark(uint16_t *buf, int y0, int h, int x, int cy, uint16_t c)
 {
     static const int bh[3] = {10, 16, 7};
     for (int i = 0; i < 3; i++)
-        aa_rrect(buf, y0, h, x + i * 6, cy + 8 - bh[i], x + i * 6 + 3.5f, cy + 8, 1.5f, C_GREEN);
+        aa_rrect(buf, y0, h, x + i * 6, cy + 8 - bh[i], x + i * 6 + 3.5f, cy + 8, 1.5f, c);
 }
 
 static void button(uint16_t *buf, int y0, int h, box_t b, bool hot, uint16_t bg)
@@ -319,7 +325,7 @@ static void field_box(uint16_t *buf, int y0, int h, box_t b, bool hot, uint16_t 
 static void draw_square(uint16_t *buf, int y0, int h)
 {
     char line[96], sub[64], t[16], l2[96];
-    bool pressed_any = down && !dragging, fl = ui_field();
+    bool pressed_any = down && !dragging, fl = ui_field(), tl = ui_tiles();
     if (!s.configured) {
         ftext_mid(buf, y0, h, CX, 214, &font_body, "Library", C_WHITE);
         ftext_mid(buf, y0, h, CX, 256, &font_label, "Connect Spotify in the Bobble app", C_TEXT2);
@@ -327,13 +333,40 @@ static void draw_square(uint16_t *buf, int y0, int h)
     }
     if (view == V_DEVICES || view == V_EPISODES) {     // a back link, and the page's title in the middle
         bool hot = pressed_any && press_id == ID_BACK;
-        uint16_t c = fl ? (hot ? rgb(255, 150, 90) : F_ORANGE) : hot ? rgb(20, 140, 64) : C_GREEN;
+        uint16_t c = fl ? (hot ? rgb(255, 150, 90) : F_ORANGE) : tl ? (hot ? tile_hot(T_SKY) : T_SKY) : hot ? rgb(20, 140, 64) : C_GREEN;
         const char *back = view == V_DEVICES ? (fl ? "LIBRARY" : "Library") : fl ? "SHOWS" : "Shows";
         const font_t *bf = fl ? &font_mono : &font_label;
         aa_icon(buf, y0, h, 24, 66, 22, ic_chev_l, 3, false, 2.4f, c);
         draw_ftext(buf, y0, h, 36, 66 - bf->line_h / 2, bf, back, c);
         fitw(line, sizeof line, view == V_DEVICES ? "Play on" : open_show_name, &font_label, W - 2 * 130);
         ftext_mid(buf, y0, h, CX, 66, &font_label, line, C_WHITE);
+    } else if (tl) {
+        // tabs: a dark tile, the one showing a blue tile in it
+        aa_rrect(buf, y0, h, tab_pl.x0, tab_pl.y0, tab_pod.x1, tab_pod.y1, 18, T_CASE);
+        const box_t *act = view == V_SHOWS ? &tab_pod : &tab_pl, *bx[2] = {&tab_pl, &tab_pod};
+        aa_rrect(buf, y0, h, act->x0 + 4, act->y0 + 4, act->x1 - 4, act->y1 - 4, 14, T_SKY);
+        const char *lab[2] = {"Playlists", "Podcasts"};
+        for (int i = 0; i < 2; i++) {
+            bool sel = bx[i] == act, hot = pressed_any && press_id == (i ? ID_TAB_POD : ID_TAB_PL);
+            ftext_mid(buf, y0, h, (bx[i]->x0 + bx[i]->x1) / 2, (bx[i]->y0 + bx[i]->y1) / 2, &font_label, lab[i],
+                      sel ? T_INK : hot ? C_WHITE : T_GREY);
+        }
+        // shuffle: orange when on; the device: a light tile
+        bool on = s.shuffle && !s.episode;
+        uint16_t sb = on ? T_ORANGE : s.episode ? T_CASE : T_CASE2, sc = on ? T_INK : s.episode ? rgb(90, 90, 96) : C_WHITE;
+        aa_rrect(buf, y0, h, shuffle_btn.x0, shuffle_btn.y0, shuffle_btn.x1, shuffle_btn.y1, 18,
+                 pressed_any && press_id == ID_SHUFFLE ? tile_hot(sb) : sb);
+        int scx = (shuffle_btn.x0 + shuffle_btn.x1) / 2, sy = (shuffle_btn.y0 + shuffle_btn.y1) / 2;
+        int sw = 20 + 8 + ftext_width(&font_label, "Shuffle");
+        shuffle_icon(buf, y0, h, scx - sw / 2 + 10, sy, sc);
+        draw_ftext(buf, y0, h, scx - sw / 2 + 28, sy - font_label.line_h / 2, &font_label, "Shuffle", sc);
+        uint16_t db = pressed_any && press_id == ID_DEVICE ? tile_hot(T_PAPER) : T_PAPER;
+        aa_rrect(buf, y0, h, device_btn.x0, device_btn.y0, device_btn.x1, device_btn.y1, 18, db);
+        int dy = (device_btn.y0 + device_btn.y1) / 2;
+        speaker_icon_on(buf, y0, h, device_btn.x0 + 22, dy, 20, T_INK, db);
+        fitw(line, sizeof line, s.active && s.device[0] ? s.device : "Devices", &font_label, device_btn.x1 - device_btn.x0 - 40 - 28);
+        draw_ftext(buf, y0, h, device_btn.x0 + 40, dy - font_label.line_h / 2, &font_label, line, T_INK);
+        aa_icon(buf, y0, h, device_btn.x1 - 18, dy, 16, ic_chev_r, 3, false, 2, T_INK2);
     } else if (fl) {
         // tabs: two words in capitals, the one showing in orange over an orange bar
         const box_t *act = view == V_SHOWS ? &tab_pod : &tab_pl, *bx[2] = {&tab_pl, &tab_pod};
@@ -444,10 +477,12 @@ static void draw_square(uint16_t *buf, int y0, int h)
             strlcpy(sub, devs[i].type, sizeof sub);
             kind = 3;
         }
-        if (hot) fill_rect(buf, y0, h, 0, ry, W, ry + ROW_H, fl ? rgb(30, 30, 34) : C_ROW_HI);
+        if (tl) aa_rrect(buf, y0, h, 14, ry + 3, W - 14, ry + ROW_H - 3, 18, current ? (hot ? tile_hot(T_SKY) : T_SKY) : hot ? T_CASE2 : T_CASE);
+        else if (hot) fill_rect(buf, y0, h, 0, ry, W, ry + ROW_H, fl ? rgb(30, 30, 34) : C_ROW_HI);
         bool tiled = view != V_EPISODES;
         int tx = tiled ? PAD + SP_THUMB + 14 : PAD, right = W - PAD - (current ? 30 : 0);
-        uint16_t fg = current ? (fl ? F_ORANGE : C_GREEN) : dim ? rgb(100, 100, 108) : C_WHITE, fg2 = dim ? rgb(80, 80, 88) : fl ? F_GREY : C_TEXT2;
+        uint16_t fg = current ? (fl ? F_ORANGE : tl ? T_INK : C_GREEN) : dim ? rgb(100, 100, 108) : C_WHITE, fg2 = dim ? rgb(80, 80, 88) : fl ? F_GREY : C_TEXT2;
+        if (tl && current) fg2 = T_INK2;
         const font_t *sf = &font_small;
         if (fl) { upper(sub); sf = &font_mono_s; }      // (Field: the second line in monospace capitals)
         if (tiled) tile(buf, y0, h, PAD, ry + (ROW_H - SP_THUMB) / 2, kind, kind == 3 ? devs[i].type : name, spotify_thumb(thumb));
@@ -465,11 +500,11 @@ static void draw_square(uint16_t *buf, int y0, int h)
         }
         if (current && view == V_DEVICES) {             // the device in use: a check mark
             static const float chk[] = {5, 12.5f, 10, 17.5f, 19, 7};
-            aa_icon(buf, y0, h, W - PAD - 10, ry + ROW_H / 2, 20, chk, 3, false, 2.4f, C_GREEN);
+            aa_icon(buf, y0, h, W - PAD - 10, ry + ROW_H / 2, 20, chk, 3, false, 2.4f, tl ? T_INK : C_GREEN);
         } else if (current) {
-            playing_mark(buf, y0, h, W - PAD - 16, ry + ROW_H / 2);
+            playing_mark(buf, y0, h, W - PAD - 16, ry + ROW_H / 2, tl ? T_INK : C_GREEN);
         }
-        if (!hot && i + 1 < n) fill_rect(buf, y0, h, tx, ry + ROW_H - 1, W, ry + ROW_H, fl ? rgb(34, 34, 38) : C_SEP);   // hairline
+        if (!tl && !hot && i + 1 < n) fill_rect(buf, y0, h, tx, ry + ROW_H - 1, W, ry + ROW_H, fl ? rgb(34, 34, 38) : C_SEP);   // hairline
     }
     gfx_clip(0, H);
     int ms = max_scroll();
