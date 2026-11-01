@@ -687,13 +687,19 @@ static void upcase(char *out, size_t cap, const char *in)
     out[i] = 0;
 }
 
-static uint16_t acc(uint16_t c) { return ui_field() && c == CC_BLUE ? F_ORANGE : c; }   // (Classic's blue: orange)
-static uint16_t off_col(void) { return ui_field() ? F_DIM : CC_OFF; }                 // a key or disc that's off
-static uint16_t grp_col(void) { return ui_field() ? F_PANEL : rgb(36, 36, 40); }       // inside a group
+// (Classic's blue: Field's orange, Tiles' light blue; its red too)
+static uint16_t acc(uint16_t c)
+{
+    if (ui_tiles()) return c == CC_BLUE ? T_SKY : c == rgb(255, 69, 58) ? T_RED : c;
+    return ui_field() && c == CC_BLUE ? F_ORANGE : c;
+}
+static uint16_t off_col(void) { return ui_field() ? F_DIM : ui_tiles() ? T_CASE2 : CC_OFF; }   // a key or disc that's off
+static uint16_t grp_col(void) { return ui_field() ? F_PANEL : ui_tiles() ? T_CASE : rgb(36, 36, 40); }   // inside a group
 
 // a module or group: a rim round a dark fill (Field), or a rounded grey one (Classic); lit under the finger
 static void panel(uint16_t *buf, int y0, int h, float x0, float t, float x1, float b, float r, bool on)
 {
+    if (ui_tiles()) { aa_rrect(buf, y0, h, x0, t, x1, b, r + 6, on ? T_CASE2 : T_CASE); return; }
     if (!ui_field()) { aa_rrect(buf, y0, h, x0, t, x1, b, r, on ? CC_MOD_ON : CC_MOD); return; }
     aa_rrect(buf, y0, h, x0, t, x1, b, 8, F_DIM);
     aa_rrect(buf, y0, h, x0 + 2, t + 2, x1 - 2, b - 2, 6, on ? F_PRESS : F_PANEL);
@@ -703,8 +709,8 @@ static void panel(uint16_t *buf, int y0, int h, float x0, float t, float x1, flo
 static void press_row(uint16_t *buf, int y0, int h, int x0, int x1, int t, int b, bool first, bool last)
 {
     bool fl = ui_field();
-    int in = fl ? 2 : 0, r = fl ? 6 : 14;
-    uint16_t c = fl ? F_PRESS : CC_MOD_ON;
+    int in = fl ? 2 : 0, r = fl ? 6 : ui_tiles() ? 20 : 14;
+    uint16_t c = fl ? F_PRESS : ui_tiles() ? T_CASE2 : CC_MOD_ON;
     x0 += in; x1 -= in;
     if (first) t += in;
     if (last) b -= in;
@@ -948,6 +954,11 @@ static void nav(uint16_t *buf, int y0, int h, const button_t *back, const char *
     char t[48], bl[24];
     if (fl) { upcase(t, sizeof t, title); upcase(bl, sizeof bl, back->label); }
     else { strlcpy(t, title, sizeof t); strlcpy(bl, back->label, sizeof bl); }
+    if (ui_tiles()) {                                 // (Tiles: the way back in a dark tile)
+        uint16_t bg = dn ? tile_hot(T_CASE2) : T_CASE2;
+        aa_rrect(buf, y0, h, 10, 49, 36 + ftext_width(f, bl) + 16, 85, 18, bg);
+        c = C_WHITE;
+    }
     aa_icon(buf, y0, h, 24, 67, 22, chev, 3, false, 2.4f, c);
     draw_ftext(buf, y0, h, 36, 67 - f->line_h / 2, f, bl, c);
     int room = W - 2 * 150;
@@ -958,6 +969,12 @@ static void nav(uint16_t *buf, int y0, int h, const button_t *back, const char *
 static void row_button(uint16_t *buf, int y0, int h, const button_t *b, uint16_t col)
 {
     bool on = current_id() == b->id;
+    if (ui_tiles()) {                                 // (Tiles: a tile in its colour, black words; white: a dark one)
+        uint16_t bg = col == C_WHITE ? T_CASE2 : acc(col);
+        aa_rrect(buf, y0, h, b->x0, b->y0, b->x1, b->y1, 20, on ? tile_hot(bg) : bg);
+        ftext_mid(buf, y0, h, (b->x0 + b->x1) / 2, (b->y0 + b->y1) / 2, &font_label, b->label, col == C_WHITE ? C_WHITE : T_INK);
+        return;
+    }
     panel(buf, y0, h, b->x0, b->y0, b->x1, b->y1, 14, on);
     if (ui_field()) {
         char t[32];
@@ -1041,8 +1058,9 @@ static void draw_status(uint16_t *buf, int y0, int h)
         nav(buf, y0, h, &connected_buttons[2], "Wi-Fi");
         bool fl = ui_field();
         if (fl) aa_rrect(buf, y0, h, CX - 34, 104, CX + 34, 172, 12, CC_BLUE);
+        else if (ui_tiles()) aa_rrect(buf, y0, h, CX - 36, 102, CX + 36, 174, 24, T_SKY);
         else aa_disc(buf, y0, h, CX, 138, 34, CC_BLUE);
-        cc_icon(buf, y0, h, ICON_WIFI, CX, 136, C_WHITE, CC_BLUE);
+        cc_icon(buf, y0, h, ICON_WIFI, CX, 136, ui_tiles() ? T_INK : C_WHITE, CC_BLUE);
         if (fl) ftext_mid(buf, y0, h, CX, 194, &font_mono, "CONNECTED", C_WHITE);
         else ftext_mid(buf, y0, h, CX, 194, &font_label, "Connected", C_WHITE);
         const int gt = 216;                           // the network's name and address, in a group
@@ -1141,13 +1159,23 @@ static void draw_battery(uint16_t *buf, int y0, int h)
     battery_diag_t d;
     battery_diag(&d);
     bool fl = ui_field();
-    char st[40];
-    if (fl) upcase(st, sizeof st, battery_state_text(&d));
-    else strlcpy(st, battery_state_text(&d), sizeof st);
-    ftext_mid(buf, y0, h, CX, 106, fl ? &font_mono_l : &font_body, st, battery_charging_now(&d) ? CC_GREEN : C_WHITE);
-    char head[16] = "";
+    char st[40], head[16] = "";
     if (battery_percent() >= 0) snprintf(head, sizeof head, "%d%%", battery_percent());
-    ftext_mid(buf, y0, h, CX, 136, fl ? &font_mono : &font_label, head, fl ? F_ORANGE : SQ_TEXT2);
+    if (ui_tiles()) {                                 // a tile: yellow charging, blue charged, grey-blue on battery; the
+        uint16_t bg = battery_charging_now(&d) ? T_YELLOW : d.usb ? T_SKY : T_MIST;   // % in a black tile in it
+        aa_rrect(buf, y0, h, ROW_X0, 94, ROW_X1, 146, 22, bg);
+        draw_ftext(buf, y0, h, ROW_X0 + 18, 120 - font_body.line_h / 2, &font_body, battery_state_text(&d), T_INK);
+        if (head[0]) {
+            int pw = ftext_width(&font_body, head) + 28;
+            aa_rrect(buf, y0, h, ROW_X1 - 8 - pw, 102, ROW_X1 - 8, 138, 16, T_INK);
+            ftext_mid(buf, y0, h, ROW_X1 - 8 - pw / 2, 120, &font_body, head, C_WHITE);
+        }
+    } else {
+        if (fl) upcase(st, sizeof st, battery_state_text(&d));
+        else strlcpy(st, battery_state_text(&d), sizeof st);
+        ftext_mid(buf, y0, h, CX, 106, fl ? &font_mono_l : &font_body, st, battery_charging_now(&d) ? CC_GREEN : C_WHITE);
+        ftext_mid(buf, y0, h, CX, 136, fl ? &font_mono : &font_label, head, fl ? F_ORANGE : SQ_TEXT2);
+    }
 
     static const char *lab[6] = {"Battery", "Charging", "USB power", "Charge current", "Charges to", "Chip temperature"};
     char v[6][32];
@@ -1189,7 +1217,8 @@ static void draw_reset(uint16_t *buf, int y0, int h)
     ftext_mid(buf, y0, h, CX, 142, &font_label, "Spotify and reminders", SQ_TEXT2);
     ftext_mid(buf, y0, h, CX, 168, &font_label, "for a new owner.", SQ_TEXT2);
     bool on = current_id() == ID_ERASE;
-    aa_disc(buf, y0, h, CX, ERASE_Y, BUB_R, on ? rgb(200, 50, 44) : rgb(255, 69, 58));
+    if (ui_tiles()) aa_disc(buf, y0, h, CX, ERASE_Y, BUB_R, on ? tile_hot(T_RED) : T_RED);
+    else aa_disc(buf, y0, h, CX, ERASE_Y, BUB_R, on ? rgb(200, 50, 44) : rgb(255, 69, 58));
     if (on) {
         int64_t held = esp_timer_get_time() - press_us;
         float frac = held >= LOCK_HOLD_US ? 1 : held / (float)LOCK_HOLD_US;
@@ -1197,7 +1226,7 @@ static void draw_reset(uint16_t *buf, int y0, int h)
         cc_arc(buf, y0, h, CX, ERASE_Y, BUB_R + 8, 0, 360 * frac, 4, rgb(255, 69, 58));
     }
     if (ui_field()) ftext_mid(buf, y0, h, CX, ERASE_Y, &font_mono_l, "HOLD", C_WHITE);
-    else ftext_mid(buf, y0, h, CX, ERASE_Y, &font_body, "Hold", C_WHITE);
+    else ftext_mid(buf, y0, h, CX, ERASE_Y, &font_body, "Hold", ui_tiles() ? T_INK : C_WHITE);
     if (ui_field()) ftext_mid(buf, y0, h, CX, 382, &font_mono_s, "HOLD FOR 3 SECONDS", F_GREY);
     else ftext_mid(buf, y0, h, CX, 382, &font_small, "Hold for 3 seconds", SQ_TEXT2);
 }

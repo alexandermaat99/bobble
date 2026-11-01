@@ -24,7 +24,7 @@
 #define RING_IN 220
 #define RING_OUT 229
 
-enum { ID_NONE, ID_PREV, ID_PLAY, ID_NEXT, ID_VDOWN, ID_VUP };
+enum { ID_NONE, ID_PREV, ID_PLAY, ID_NEXT, ID_VDOWN, ID_VUP, ID_VOL };   // ID_VOL: the Tiles look's volume tile
 typedef struct { int x0, y0, x1, y1, id; } btn_t;
 #if !SCREEN_ROUND
 #define CTRL_Y 442
@@ -74,6 +74,10 @@ static spotify_state_t s;
 static float progress;                 // 0..1 for the ring
 static bool down;
 static int press_id, press_x, press_y;
+// The Tiles look's volume tile, dragged up and down: the volume as the finger has it, until Spotify's catches up
+static int drag_vol = -1, drag_from, drag_moved;   // drag_moved: the furthest the finger's gone up or down
+static int64_t drag_until;             // (shown this long after letting go)
+static int shown_volume(void) { return drag_vol >= 0 ? drag_vol : s.volume; }
 
 // ---------------------------------------------------------------- helpers
 static void fit(char *out, size_t cap, const char *in, int max_chars)
@@ -480,11 +484,10 @@ static void tiles_speaker(uint16_t *buf, int y0, int h, float cx, float cy, int 
     }
 }
 
-// a time in a tile: in the bigger font when it fits
-static void tiles_time(uint16_t *buf, int y0, int h, int x0, int x1, const char *t, uint16_t bg)
+// a time in a tile
+static void tiles_time(uint16_t *buf, int y0, int h, int x0, int x1, const char *t, const font_t *f, uint16_t bg)
 {
     aa_rrect(buf, y0, h, x0, T_ROW_Y0, x1, T_ROW_Y1, 26, bg);
-    const font_t *f = ftext_width(&font_body, t) <= x1 - x0 - 16 ? &font_body : &font_label;
     ftext_cx(buf, y0, h, (x0 + x1) / 2, tiles_mid(f, (T_ROW_Y0 + T_ROW_Y1) / 2.0f), f, t, T_INK);
 }
 
@@ -508,10 +511,17 @@ static void draw_tiles(uint16_t *buf, int y0, int h)
     if (!spotify_art(&(uint32_t){0}))                   // cover still loading: a dark tile where it goes
         fill_rrect(buf, y0, h, ART_X, ART_Y, ART_X + ART_SZ, ART_Y + ART_SZ, 18, T_CASE);
     tiles_level(buf, y0, h, ART_X - 10 - T_SIDE, ART_X - 10, s.duration_ms > 0 ? progress : 0, T_ORANGE);
-    float vx = ART_X + ART_SZ + 10 + T_SIDE / 2.0f, vy = ART_Y + ART_SZ - 32;
-    tiles_level(buf, y0, h, ART_X + ART_SZ + 10, ART_X + ART_SZ + 10 + T_SIDE, s.volume >= 0 ? s.volume / 100.0f : 0, T_SKY);
-    tiles_speaker(buf, y0, h, vx - 4, vy, s.volume == 0 ? 0 : s.volume < 50 ? 1 : 2,
-                  s.volume >= 0 && vy > ART_Y + ART_SZ * (1 - s.volume / 100.0f) ? T_INK : C_WHITE);
+    // the volume: drag it up and down (its number at the top)
+    int vol = shown_volume();
+    float vx = ART_X + ART_SZ + 10 + T_SIDE / 2.0f, vy = ART_Y + ART_SZ - 32, vtop = ART_Y + ART_SZ * (1 - vol / 100.0f);
+    tiles_level(buf, y0, h, ART_X + ART_SZ + 10, ART_X + ART_SZ + 10 + T_SIDE, vol >= 0 ? vol / 100.0f : 0,
+                pressed(ID_VOL) ? tile_hot(T_SKY) : T_SKY);
+    tiles_speaker(buf, y0, h, vx - 4, vy, vol == 0 ? 0 : vol < 50 ? 1 : 2, vol >= 0 && vy > vtop ? T_INK : C_WHITE);
+    if (vol >= 0) {
+        snprintf(line, sizeof line, "%d", vol);
+        float ny = ART_Y + 26;
+        ftext_cx(buf, y0, h, (int)vx, tiles_mid(&font_label, ny), &font_label, line, ny > vtop + 6 ? T_INK : C_WHITE);
+    }
     static const float note[] = {9, 17, 9, 5, 18, 3, 18, 15};   // (a note at the foot of the song's tile)
     float nx = ART_X - 10 - T_SIDE / 2.0f, ny = vy;
     uint16_t nc = s.duration_ms > 0 && progress > 32.0f / ART_SZ ? T_INK : C_WHITE;
@@ -533,15 +543,20 @@ static void draw_tiles(uint16_t *buf, int y0, int h)
 
     // the row: times either end, the keys between
     if (s.duration_ms > 0) {
+        // the bigger font if the song's longest time fits (so it doesn't change size as the seconds go by)
+        l1[0] = '-';
+        fmt_time(l1 + 1, sizeof l1 - 1, s.duration_ms);
+        for (char *q = l1; *q; q++) if (*q >= '0' && *q <= '9') *q = '8';
+        const font_t *tf = ftext_width(&font_body, l1) <= tbtns[0].x0 - 10 - 14 - 16 ? &font_body : &font_label;
         fmt_time(line, sizeof line, (int)(progress * s.duration_ms));
-        tiles_time(buf, y0, h, 14, tbtns[0].x0 - 10, line, T_ORANGE);
+        tiles_time(buf, y0, h, 14, tbtns[0].x0 - 10, line, tf, T_ORANGE);
         int left = s.duration_ms - (int)(progress * s.duration_ms);
         line[0] = '-';
         fmt_time(line + 1, sizeof line - 1, left);
-        tiles_time(buf, y0, h, tbtns[2].x1 + 10, W - 14, line, T_RED);
+        tiles_time(buf, y0, h, tbtns[2].x1 + 10, W - 14, line, tf, T_RED);
     } else {
-        tiles_time(buf, y0, h, 14, tbtns[0].x0 - 10, "", T_CASE);
-        tiles_time(buf, y0, h, tbtns[2].x1 + 10, W - 14, "", T_CASE);
+        tiles_time(buf, y0, h, 14, tbtns[0].x0 - 10, "", &font_body, T_CASE);
+        tiles_time(buf, y0, h, tbtns[2].x1 + 10, W - 14, "", &font_body, T_CASE);
     }
     for (int i = 0; i < 3; i += 2) {
         const btn_t *b = &tbtns[i];
@@ -649,6 +664,10 @@ static int hit(int x, int y)
     if (ui_field()) b = fbtns;
     else if (ui_tiles()) b = tbtns;
 #endif
+#if !SCREEN_ROUND
+    if (ui_tiles() && s.volume >= 0 && x >= ART_X + ART_SZ + 4 && x < ART_X + ART_SZ + 16 + T_SIDE && y >= ART_Y - 8 &&
+        y < ART_Y + ART_SZ + 8) return ID_VOL;
+#endif
     for (int i = 0; i < NBTN; i++) {
         if (i >= 3 && s.volume < 0) break;
         if (x >= b[i].x0 - 6 && x < b[i].x1 + 6 && y >= b[i].y0 - 8 && y < b[i].y1 + 10) return b[i].id;
@@ -656,7 +675,12 @@ static int hit(int x, int y)
     return ID_NONE;
 }
 
-void spotify_ui_cancel_touch(void) { down = false; press_id = ID_NONE; }
+void spotify_ui_cancel_touch(void)
+{
+    if (press_id == ID_VOL) drag_vol = -1;             // (a swipe took it: as it was)
+    down = false;
+    press_id = ID_NONE;
+}
 
 void spotify_ui_update(int tx, int ty, int64_t now_us)
 {
@@ -670,14 +694,35 @@ void spotify_ui_update(int tx, int ty, int64_t now_us)
 #if !SCREEN_ROUND
     reels_turn(now_us);
 #endif
+    if (drag_vol >= 0 && press_id != ID_VOL && now_us > drag_until) drag_vol = -1;   // Spotify's own from here
     if (tx >= 0 && !down) {
         down = true;
         press_x = tx; press_y = ty;
         press_id = s.active ? hit(tx, ty) : ID_NONE;
+        if (press_id == ID_VOL) { drag_vol = drag_from = shown_volume(); drag_moved = 0; }
     } else if (tx >= 0) {
-        if (abs(tx - press_x) > 16 || abs(ty - press_y) > 16) press_id = ID_NONE;   // it's a swipe, not a tap
+        if (press_id == ID_VOL) {                      // up and down: the volume follows the finger
+            if (abs(tx - press_x) > 24 && abs(tx - press_x) > abs(ty - press_y)) spotify_ui_cancel_touch();   // (a swipe)
+            else {
+                if (abs(ty - press_y) > drag_moved) drag_moved = abs(ty - press_y);
+                int v = drag_from + (press_y - ty) * 100 / ART_SZ;
+                drag_vol = v < 0 ? 0 : v > 100 ? 100 : v;
+            }
+        } else if (abs(tx - press_x) > 16 || abs(ty - press_y) > 16) press_id = ID_NONE;   // it's a swipe, not a tap
     } else if (down) {
         down = false;
+        if (press_id == ID_VOL) {
+            if (drag_moved <= 8) {                     // a tap: to where it was tapped
+                int v = (ART_Y + ART_SZ - press_y) * 100 / ART_SZ;
+                drag_vol = v < 0 ? 0 : v > 100 ? 100 : v;
+            }
+            if (drag_vol != s.volume) {
+                char a[8];
+                snprintf(a, sizeof a, "%d", drag_vol);
+                spotify_command_arg(SP_VOL_SET, a);
+            }
+            drag_until = now_us + 4000000;
+        }
         switch (press_id) {
         case ID_PREV: spotify_command(s.episode ? SP_SEEK_BACK : SP_PREV); break;
         case ID_PLAY: spotify_command(SP_PLAY_PAUSE); break;
@@ -700,11 +745,11 @@ bool spotify_ui_dirty(void)
     spotify_art(&ver);
     int sec = (int)(progress * s.duration_ms / 1000);
     bool d = ver != seen_art || sec != seen_sec || s.playing != seen_playing || strcmp(seen_title, s.title) ||
-             (ui_tiles() && s.volume != seen_vol);
+             (ui_tiles() && shown_volume() != seen_vol);
     seen_art = ver;
     seen_sec = sec;
     seen_playing = s.playing;
-    seen_vol = s.volume;
+    seen_vol = shown_volume();
     strlcpy(seen_title, s.title, sizeof seen_title);
     return d;
 }

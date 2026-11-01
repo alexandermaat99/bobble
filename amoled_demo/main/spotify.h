@@ -21,7 +21,8 @@ typedef struct {
 } spotify_state_t;
 
 enum { SP_PLAY_PAUSE, SP_NEXT, SP_PREV, SP_VOL_UP, SP_VOL_DOWN, SP_SHUFFLE, SP_PLAY_CONTEXT, SP_TRANSFER, SP_LOAD_LIBRARY,
-       SP_LOAD_EPISODES, SP_PLAY_EPISODE, SP_SEEK_BACK, SP_SEEK_FWD, SP_POLL };   // SP_POLL: just look again   // seeks jump 10 s
+       SP_LOAD_EPISODES, SP_PLAY_EPISODE, SP_SEEK_BACK, SP_SEEK_FWD, SP_POLL, SP_VOL_SET };   // SP_POLL: just look again   // seeks jump 10 s
+// SP_VOL_SET takes the volume, "0".."100"
 
 // Your library, for the Library page. thumb: its cover's slot for spotify_thumb (-1: none)
 typedef struct { char name[64]; char uri[96]; int tracks; int16_t thumb; } sp_playlist_t;
