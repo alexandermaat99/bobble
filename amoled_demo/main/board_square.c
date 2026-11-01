@@ -450,6 +450,14 @@ static bool pmu_reg(uint8_t reg, uint8_t *v)
     return i2c_master_transmit_receive(pmu_dev, &reg, 1, v, 1, 20) == ESP_OK;
 }
 
+// Everything off: the power chip's soft power-off (common config, bit 0) cuts the board from the battery, leaving only
+// the chip's own standby. Plugging USB in starts it again, as does the PWR button.
+void sq_power_off(void)
+{
+    uint8_t v[2] = {0x10, 0};
+    if (pmu_reg(0x10, &v[1])) { v[1] |= 0x01; i2c_master_transmit(pmu_dev, v, 2, 50); }
+}
+
 float sq_battery_volts(void)
 {
     uint8_t st, hi, lo;

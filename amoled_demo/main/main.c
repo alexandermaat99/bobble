@@ -1229,7 +1229,9 @@ static void power_screen_on(void)
 }
 
 // Battery empty: everything off (deep sleep), looking every 5 minutes for the charger. Charging lifts the
-// reading well above the empty point, and then the board starts up as usual.
+// reading well above the empty point, and then the board starts up as usual. The square powers off instead: in deep
+// sleep the rest of its board kept drawing, and took the cells from 3.70 V down to 3.13 V overnight. Its power chip
+// starts it again when USB is plugged in.
 #define EMPTY_CHECK_US (5 * 60 * 1000000LL)
 
 // The 4" panel has no on/off line: there the backlight is the switch
@@ -1250,6 +1252,11 @@ static void sleep_until_charged(void)
     imu_power(false);
     wifi_suspend(true);
     vTaskDelay(pdMS_TO_TICKS(50));
+#if SQUARE_HW
+    vTaskDelay(pdMS_TO_TICKS(500));                    // (the battery log's last write lands first)
+    sq_power_off();
+    vTaskDelay(pdMS_TO_TICKS(2000));                   // still here (plugged in just now?): sleep as below
+#endif
     esp_sleep_enable_timer_wakeup(EMPTY_CHECK_US);
     esp_deep_sleep_start();
 }

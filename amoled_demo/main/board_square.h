@@ -28,6 +28,7 @@ void sq_touch_fast(bool on);            // read the chip every 10 ms (screen on)
 void sq_touch_sleep(bool on);           // stop reading the touch chip (the PWR button's off) / start again
 float sq_battery_volts(void);           // the cell's voltage from the power chip; 0 if no battery
 bool sq_plugged_in(void);               // USB power is present (a computer or a wall charger)
+void sq_power_off(void);                // off, battery and all, until USB is plugged in or PWR is pressed
 int sq_power_key(void);                 // the PWR button since last asked: 0 none, 1 short press, 2 long press
 #include "battery.h"
 void sq_power_read(battery_diag_t *d);  // everything the power chip says about charging (a dozen register reads)

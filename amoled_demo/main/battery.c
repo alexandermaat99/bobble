@@ -40,7 +40,9 @@ static int64_t last;
 // 2. Discharge curve: from the moment a full battery starts draining, log the corrected voltage every few
 //    minutes (saved in NVS, survives reboots and OTA). When the run reaches empty - or the board dies and is
 //    later switched on again on a charged battery - the log becomes a voltage -> % table, where % is the share
-//    of this battery's real runtime left. Runs cut short by charging are thrown away.
+//    of this battery's real runtime left. Runs cut short by charging aren't learned from. Either way the last run
+//    is kept ("blast", GET /battery/run), so a run that wasn't learned from can still be looked at, or sent back
+//    (POST /battery/run) once the reason is fixed.
 // 3. On battery the shown % only goes down; it can only go up over USB, or after a sustained rise (wall charger).
 
 #define SAG_MAGIC   0x5A600001
@@ -96,7 +98,8 @@ static int below_max;                 // highest reading while below the shown %
 
 // Flash writes pause both cores' access to PSRAM for a moment, which would show as a hitch if done here on the
 // render loop: keep a copy and let a small background task write it
-EXT_RAM_BSS_ATTR static struct { const char *key; uint8_t data[sizeof lg]; size_t len; bool pending, erase; } slots[3];
+#define N_SLOTS 5                     // one for each key: bsag, boff, bcurve, blog, blast
+EXT_RAM_BSS_ATTR static struct { const char *key; uint8_t data[sizeof lg]; size_t len; bool pending, erase; } slots[N_SLOTS];
 static SemaphoreHandle_t slot_lock;
 static TaskHandle_t writer;
 
@@ -105,7 +108,7 @@ static void writer_task(void *arg)
     EXT_RAM_BSS_ATTR static uint8_t copy[sizeof lg];
     for (;;) {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-        for (int i = 0; i < 3; i++) {
+        for (int i = 0; i < N_SLOTS; i++) {
             xSemaphoreTake(slot_lock, portMAX_DELAY);
             bool go = slots[i].pending, erase = slots[i].erase;
             size_t len = slots[i].len;
@@ -128,7 +131,7 @@ static void nvs_put(const char *key, const void *p, size_t len)
 {
     if (!writer || len > sizeof slots[0].data) return;
     int i = 0;
-    while (i < 2 && slots[i].key && strcmp(slots[i].key, key)) i++;
+    while (i < N_SLOTS - 1 && slots[i].key && strcmp(slots[i].key, key)) i++;
     xSemaphoreTake(slot_lock, portMAX_DELAY);
     slots[i].key = key;
     slots[i].erase = !p;
@@ -158,9 +161,13 @@ static void save_curve(void)
 
 static void save_log(void) { nvs_put("blog", &lg, sizeof lg); unsaved = 0; }
 
+// The run just ended (learned from or not) is kept as the last one, until the next run ends
+static void keep_log(void) { if (lg.n) nvs_put("blast", &lg, sizeof lg); }
+
 static void drop_log(const char *why)
 {
-    if (run == RUN_LOGGING) ESP_LOGI(TAG, "discharge log dropped after %d min: %s", lg.n * lg.step_min, why);
+    if (lg.n) ESP_LOGI(TAG, "discharge log not learned from after %d min (kept as the last run): %s", (lg.n - 1) * lg.step_min, why);
+    keep_log();
     run = RUN_IDLE;
     lg.n = 0;
     nvs_put("blog", NULL, 0);
@@ -170,6 +177,7 @@ static void drop_log(const char *why)
 static void learn_from_log(void)
 {
     int span = (lg.n - 1) * lg.step_min;
+    keep_log();
     if (lg.n < 2 || span < 60 || lg.mv[lg.n - 1] > NEAR_EMPTY_MV) { drop_log("too short to learn from"); return; }
     uint16_t fresh[12];
     for (int i = 0; i < 12; i++) {
@@ -219,7 +227,9 @@ static void load_learning(float v_now)
     // a run was in progress when we last stopped: did the battery die, get charged, or did we just reboot?
     int mv = (int)(v_now * 1000), last_mv = lg.mv[lg.n - 1];
     ESP_LOGI(TAG, "found discharge log: %d min, last %d mV, now %d mV", (lg.n - 1) * lg.step_min, last_mv, mv);
-    if (last_mv <= NEAR_EMPTY_MV && mv > last_mv + 150) learn_from_log();   // ran flat, since recharged
+    // ran flat: it's on the charger now, or it's come back far from where it stopped (above: recharged; below: it
+    // went on draining while it was off, as the square's did in deep sleep, down from 3.70 V to 3.13 V)
+    if (last_mv <= NEAR_EMPTY_MV && (plugged_in() || abs(mv - last_mv) >= 60)) learn_from_log();
     else if (abs(mv - last_mv) < 60 && !plugged_in()) {  // a reboot or OTA mid-run: carry on
         run = RUN_LOGGING;
         run_t0 = esp_timer_get_time() - (int64_t)lg.n * lg.step_min * 60000000;
@@ -262,6 +272,45 @@ static void log_tick(int64_t now)
     lg.mv[lg.n++] = mv;
     if (mv <= EMPTY_MV) { learn_from_log(); return; }
     if (++unsaved >= 5 || mv <= NEAR_EMPTY_MV) save_log();
+}
+
+// A run recorded earlier, sent back to learn from (POST /battery/run): taken up by battery_update, between runs
+static uint16_t taught_mv[LOG_MAX];
+static int taught_n, taught_step;
+static volatile bool taught;
+static portMUX_TYPE taught_mux = portMUX_INITIALIZER_UNLOCKED;
+
+bool battery_teach_run(const uint16_t *mv, int n, int step_min)
+{
+    if (n < 2 || n > LOG_MAX || step_min < 1 || step_min > 240 || taught) return false;
+    for (int i = 0; i < n; i++) if (mv[i] < 2500 || mv[i] > 4400) return false;
+    taskENTER_CRITICAL(&taught_mux);
+    memcpy(taught_mv, mv, n * sizeof *mv);
+    taught_n = n;
+    taught_step = step_min;
+    taught = true;
+    taskEXIT_CRITICAL(&taught_mux);
+    return true;
+}
+
+static void take_taught(void)
+{
+    if (!taught || run == RUN_LOGGING) return;        // (not over a run being recorded: after it)
+    lg = (typeof(lg)){.magic = LOG_MAGIC, .step_min = (uint16_t)taught_step, .n = (uint16_t)taught_n};
+    memcpy(lg.mv, taught_mv, taught_n * sizeof *taught_mv);
+    ESP_LOGI(TAG, "learning from a run sent back: %d min, %d to %d mV", (lg.n - 1) * lg.step_min, lg.mv[0], lg.mv[lg.n - 1]);
+    learn_from_log();
+    taught = false;
+}
+
+int battery_last_run(uint16_t *mv, int max, int *step_min)
+{
+    EXT_RAM_BSS_ATTR static typeof(lg) l;              // (big: PSRAM; only GET /battery/run asks)
+    if (!nvs_get("blast", &l, sizeof l) || l.magic != LOG_MAGIC) return 0;
+    int n = l.n < max ? l.n : max;
+    memcpy(mv, l.mv, n * sizeof *mv);
+    *step_min = l.step_min;
+    return n;
 }
 
 // ---------------------------------------------------------------- reading
@@ -377,6 +426,7 @@ void battery_update(void)
     }
     if (first) load_learning(v);
     log_tick(now);
+    take_taught();
 }
 
 bool battery_charging(void) { return plugged_in(); }
