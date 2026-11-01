@@ -243,6 +243,8 @@ bool agent_known(void) { return seen || n_macs; }
 #define BOBBLE_BUILD 0LL
 #endif
 
+static const char *const look_names[N_LOOKS] = {"classic", "field", "tiles"};   // (LOOK_CLASSIC...)
+
 // GET /info: who this board is (anyone on the network may ask: it's what the Bonjour advert says anyway)
 static esp_err_t info_get(httpd_req_t *req)
 {
@@ -253,7 +255,7 @@ static esp_err_t info_get(httpd_req_t *req)
     cJSON_AddNumberToObject(j, "fw", (double)BOBBLE_BUILD);   // which release build (0: an everyday build)
     if (chat_port()) cJSON_AddNumberToObject(j, "chat", chat_port());
     cJSON_AddNumberToObject(j, "rssi", wifi_rssi());   // the Wi-Fi signal now (dBm, 0: not connected)   // it can talk: where the Mac connects for that
-    if (!SCREEN_ROUND) cJSON_AddStringToObject(j, "look", ui_field() ? "field" : "classic");   // (the square's style)
+    if (!SCREEN_ROUND) cJSON_AddStringToObject(j, "look", look_names[ui_look()]);   // (the square's style)
 #ifdef BOBBLE_RELEASE
     cJSON_AddBoolToObject(j, "release", true);
 #else
@@ -299,7 +301,8 @@ void agent_set_name(const char *in)
     ESP_LOGI(TAG, "named \"%s\"", agent_device_name());
 }
 
-// POST /look {"look": "field" | "classic"}: the square's style, from the Mac app (Settings > Look on the board too)
+// POST /look {"look": "field" | "classic" | "tiles"}: the square's style, from the Mac app (Settings > Look on the board
+// too)
 static esp_err_t look_post(httpd_req_t *req)
 {
     if (!agent_token_ok(req)) { httpd_resp_set_status(req, "403 Forbidden"); return httpd_resp_sendstr(req, "bad token\n"); }
@@ -307,7 +310,7 @@ static esp_err_t look_post(httpd_req_t *req)
     if (read_body(req, body, sizeof body) < 0) return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad size");
     cJSON *j = cJSON_Parse(body), *l = cJSON_GetObjectItem(j, "look");
     if (cJSON_IsString(l)) {
-        ui_field_set(!strcmp(l->valuestring, "field"));
+        for (int k = 0; k < N_LOOKS; k++) if (!strcmp(l->valuestring, look_names[k])) ui_look_set(k);
         ESP_LOGI(TAG, "look: %s", l->valuestring);
     }
     cJSON_Delete(j);

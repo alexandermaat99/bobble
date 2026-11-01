@@ -225,7 +225,8 @@ final class Device {
         }
     }
 
-    // ---- the square's look: "field" (Teenage Engineering-ish) or "classic" (Apple-ish). Round boards don't have one.
+    // ---- the square's look: "field" (Teenage Engineering-ish), "classic" (Apple-ish) or "tiles" (a phone's widgets).
+    // Round boards don't have one.
 
     // What it shows now (GET /info says it), or nil: a round board, older firmware, or not reachable
     func fetchLook(_ done: @escaping (String?) -> Void) {

@@ -18,6 +18,7 @@
 #include "wifi_ui.h"
 #include "ota.h"
 #include "screen.h"
+#include "tiles.h"
 #include "agent.h"
 #include "audio.h"
 #include "esp_app_desc.h"
@@ -131,7 +132,7 @@ static const button_t menu_buttons[] = {
     {CC_COL(0), CC_ROW(2), CC_COL(0) + CC_W, CC_ROW(2) + CC_H, ID_RESET, "Reset"},
     {CC_COL(3), CC_ROW(0), CC_COL(3) + CC_W, CC_ROW(1) + CC_H, ID_VOLUME, ""},   // volume: likewise
     {CC_COL(2), CC_ROW(2), CC_COL(3) + CC_W, CC_ROW(2) + CC_H, ID_BATTERY, "Battery"},
-    {CC_COL(1), CC_ROW(2), CC_COL(1) + CC_W, CC_ROW(2) + CC_H, ID_LOOK, "Look"},   // Classic / Field
+    {CC_COL(1), CC_ROW(2), CC_COL(1) + CC_W, CC_ROW(2) + CC_H, ID_LOOK, "Look"},   // Classic / Field / Tiles
 };
 #define BAT_RH 30                                      // the battery page's rows: the charger's, then the About group
 #define BAT_G1 158
@@ -788,8 +789,92 @@ static float cc_slider(uint16_t *buf, int y0, int h, const button_t *b, float fr
     return fy;
 }
 
+// ---- the Tiles look (Settings > Look): the same modules as flat colour tiles, each with its icon white in a black
+// disc set into it and its name in black; the sliders fill from the bottom in white (brightness) and orange (volume)
+static void tiles_wide(uint16_t *buf, int y0, int h, const button_t *b, uint16_t bg, int kind, const char *name,
+                       const char *sub, bool on)
+{
+    if (on) bg = tile_hot(bg);
+    aa_rrect(buf, y0, h, b->x0, b->y0, b->x1, b->y1, 26, bg);
+    float cy = (b->y0 + b->y1) / 2.0f;
+    aa_disc(buf, y0, h, b->x0 + 40, cy, 25, T_INK);
+    cc_icon(buf, y0, h, kind, b->x0 + 40, cy - (kind == ICON_WIFI ? 1 : 0), C_WHITE, T_INK);
+    int tx = b->x0 + 76, tw = b->x1 - 12 - tx;
+    draw_fit(buf, y0, h, tx, (int)cy - 23, &font_label, name, tw, T_INK);
+    draw_fit(buf, y0, h, tx, (int)cy + 2, &font_small, sub, tw, T_INK2);
+}
+
+// a small one; its icon drawn by the caller (kind < 0) or here
+static void tiles_small(uint16_t *buf, int y0, int h, const button_t *b, uint16_t bg, int kind, const char *name, bool on)
+{
+    if (on) bg = tile_hot(bg);
+    aa_rrect(buf, y0, h, b->x0, b->y0, b->x1, b->y1, 26, bg);
+    float cx = (b->x0 + b->x1) / 2.0f;
+    aa_disc(buf, y0, h, cx, b->y0 + 38, 25, T_INK);
+    if (kind >= 0) cc_icon(buf, y0, h, kind, cx, b->y0 + 38, C_WHITE, T_INK);
+    ftext_mid_cc(buf, y0, h, (int)cx, b->y0 + 70, &font_label, name, T_INK);
+}
+
+// a tall slider: a dark tile filled from the bottom to frac in lit; returns where the lit part starts
+static float tiles_slider(uint16_t *buf, int y0, int h, const button_t *b, float frac, uint16_t lit)
+{
+    aa_rrect(buf, y0, h, b->x0, b->y0, b->x1, b->y1, 26, T_CASE);
+    float fy = b->y1 - (b->y1 - b->y0) * frac;
+    if (b->y1 - fy > 2) {
+        int ct, cb;
+        gfx_get_clip(&ct, &cb);
+        gfx_clip((int)fy > ct ? (int)fy : ct, cb);
+        aa_rrect(buf, y0, h, b->x0, b->y0, b->x1, b->y1, 26, lit);
+        gfx_clip(ct, cb);
+    }
+    return fy;
+}
+
+static void draw_menu_tiles(uint16_t *buf, int y0, int h)
+{
+    const button_t *wb = &menu_buttons[0];
+    bool conn = wifi_state() == WS_CONNECTED;
+    const char *sub = conn ? wifi_ssid() : wifi_state() == WS_CONNECTING ? "Connecting..." : "Not connected";
+    tiles_wide(buf, y0, h, wb, conn ? T_SKY : T_CASE2, ICON_WIFI, "Wi-Fi", sub, current_id() == ID_WIFI);
+    tiles_small(buf, y0, h, &menu_buttons[2], T_ORANGE, ICON_TILT, "Tilt", current_id() == ID_CAL_TILT);
+    tiles_small(buf, y0, h, &menu_buttons[1], T_YELLOW, ICON_TOUCH, "Touch", current_id() == ID_CAL_TOUCH);
+
+    const button_t *b = &menu_buttons[4];             // brightness, the sun at its foot
+    float fy = tiles_slider(buf, y0, h, b, (screen_brightness_get() - 10) / 245.0f, T_PAPER);
+    float sy = b->y1 - 30;
+    cc_icon(buf, y0, h, ICON_SUN, (b->x0 + b->x1) / 2.0f, sy, sy > fy ? T_INK : C_WHITE, 0);
+    const button_t *vb = &menu_buttons[6];            // volume, a speaker
+    int vol = device_volume_get();
+    fy = tiles_slider(buf, y0, h, vb, vol / 100.0f, T_ORANGE);
+    sy = vb->y1 - 30;
+    speaker_icon(buf, y0, h, (vb->x0 + vb->x1) / 2.0f + 2, sy, 1.15f, vol == 0 ? -1 : vol < 50 ? 1 : 2, sy > fy ? T_INK : C_WHITE);
+
+    const button_t *rb = &menu_buttons[5];
+    tiles_small(buf, y0, h, rb, T_RED, -1, "Reset", current_id() == ID_RESET);
+    bin_icon(buf, y0, h, (rb->x0 + rb->x1) / 2.0f, rb->y0 + 38, C_WHITE);
+
+    const button_t *lk = &menu_buttons[8];            // Look: four tiles in the disc
+    tiles_small(buf, y0, h, lk, T_BLUE, -1, "Tiles", current_id() == ID_LOOK);
+    const uint16_t sq[4] = {T_SKY, T_ORANGE, T_YELLOW, T_RED};
+    float lx = (lk->x0 + lk->x1) / 2.0f, ly = lk->y0 + 38;
+    for (int i = 0; i < 4; i++) {
+        float qx = lx - 10 + (i % 2) * 11, qy = ly - 10 + (i / 2) * 11;
+        aa_rrect(buf, y0, h, qx, qy, qx + 9, qy + 9, 3, sq[i]);
+    }
+
+    const button_t *bb = &menu_buttons[7];
+    battery_diag_t bd;
+    battery_diag(&bd);
+    char bsub[48];
+    int pct = battery_percent();
+    if (pct >= 0) snprintf(bsub, sizeof bsub, "%d%%  %s", pct, battery_state_text(&bd));
+    else strlcpy(bsub, battery_state_text(&bd), sizeof bsub);
+    tiles_wide(buf, y0, h, bb, battery_charging_now(&bd) ? T_YELLOW : T_MIST, ICON_BATTERY, "Battery", bsub, current_id() == ID_BATTERY);
+}
+
 static void draw_menu(uint16_t *buf, int y0, int h)
 {
+    if (ui_tiles()) { draw_menu_tiles(buf, y0, h); return; }
     if (ui_field()) field_dots(buf, y0, h);
     // Wi-Fi: blue while connected
     const button_t *wb = &menu_buttons[0];
@@ -1293,7 +1378,7 @@ static int activate(int id)
     case ID_CAL_TILT: return WIFI_UI_CAL_TILT;
     case ID_RESET: view = V_RESET; break;
     case ID_BATTERY: view = V_BATTERY; break;
-    case ID_LOOK: ui_field_set(!ui_field()); break;
+    case ID_LOOK: ui_look_set((ui_look() + 1) % N_LOOKS); break;   // (Classic, Field, Tiles, round again)
     case ID_RENAME:                                   // the keyboard, with the name as it is
         naming = true;
         strlcpy(password, agent_device_name(), sizeof password);
