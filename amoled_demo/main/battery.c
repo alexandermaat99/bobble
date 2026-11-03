@@ -47,18 +47,31 @@ static int64_t last;
 
 #define SAG_MAGIC   0x5A600001
 #define OFF_MAGIC   0x0FF5E701
-#define CURVE_MAGIC 0xC0B70001
 #define LOG_MAGIC   0x1060B001
 #define LOG_MAX     240
 #define FULL_MV     4150              // a run starts when a charged battery drops below this
 #define EMPTY_MV    3400              // ...and is complete at this
+#if SQUARE_HW
+// The 4" board's 3.3 V comes from the power chip's buck converter, which keeps going far lower than the round
+// board's regulator. An 18650 still holds about a third of its charge at 3.7 V, so stop at 3.45 V instead.
+// (Curves learned with the old 3.7 V end get a new magic, so they're forgotten and learned again.)
+#define CURVE_MAGIC 0xC0B70002
+#define NEAR_EMPTY_MV 3550
+#define SHUTDOWN_MV 3450
+#else
+#define CURVE_MAGIC 0xC0B70001
 #define NEAR_EMPTY_MV 3750            // below this, save every log entry (the board may die any minute);
                                       // this board browns out around 3.66 V, so a run ending under this counts as run flat
 #define SHUTDOWN_MV 3700              // deep sleep here, just above the brown-out, so the board stops cleanly
+#endif
 
 static const uint8_t points[12] = {100, 90, 80, 70, 60, 50, 40, 30, 20, 10, 5, 0};
-// until a run is learned: a generic LiPo curve squeezed to end at this board's shutdown point
+// until a run is learned: a generic curve squeezed to end at this board's shutdown point
+#if SQUARE_HW
+static uint16_t curve[12] = {4180, 4060, 3980, 3910, 3850, 3800, 3760, 3720, 3680, 3620, 3560, 3450};
+#else
 static uint16_t curve[12] = {4200, 4110, 4040, 3980, 3930, 3890, 3855, 3825, 3795, 3760, 3730, 3700};
+#endif
 static uint8_t curve_runs;            // completed runs averaged into curve[] (0: generic LiPo table)
 
 static bool screen_on = true;
@@ -520,6 +533,17 @@ int battery_percent(void)
     if (volts < 2.5f) return -1;                        // nothing plugged in
     int p = percent_of(battery_charging() ? volts - usb_offset : volts);   // on USB: the cell's own voltage
     int64_t now = esp_timer_get_time();
+#if SQUARE_HW
+    // the power chip's fuel gauge counts the charge in and out, so load doesn't fool it; the curve is the fallback.
+    // GET /battery shows both (gauge_pct, and the curve's % in the log line every 10 min), to check one against the other.
+    static int64_t compared_at;
+    int g = diag.gauge_pct;
+    if (!compared_at || now - compared_at > 600000000) {
+        compared_at = now;
+        ESP_LOGI(TAG, "%.2f V: gauge %d%%, curve %d%% (%d runs)", volts, g, p, curve_runs);
+    }
+    if (g >= 0) p = g;
+#endif
     if (shown < 0 || battery_charging()) { shown = p; below_since = above_since = 0; return shown; }
     // on battery: drop once the reading has stayed lower for 20 s (to the best of it, so Wi-Fi blips don't count);
     // go up only after a big rise that lasts two minutes (a wall charger we can't otherwise see)

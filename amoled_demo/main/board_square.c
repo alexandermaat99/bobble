@@ -478,6 +478,8 @@ static bool pmu_reg(uint8_t reg, uint8_t *v)
         if (!(pmu_dev = add_dev(0x34))) { ESP_LOGE(TAG, "no power chip found"); return false; }
         uint8_t on[2] = {0x30, 0};                      // ADC channels: battery, USB and system voltage, chip temperature
         if (pmu_reg(0x30, &on[1])) { on[1] |= 0x1D; i2c_master_transmit(pmu_dev, on, 2, 50); }
+        uint8_t gauge[2] = {0x18, 0};                   // fuel gauge on (bit 3), so 0xA4 holds the charge left in %
+        if (pmu_reg(0x18, &gauge[1]) && !(gauge[1] & 0x08)) { gauge[1] |= 0x08; i2c_master_transmit(pmu_dev, gauge, 2, 50); }
         uint8_t icc[2] = {0x62, 0};                     // charge current (bits 4-0)
         if (pmu_reg(0x62, &icc[1])) { icc[1] = (icc[1] & 0xE0) | CHARGE_CODE; i2c_master_transmit(pmu_dev, icc, 2, 50); }
     }
