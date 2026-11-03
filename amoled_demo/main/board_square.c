@@ -1,6 +1,7 @@
 #include "board_square.h"
 #if SQUARE_HW
 #include <string.h>
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_heap_caps.h"
@@ -30,6 +31,12 @@ static const char *TAG = "square";
 static i2c_master_bus_handle_t bus;
 static i2c_master_dev_handle_t ex_dev, gt_dev, pmu_dev;
 static uint8_t ex_out;
+// The expander is written from several tasks (the panel's lines, the amplifier from audio.c, the 5 s check): each
+// changes one bit of ex_out and writes all of it, so they take turns
+static SemaphoreHandle_t ex_lock;
+static void ex_take(void) { if (!ex_lock) ex_lock = xSemaphoreCreateRecursiveMutex(); xSemaphoreTakeRecursive(ex_lock, portMAX_DELAY); }
+static void ex_give(void) { xSemaphoreGiveRecursive(ex_lock); }
+#define EX_DIR ((uint8_t)~(EX_CS | EX_SDA | EX_SCL | EX_AMP | EX_RST))   // their directions (0: an output)
 static esp_lcd_panel_handle_t panel;
 static uint16_t *fb;
 static async_memcpy_handle_t mcp;
@@ -78,12 +85,14 @@ static void spi9(bool param, uint8_t v)
 }
 static void panel_cmd(uint8_t cmd, const uint8_t *data, int n)
 {
+    ex_take();
     ex_set(EX_SCL, false);
     ex_set(EX_CS, false);
     spi9(false, cmd);
     for (int i = 0; i < n; i++) spi9(true, data[i]);
     ex_set(EX_SCL, false);
     ex_set(EX_CS, true);
+    ex_give();
 }
 
 typedef struct { uint8_t cmd; uint8_t data[16]; uint8_t n; uint8_t delay_ms; } init_cmd_t;
@@ -164,6 +173,7 @@ static void display_init_here(void)
     backlight_init();
     ex_dev = add_dev(0x20);
     if (!ex_dev) ESP_LOGE(TAG, "no I/O expander: the panel can't be set up");
+    ex_take();
     ex_out = EX_CS | EX_RST;
     ex_reg(0x01, ex_out);
     ex_reg(0x03, (uint8_t)~(EX_CS | EX_SDA | EX_SCL | EX_AMP | EX_RST | EX_TINT));   // those are outputs
@@ -172,7 +182,8 @@ static void display_init_here(void)
     vTaskDelay(pdMS_TO_TICKS(20));
     ex_set(EX_RST, true);
     vTaskDelay(pdMS_TO_TICKS(120));
-    ex_reg(0x03, (uint8_t)~(EX_CS | EX_SDA | EX_SCL | EX_AMP | EX_RST));   // let go of touch INT
+    ex_reg(0x03, EX_DIR);                               // let go of touch INT
+    ex_give();
     panel_cmd(0x01, NULL, 0);                           // software reset
     vTaskDelay(pdMS_TO_TICKS(120));
     for (int i = 0; i < sizeof st7701_init / sizeof *st7701_init; i++) {
@@ -222,17 +233,35 @@ static void display_init_here(void)
 void sq_display_recover(int what, const char *why)
 {
     if (!panel) return;
+    if (what == 3) {                                    // (testing: as if it had reset by itself)
+        panel_cmd(0x01, NULL, 0);
+        ESP_LOGW(TAG, "display: panel chip reset, not set up (%s)", why);
+        return;
+    }
+    if (what == 4) {                                    // its setup sent again over what it has (no reset: no blank)
+        int64_t t0 = esp_timer_get_time();
+        ex_take();
+        for (int i = 0; i < sizeof st7701_init / sizeof *st7701_init; i++) {
+            panel_cmd(st7701_init[i].cmd, st7701_init[i].data, st7701_init[i].n);
+            if (st7701_init[i].delay_ms) vTaskDelay(pdMS_TO_TICKS(st7701_init[i].delay_ms));
+        }
+        ex_give();
+        ESP_LOGI(TAG, "display: panel chip's setup sent again, %d ms (%s)", (int)((esp_timer_get_time() - t0) / 1000), why);
+        return;
+    }
     if (what == 1) {
         esp_lcd_panel_reset(panel);
         esp_lcd_panel_init(panel);
         ESP_LOGW(TAG, "display: LCD controller set up again (%s)", why);
     } else if (what == 2) {
+        ex_take();                                      // (all of it in one go)
         panel_cmd(0x01, NULL, 0);                       // software reset
         vTaskDelay(pdMS_TO_TICKS(120));
         for (int i = 0; i < sizeof st7701_init / sizeof *st7701_init; i++) {
             panel_cmd(st7701_init[i].cmd, st7701_init[i].data, st7701_init[i].n);
             if (st7701_init[i].delay_ms) vTaskDelay(pdMS_TO_TICKS(st7701_init[i].delay_ms));
         }
+        ex_give();
         ESP_LOGW(TAG, "display: panel chip set up again (%s)", why);
     }
 }
@@ -244,9 +273,11 @@ void sq_expander_check(void)
     static int last = -1;
     if (!ex_dev) return;
     uint8_t reg = 0x03, dir = 0, out = 0;
+    ex_take();
     bool ok = i2c_master_transmit_receive(ex_dev, &reg, 1, &dir, 1, 50) == ESP_OK;
     reg = 0x01;
     ok = ok && i2c_master_transmit_receive(ex_dev, &reg, 1, &out, 1, 50) == ESP_OK;
+    ex_give();
     if (!ok) { ESP_LOGW(TAG, "expander: couldn't read it"); return; }
     uint8_t want_dir = (uint8_t)~(EX_CS | EX_SDA | EX_SCL | EX_AMP | EX_RST);
     int now = dir << 8 | (out & ~EX_AMP);
@@ -262,6 +293,7 @@ void sq_expander_check(void)
 bool sq_amp(bool on)
 {
     if (!ex_dev) return false;
+    ex_take();
     ex_out = on ? ex_out | EX_AMP : ex_out & ~EX_AMP;
     for (int i = 0; i < 4; i++) {
         uint8_t b[2] = {0x01, ex_out}, reg = 0x01, got = 0;
@@ -269,12 +301,14 @@ bool sq_amp(bool on)
         esp_err_t r = i2c_master_transmit_receive(ex_dev, &reg, 1, &got, 1, 50);
         if (w == ESP_OK && r == ESP_OK && !!(got & EX_AMP) == on) {
             if (i) ESP_LOGW(TAG, "amp %s took %d tries", on ? "on" : "off", i + 1);
+            ex_give();
             return true;
         }
         ESP_LOGW(TAG, "amp %s: try %d failed (write %s, read %s, line %d)", on ? "on" : "off", i + 1, esp_err_to_name(w),
                  esp_err_to_name(r), !!(got & EX_AMP));
         vTaskDelay(pdMS_TO_TICKS(5));
     }
+    ex_give();
     return false;
 }
 

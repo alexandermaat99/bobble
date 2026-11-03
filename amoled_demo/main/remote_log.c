@@ -182,16 +182,17 @@ static esp_err_t get_motion(httpd_req_t *req)
 }
 
 // POST /display?do=lcd|panel: put a shifted or broken picture right without a restart (the square), to learn which
-// side lost track: this chip's LCD controller, or the panel chip
+// side lost track: this chip's LCD controller, or the panel chip. ?do=break: reset the panel chip without setting it
+// up again (what it does by itself); ?do=refresh: its setup sent again without a reset (is that seen?)
 static esp_err_t post_display(httpd_req_t *req)
 {
     if (!token_ok(req)) return ESP_OK;
 #if SQUARE_HW
     char q[32], v[8];
     if (httpd_req_get_url_query_str(req, q, sizeof q) != ESP_OK || httpd_query_key_value(q, "do", v, sizeof v) != ESP_OK ||
-        (strcmp(v, "lcd") && strcmp(v, "panel")))
-        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "need ?do=lcd or ?do=panel");
-    sq_display_recover(strcmp(v, "lcd") ? 2 : 1, "asked");
+        (strcmp(v, "lcd") && strcmp(v, "panel") && strcmp(v, "break") && strcmp(v, "refresh")))
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "need ?do=lcd, ?do=panel, ?do=break or ?do=refresh");
+    sq_display_recover(!strcmp(v, "lcd") ? 1 : !strcmp(v, "panel") ? 2 : !strcmp(v, "break") ? 3 : 4, "asked");
     return httpd_resp_sendstr(req, "done\n");
 #else
     return httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "the square only");

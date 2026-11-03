@@ -2,7 +2,10 @@
 # (settings, updates) don't pause the cache, which would make the picture jump.
 CONFIG_SPIRAM_XIP_FROM_PSRAM=y
 CONFIG_LCD_RGB_ISR_IRAM_SAFE=y
-CONFIG_LCD_RGB_RESTART_IN_VSYNC=y
+# (Not CONFIG_LCD_RGB_RESTART_IN_VSYNC: restarting the panel's DMA every frame is itself what shifts the picture when the
+# VSYNC interrupt is late, ESP-IDF warns. The picture broke with it on and stayed broken until a restart of the LCD
+# controller or the panel, either of which sometimes fixed it and sometimes didn't (2026-11-01). Without it, the driver
+# restarts the DMA only when a frame's bounce-buffer refills came up short.)
 # PSRAM (and flash, which must match) at 120 MHz, as Waveshare's own firmware for this board runs it: the panel's scan-out and the drawing share it
 # (octal PSRAM at 120 MHz is marked experimental: fine at steady temperatures)
 CONFIG_IDF_EXPERIMENTAL_FEATURES=y
