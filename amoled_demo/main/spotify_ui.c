@@ -79,6 +79,7 @@ static int press_id, press_x, press_y;
 // The Tiles look's volume tile, dragged up and down: the volume as the finger has it, until Spotify's catches up
 static int drag_vol = -1, drag_from, drag_moved;   // drag_moved: the furthest the finger's gone up or down
 static int64_t drag_until;             // (shown this long after letting go)
+static int unmute_vol = -1;            // the Field knob, tapped to mute: the volume a second tap brings back
 static int shown_volume(void) { return drag_vol >= 0 ? drag_vol : s.volume; }
 
 // ---------------------------------------------------------------- helpers
@@ -736,9 +737,12 @@ void spotify_ui_update(int tx, int ty, int64_t now_us)
     } else if (down) {
         down = false;
         if (press_id == ID_VOL) {
-            if (drag_moved <= 8 && ui_tiles()) {       // a tap on the tile: to where it was tapped (the knob: nothing)
+            if (drag_moved <= 8 && ui_tiles()) {       // a tap on the tile: to where it was tapped
                 int v = (ART_Y + ART_SZ - press_y) * 100 / ART_SZ;
                 drag_vol = v < 0 ? 0 : v > 100 ? 100 : v;
+            } else if (drag_moved <= 8 && ui_field()) {   // a tap on the knob: mute, and again to unmute
+                if (drag_from > 0) { unmute_vol = drag_from; drag_vol = 0; }
+                else drag_vol = unmute_vol > 0 ? unmute_vol : 30;
             }
             if (drag_vol != s.volume) {
                 char a[8];
