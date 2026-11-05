@@ -1003,6 +1003,7 @@ static int look_pref = LOOK_FIELD;    // Settings > Look (Field: the beta's defa
 // shows, 1 down to 0 as it fades into the page; boot_what: the line under it
 static float boot_a = 1;
 static const char *boot_what;
+static bool boot_shown;               // a whole black frame is up: after it, only the shape's box is redrawn
 static int units_pref = UNITS_F;
 static float rest[3];                 // slowly-following accelerometer reading: where the board has been sitting
 
@@ -1471,11 +1472,16 @@ static void compose_rows(uint16_t *buf, int y0, int y1)
 }
 
 // Draw one strip of the screen: normally the current page (+ card), or two pages side by side mid-swipe
+static void boot_rows(uint16_t *buf, int y0, int y1)
+{
+    memset(buf, 0, (y1 - y0) * W * 2);
+    boot_ui_draw(buf, y0, y1 - y0, boot_what);
+}
+
 static void draw_strip(uint16_t *buf, int y0, int h)
 {
     if (boot_a >= 1) {                                 // loading: just the shape, on black
-        memset(buf, 0, h * W * 2);
-        boot_ui_draw(buf, y0, h, esp_timer_get_time() / 1e6f, 1, boot_what);
+        split_rows(boot_rows, buf, y0, h);
         return;
     }
     if (!pages_sliding() || !snap_a || !snap_b) {
@@ -1483,7 +1489,7 @@ static void draw_strip(uint16_t *buf, int y0, int h)
         draw_overlay(buf, y0, h);
         if (boot_a > 0) {                              // fading into the page
             dim_rows(buf, y0, y0, y0 + h, (int)(256 * (1 - boot_a)));
-            boot_ui_draw(buf, y0, h, esp_timer_get_time() / 1e6f, boot_a, boot_what);
+            boot_ui_draw(buf, y0, h, boot_what);
         }
         return;
     }
@@ -1867,16 +1873,27 @@ void app_main(void)
         if (boot_a > 0) {                              // loading: a tap skips it, and presses nothing under it
             if (down) { boot_skip = true; swallow_touch = true; down = false; tx = ty = -1; }
             static int64_t boot_end;
-            const char *what = wifi_state() == WS_PORTAL ? NULL               // nothing to join: setup needs the screen
-                             : wifi_state() != WS_CONNECTED ? (now < 20000000 ? "Joining Wi-Fi" : NULL)
-                             : !wifi_time_synced() ? "Setting the clock"
-                             : calendar_count() > 0 && !calendar_loaded() ? "Loading your calendar" : NULL;
+            static char line[48];                      // what it's waiting for, as it happens
+            const char *what = line;
+            int kb, cal = calendar_progress(&kb);
+            if (wifi_state() == WS_PORTAL) what = NULL;                       // nothing to join: setup needs the screen
+            else if (wifi_state() != WS_CONNECTED) {
+                if (now < 20000000) snprintf(line, sizeof line, wifi_ssid()[0] ? "Joining %.24s" : "Joining Wi-Fi", wifi_ssid());
+                else what = NULL;
+            } else if (!wifi_time_synced()) strlcpy(line, "Setting the clock", sizeof line);
+            else if (calendar_count() > 0 && !calendar_loaded()) {
+                if (!cal && !strncmp(line, "Calendar ", 9)) {}   // (between two: keep the last one's line)
+                else if (!cal) strlcpy(line, calendar_count() > 1 ? "Loading your calendars" : "Loading your calendar", sizeof line);
+                else if (calendar_count() > 1) snprintf(line, sizeof line, "Calendar %d of %d  (%d KB)", cal, calendar_count(), kb / 1024);
+                else snprintf(line, sizeof line, "Loading your calendar  (%d KB)", kb / 1024);
+            } else what = NULL;
             if (what) boot_what = what;
             if (!boot_end && (!what || boot_skip || now > 30000000 || calibrating || tilt_step || ota_progress() >= 0 || show_empty))
                 boot_end = now;
             if (boot_end) boot_a = 1 - (now - boot_end) / 400000.0f;
             if (boot_a < 0) { boot_a = 0; ESP_LOGI(TAG, "loaded (%.1f s)", now / 1e6); }
-            force_redraw = true;
+            boot_ui_frame(now / 1e6f, boot_a);
+            if (boot_a < 1 || !boot_shown) force_redraw = true;   // (fading, or the first frame: everything)
         }
         if (down && !was_down) ESP_LOGI(TAG, "touch down %d,%d (card %d)", tx, ty, (int)sheet);
 
@@ -2145,6 +2162,13 @@ void app_main(void)
             part_cnt = 1;
             part_on = true;
         }
+        if (boot_a >= 1 && boot_shown && !others) {   // loading: just the shape and the line under it
+            static const int box[4] = {CX - 160, CY - 80, CX + 160, CY + 130};
+            memcpy(part_rect[0], box, sizeof box);
+            part_cnt = 1;
+            part_on = content = true;
+        }
+        if (boot_a >= 1 && others) boot_shown = true;
         {   // diagnostics: why frames are being redrawn (counts per 5 s, in the status line)
             if (lib_dirty) why_lib++;
             if (music_dirty) why_music++;
