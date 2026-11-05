@@ -275,7 +275,9 @@ static void log_tick(int64_t now)
     }
     if (run != RUN_LOGGING) return;
 
-    // charging mid-run spoils the log
+    // charging mid-run spoils the log, unless it had reached near-empty: then it's a whole run (as when the board
+    // starts up again on the charger after running flat, and its first reading didn't see USB yet)
+    if (usb && lg.mv[lg.n - 1] <= NEAR_EMPTY_MV) { learn_from_log(); return; }
     if (usb) { drop_log("plugged into USB"); return; }
     if (mv < run_min_mv) run_min_mv = mv;
     if (mv > run_min_mv + 80) {
