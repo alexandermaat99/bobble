@@ -246,11 +246,13 @@ final class Device {
 
     // Its release build number (0: an everyday build, or firmware from before boards said), and whether it's a release
     // build (nil: too old to say). nil overall: not reachable.
-    func firmware(_ done: @escaping ((build: Int, release: Bool?)?) -> Void) {
+    // and which board it is, "round" or "square" (firmware from before boards said: only the square says its "look")
+    func firmware(_ done: @escaping ((build: Int, release: Bool?, board: String)?) -> Void) {
         guard !simulator, let endpoint else { done(nil); return }
         request(endpoint, "/info", Data(), method: "GET") { code, body in
             guard code == 200, let body, let j = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any] else { done(nil); return }
-            done(((j["fw"] as? NSNumber)?.intValue ?? 0, j["release"] as? Bool))
+            let board = j["board"] as? String ?? (j["look"] != nil ? "square" : "round")
+            done(((j["fw"] as? NSNumber)?.intValue ?? 0, j["release"] as? Bool, board))
         }
     }
 
