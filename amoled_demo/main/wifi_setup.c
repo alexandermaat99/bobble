@@ -43,6 +43,8 @@ static volatile bool scanning, retries_paused, suspended;
 static portMUX_TYPE aps_lock = portMUX_INITIALIZER_UNLOCKED;
 static esp_timer_handle_t ap_off_timer, retry_timer, backoff_timer;
 static bool ever_connected;           // this network worked since boot: a drop is the router, not the password
+static bool boot_grace;               // just started with a remembered network: give it the same 5 minutes (a board
+                                      // starting up off a flat battery, or with the router, can miss its first tries)
 static int64_t lost_at;
 static void go_portal(void);
 
@@ -142,7 +144,7 @@ static void pick_from_scan(void)
                 return;
             }
     ESP_LOGI(TAG, "no remembered network in range");
-    if (ever_connected && !last_auth_failed && esp_timer_get_time() - lost_at < 5 * 60 * 1000000LL) {
+    if ((ever_connected || boot_grace) && !last_auth_failed && esp_timer_get_time() - lost_at < 5 * 60 * 1000000LL) {
         state = WS_CONNECTING;                         // keep trying the last one for now
         esp_timer_stop(backoff_timer);
         esp_timer_start_once(backoff_timer, 10 * 1000000);
@@ -293,7 +295,7 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         } else if (++retries <= MAX_RETRIES && !last_auth_failed) {
             state = WS_CONNECTING;
             esp_wifi_connect();
-        } else if (ever_connected && !last_auth_failed && esp_timer_get_time() - lost_at < 5 * 60 * 1000000LL) {
+        } else if ((ever_connected || boot_grace) && !last_auth_failed && esp_timer_get_time() - lost_at < 5 * 60 * 1000000LL) {
             // a network that worked earlier (router rebooting, weak spell): keep trying it, 2 s doubling to 30 s,
             // for 5 minutes before falling back to the setup hotspot
             int n = retries - MAX_RETRIES, s = n < 4 ? 2 << n : 30;
@@ -601,6 +603,8 @@ void wifi_setup_start(void)
     if (sta_ssid[0]) {
         esp_wifi_set_mode(WIFI_MODE_STA);       // known network: no hotspot unless joining fails
         ap_running = false;
+        boot_grace = true;
+        lost_at = esp_timer_get_time();
     } else {
         ap_running = true;
     }

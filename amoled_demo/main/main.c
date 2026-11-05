@@ -1262,6 +1262,7 @@ static void panel_power(bool on)
 static void sleep_until_charged(void)
 {
     ESP_LOGW(TAG, "battery empty (%.2f V): sleeping until it's charged", battery_volts());
+    battery_save_now();                                // (written in the background during the waits below)
     panel_power(false);
     panel_cmd(0x10);
     imu_power(false);

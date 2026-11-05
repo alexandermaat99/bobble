@@ -13,6 +13,7 @@ int battery_learned_runs(void);  // full discharges learned from (0: generic LiP
 bool battery_logging(void);      // currently recording a discharge from full
 // Since the last charge: seconds with the screen on, out of seconds on battery (plugged in: the last run's)
 void battery_screen_time(uint32_t *on_s, uint32_t *bat_s);
+void battery_save_now(void);     // write what's only in memory (the screen-on time) before everything goes off
 bool battery_empty(void);         // at 0% on battery for a minute: time to shut down until it's charged
 float battery_empty_volts(void);  // where 0% is
 float battery_read_now(void);     // one immediate reading (no smoothing), for the check at power-up

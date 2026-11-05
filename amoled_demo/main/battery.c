@@ -606,6 +606,8 @@ int battery_percent(void)
     return shown;
 }
 
+void battery_save_now(void) { if (sot.bat_ms) nvs_put("bsot", &sot, sizeof sot); }
+
 void battery_screen_time(uint32_t *on_s, uint32_t *bat_s) { *on_s = sot.on_ms / 1000; *bat_s = sot.bat_ms / 1000; }
 
 int battery_learned_runs(void) { return curve_runs; }
