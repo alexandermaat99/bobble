@@ -42,7 +42,7 @@ enum {
     ID_NONE = 0, ID_SCAN, ID_PHONE, ID_EXIT, ID_BACK, ID_CANCEL, ID_NETWORKS, ID_FORGET,
     ID_SHIFT, ID_DEL, ID_SYM, ID_SPACE, ID_JOIN, ID_SHOW,
     ID_MENU, ID_WIFI, ID_CAL_TOUCH, ID_CAL_TILT, ID_BRIGHT, ID_LOCK, ID_RESET, ID_ERASE, ID_VOLUME, ID_BATTERY,
-    ID_RENAME, ID_CLEAR, ID_LOOK,
+    ID_RENAME, ID_CLEAR, ID_LOOK, ID_CHARGE,
     ID_ROW = 100,     // + row index
     ID_KEY = 200,     // + character code
 };
@@ -134,11 +134,12 @@ static const button_t menu_buttons[] = {
     {CC_COL(2), CC_ROW(2), CC_COL(3) + CC_W, CC_ROW(2) + CC_H, ID_BATTERY, "Battery"},
     {CC_COL(1), CC_ROW(2), CC_COL(1) + CC_W, CC_ROW(2) + CC_H, ID_LOOK, "Look"},   // Classic / Field / Tiles
 };
-#define BAT_RH 30                                      // the battery page's rows: the charger's, then the About group
+#define BAT_RH 28                                      // the battery page's rows: the charger's, then the About group
 #define BAT_G1 158
-#define BAT_G2 (BAT_G1 + 6 * BAT_RH + 14)
+#define BAT_G2 (BAT_G1 + 7 * BAT_RH + 14)
 static const button_t battery_buttons[] = {{8, 46, 160, 88, ID_MENU, "Settings"},
-                                           {16, BAT_G2, W - 16, BAT_G2 + BAT_RH, ID_RENAME, "Name"}};
+                                           {16, BAT_G2, W - 16, BAT_G2 + BAT_RH, ID_RENAME, "Name"},
+                                           {16, BAT_G1 + 3 * BAT_RH, W - 16, BAT_G1 + 4 * BAT_RH, ID_CHARGE, "Charge current"}};
 #else
 static const button_t menu_buttons[] = {
     // round icon bubbles, two by two
@@ -1111,6 +1112,15 @@ static void volts_text(char *out, size_t cap, int mv)
     else snprintf(out, cap, "%d.%02d V", mv / 1000, (mv % 1000) / 10);
 }
 
+// "45m", "2h 14m", "1d 3h"
+static int dur_text(char *out, size_t cap, uint32_t s)
+{
+    uint32_t m = s / 60, hr = m / 60;
+    if (hr >= 24) return snprintf(out, cap, "%ud %uh", (unsigned)(hr / 24), (unsigned)(hr % 24));
+    if (hr) return snprintf(out, cap, "%uh %um", (unsigned)hr, (unsigned)(m % 60));
+    return snprintf(out, cap, "%um", (unsigned)m);
+}
+
 // The firmware's version, short: "build-2610282329-4-gf259f2c-dirty" (git describe) is "f259f2c, modified"
 static void version_text(char *out, size_t cap)
 {
@@ -1177,8 +1187,9 @@ static void draw_battery(uint16_t *buf, int y0, int h)
         ftext_mid(buf, y0, h, CX, 136, fl ? &font_mono : &font_label, head, fl ? F_ORANGE : SQ_TEXT2);
     }
 
-    static const char *lab[6] = {"Battery", "Charging", "USB power", "Charge current", "Charges to", "Chip temperature"};
-    char v[6][32];
+    static const char *lab[7] = {"Battery", "Charging", "USB power", "Charge current", "Charges to", "Chip temperature",
+                                 "Screen on"};
+    char v[7][32];
     volts_text(v[0], sizeof v[0], d.vbat_mv);
     strlcpy(v[1], !d.chip ? "-" : !d.usb ? "Not plugged in" : !d.charge_on ? "Switched off" : battery_stage_text(d.stage),
             sizeof v[1]);
@@ -1186,14 +1197,24 @@ static void draw_battery(uint16_t *buf, int y0, int h)
     else strlcpy(v[2], d.usb ? "Connected" : "Not connected", sizeof v[2]);
     if (d.charge_ma >= 0) snprintf(v[3], sizeof v[3], "%d mA", d.charge_ma); else strlcpy(v[3], "-", sizeof v[3]);
     volts_text(v[4], sizeof v[4], d.full_mv);
-    if (d.chip) snprintf(v[5], sizeof v[5], "%d  C", (int)lroundf(d.chip_c)); else strlcpy(v[5], "-", sizeof v[5]);
+    bool f = ui_units() == UNITS_F;
+    if (d.chip) snprintf(v[5], sizeof v[5], "%d  %s", (int)lroundf(f ? d.chip_c * 9 / 5 + 32 : d.chip_c), f ? "F" : "C");
+    else strlcpy(v[5], "-", sizeof v[5]);
+    uint32_t on_s, bat_s;                             // since the last charge: "2h 14m of 9h 40m" on battery
+    battery_screen_time(&on_s, &bat_s);
+    if (!bat_s) strlcpy(v[6], "-", sizeof v[6]);
+    else {
+        int n = dur_text(v[6], sizeof v[6], on_s);
+        strlcpy(v[6] + n, " of ", sizeof v[6] - n);
+        dur_text(v[6] + n + 4, sizeof v[6] - n - 4, bat_s);
+    }
     const int rh = BAT_RH, g1 = BAT_G1, g2 = BAT_G2;
-    rows(buf, y0, h, g1, rh, 6, lab, v, -1, false);
+    rows(buf, y0, h, g1, rh, 7, lab, v, d.chip ? 3 : -1, current_id() == ID_CHARGE);   // (charge current: tap for the next)
     if (d.chip && g1 + 5 * rh + rh / 2 + 8 > y0 && g1 + 5 * rh < y0 + h) {   // (the font has no degree sign: a ring)
         int my = g1 + 5 * rh + rh / 2;
         const font_t *vf = fl ? &font_mono : &font_label;
         uint16_t vc = fl ? rgb(235, 235, 240) : SQ_TEXT2;
-        float dx = ROW_X1 - 16 - ftext_width(vf, "C") - 4.5f;
+        float dx = ROW_X1 - 16 - ftext_width(vf, f ? "F" : "C") - 4.5f;
         aa_disc(buf, y0, h, dx, my - 5, 2.6f, vc);
         aa_disc(buf, y0, h, dx, my - 5, 1.2f, grp_col());
     }
@@ -1407,6 +1428,15 @@ static int activate(int id)
     case ID_CAL_TILT: return WIFI_UI_CAL_TILT;
     case ID_RESET: view = V_RESET; break;
     case ID_BATTERY: view = V_BATTERY; break;
+    case ID_CHARGE: {                                 // the next step up, round to the lowest
+        static const int steps[] = {200, 300, 500, 800, 1000};
+        battery_diag_t d;
+        battery_diag(&d);
+        int i = 0;
+        while (i < 5 && steps[i] <= d.charge_ma) i++;
+        battery_set_charge_ma(steps[i % 5]);
+        break;
+    }
     case ID_LOOK: ui_look_set((ui_look() + 1) % N_LOOKS); break;   // (Classic, Field, Tiles, round again)
     case ID_RENAME:                                   // the keyboard, with the name as it is
         naming = true;
@@ -1479,7 +1509,7 @@ static int hit_test(int x, int y)
     case V_PHONE: return hit(phone_buttons, 1, x, y);
     case V_RESET: return hit(reset_buttons, 2, x, y);
 #if !SCREEN_ROUND
-    case V_BATTERY: return hit(battery_buttons, 2, x, y);
+    case V_BATTERY: return hit(battery_buttons, 3, x, y);
 #else
     case V_BATTERY: return ID_NONE;
 #endif

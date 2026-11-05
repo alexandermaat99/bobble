@@ -48,6 +48,7 @@ static int64_t last;
 #define SAG_MAGIC   0x5A600001
 #define OFF_MAGIC   0x0FF5E701
 #define LOG_MAGIC   0x1060B001
+#define SOT_MAGIC   0x507E0001
 #define LOG_MAX     240
 #define FULL_MV     4150              // a run starts when a charged battery drops below this
 #define EMPTY_MV    3400              // ...and is complete at this
@@ -96,6 +97,12 @@ static uint16_t run_min_mv;
 static int64_t rise_since;
 static int unsaved;
 
+// Screen-on time since the last charge, and the time on battery it's out of (saved every few minutes, so a reboot
+// or OTA carries on). Starts over when it's unplugged after 5 minutes or more on the charger; plugged in, it shows the
+// last run's.
+static struct { uint32_t magic, on_ms, bat_ms; } sot = {SOT_MAGIC, 0, 0};
+static int64_t sot_saved_at, plugged_at;
+
 static int shown = -1;                // % on screen
 // On USB the board reads well above the cell's own voltage (charger): learned from the step at each plug / unplug
 #if SQUARE_HW
@@ -111,7 +118,7 @@ static int below_max;                 // highest reading while below the shown %
 
 // Flash writes pause both cores' access to PSRAM for a moment, which would show as a hitch if done here on the
 // render loop: keep a copy and let a small background task write it
-#define N_SLOTS 5                     // one for each key: bsag, boff, bcurve, blog, blast
+#define N_SLOTS 6                     // one for each key: bsag, boff, bcurve, blog, blast, bsot
 EXT_RAM_BSS_ATTR static struct { const char *key; uint8_t data[sizeof lg]; size_t len; bool pending, erase; } slots[N_SLOTS];
 static SemaphoreHandle_t slot_lock;
 static TaskHandle_t writer;
@@ -405,12 +412,38 @@ static void sag_sample(float raw, int64_t now)
 
 static void diag_refresh(int64_t now);
 
+static void sot_tick(int64_t now, bool first)
+{
+    bool usb = plugged_in();
+    if (first) {
+        typeof(sot) s;
+        if (nvs_get("bsot", &s, sizeof s) && s.magic == SOT_MAGIC) sot = s;
+        if (usb) plugged_at = now;
+        return;
+    }
+    if (usb) {
+        if (!usb_prev || !plugged_at) plugged_at = now;
+        return;
+    }
+    if (usb_prev && plugged_at && now - plugged_at >= 300000000) {   // off a real charge: start over
+        sot.on_ms = sot.bat_ms = 0;
+        sot_saved_at = 0;
+    }
+    plugged_at = 0;
+    int64_t dt = now - last;
+    if (dt > 60000000) dt = 60000000;                 // (the loop stalled: don't guess)
+    sot.bat_ms += dt / 1000;
+    if (screen_on) sot.on_ms += dt / 1000;
+    if (!sot_saved_at || now - sot_saved_at > 300000000) { nvs_put("bsot", &sot, sizeof sot); sot_saved_at = now; }
+}
+
 void battery_update(void)
 {
     int64_t now = esp_timer_get_time();
     if (!ok || now - last < 500000) return;
     diag_refresh(now);
     bool first = last == 0;
+    sot_tick(now, first);                             // (before usb_prev and last move on)
     last = now;
     float raw = read_once();
     if (raw < 2.5f) { volts = raw; return; }            // no battery
@@ -479,6 +512,22 @@ void battery_diag(battery_diag_t *d)
     taskENTER_CRITICAL(&diag_mux);
     *d = diag;
     taskEXIT_CRITICAL(&diag_mux);
+}
+
+int battery_set_charge_ma(int ma)
+{
+#if SQUARE_HW
+    int r = sq_charge_set(ma);
+    if (r >= 0) {                                      // show it now, not at the next refresh
+        taskENTER_CRITICAL(&diag_mux);
+        diag.charge_ma = r;
+        taskEXIT_CRITICAL(&diag_mux);
+    }
+    return r;
+#else
+    (void)ma;
+    return -1;
+#endif
 }
 
 const char *battery_state_text(const battery_diag_t *d)
@@ -556,6 +605,8 @@ int battery_percent(void)
     else above_since = 0;
     return shown;
 }
+
+void battery_screen_time(uint32_t *on_s, uint32_t *bat_s) { *on_s = sot.on_ms / 1000; *bat_s = sot.bat_ms / 1000; }
 
 int battery_learned_runs(void) { return curve_runs; }
 bool battery_logging(void) { return run == RUN_LOGGING; }

@@ -15,6 +15,10 @@ int ui_look(void);
 void ui_look_set(int look);
 bool ui_field(void);   // (the look is Field)
 bool ui_tiles(void);   // (or Tiles)
+// Units for temperatures (and later anything else measured): saved in NVS, Fahrenheit until someone picks otherwise
+enum { UNITS_F, UNITS_C, N_UNITS };
+int ui_units(void);
+void ui_units_set(int units);
 // The motion sensor, for GET /motion: its filtered reading (g, the sensor's own axes), "up" in screen axes (x right,
 // y down, z out of the glass), the angle the content is turned to, and whether a tilt calibration is saved
 void motion_get(float raw[3], float up[3], float *angle, bool *calibrated, float R[9]);
