@@ -16,3 +16,4 @@ time_t calendar_window_start(void);          // local midnight of "today" for th
 const char *calendar_error(void);            // "" when the last fetch worked
 bool calendar_loaded(void);
 int calendar_count(void);                    // how many calendars are configured
+int calendar_progress(int *bytes);           // the one being downloaded (1..), and its bytes so far; 0: none

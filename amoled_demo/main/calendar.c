@@ -181,6 +181,15 @@ static time_t today_midnight(void)
 }
 
 // Download and expand calendar k into its cache slot. Returns false (leaving the old copy) on failure.
+static volatile int now_k = -1, now_bytes;     // the calendar being fetched (-1: none) and how much of it so far
+
+int calendar_progress(int *bytes)
+{
+    int k = now_k;
+    if (bytes) *bytes = now_bytes;
+    return k < 0 ? 0 : k + 1;
+}
+
 static bool fetch_one(int k, time_t from, time_t to, char *why, size_t why_len)
 {
     esp_http_client_config_t cfg = {
@@ -205,9 +214,12 @@ static bool fetch_one(int k, time_t from, time_t to, char *why, size_t why_len)
     p = ical_new();
     if (!p) { snprintf(why, why_len, "out of memory"); goto done; }
     int total = 0, n;
+    now_bytes = 0;
+    now_k = k;
     while ((n = esp_http_client_read(c, buf, sizeof buf)) > 0) {
         ical_feed(p, buf, n);
         total += n;
+        now_bytes = total;
     }
     ical_finish(p);
     if (n < 0 || !esp_http_client_is_complete_data_received(c)) { snprintf(why, why_len, "download interrupted"); goto done; }
@@ -224,6 +236,7 @@ static bool fetch_one(int k, time_t from, time_t to, char *why, size_t why_len)
     ok = true;
     ESP_LOGI(TAG, "calendar %d: %d bytes, %d events, %d this week", k + 1, total, ical_event_count(p), count);
 done:
+    now_k = -1;
     if (!ok) ESP_LOGW(TAG, "calendar %d failed: %s", k + 1, why);
     ical_free(p);
     esp_http_client_cleanup(c);
@@ -317,9 +330,11 @@ void calendar_start(void)
 {
     lock = xSemaphoreCreateMutex();
     load_urls();
+    // on core 1, away from the screen's loop (core 0, priority 1): reading a big calendar there held it to 2 frames/s.
+    // (Core 1's drawing worker is priority 5, so it still gets in.)
 #if CONFIG_SPIRAM_XIP_FROM_PSRAM   // (stack in PSRAM where code runs from there, as on the square: flash writes don't pause it, and internal RAM is short)
-    xTaskCreateWithCaps(cal_task, "calendar", 8192, NULL, 3, &task, MALLOC_CAP_SPIRAM);
+    xTaskCreatePinnedToCoreWithCaps(cal_task, "calendar", 8192, NULL, 3, &task, 1, MALLOC_CAP_SPIRAM);
 #else
-    xTaskCreate(cal_task, "calendar", 8192, NULL, 3, &task);
+    xTaskCreatePinnedToCore(cal_task, "calendar", 8192, NULL, 3, &task, 1);
 #endif
 }
