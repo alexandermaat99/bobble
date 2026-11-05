@@ -41,6 +41,7 @@
 #include "library_ui.h"
 #include "chat.h"
 #include "chat_ui.h"
+#include "boot_ui.h"
 #include "pet_ui.h"
 #include "agent.h"
 #include "screen.h"
@@ -998,6 +999,10 @@ static int bright_pref = 255;         // chosen in Settings; saved in NVS
 static int volume_pref = 50;          // likewise
 static volatile bool look_changed;      // (set from the Mac app's request: the loop redraws everything)
 static int look_pref = LOOK_FIELD;    // Settings > Look (Field: the beta's default)
+// Starting up: the loading screen until Wi-Fi, the clock and the calendar are there (boot_ui.c). boot_a: how much of it
+// shows, 1 down to 0 as it fades into the page; boot_what: the line under it
+static float boot_a = 1;
+static const char *boot_what;
 static int units_pref = UNITS_F;
 static float rest[3];                 // slowly-following accelerometer reading: where the board has been sitting
 
@@ -1468,9 +1473,18 @@ static void compose_rows(uint16_t *buf, int y0, int y1)
 // Draw one strip of the screen: normally the current page (+ card), or two pages side by side mid-swipe
 static void draw_strip(uint16_t *buf, int y0, int h)
 {
+    if (boot_a >= 1) {                                 // loading: just the shape, on black
+        memset(buf, 0, h * W * 2);
+        boot_ui_draw(buf, y0, h, esp_timer_get_time() / 1e6f, 1, boot_what);
+        return;
+    }
     if (!pages_sliding() || !snap_a || !snap_b) {
         split_rows(render_bg, buf, y0, h);           // other core renders the bottom half of the strip
         draw_overlay(buf, y0, h);
+        if (boot_a > 0) {                              // fading into the page
+            dim_rows(buf, y0, y0, y0 + h, (int)(256 * (1 - boot_a)));
+            boot_ui_draw(buf, y0, h, esp_timer_get_time() / 1e6f, boot_a, boot_what);
+        }
         return;
     }
     int off = (int)lroundf(pg_off);
@@ -1848,6 +1862,21 @@ void app_main(void)
         if (swallow_touch) {                           // finger that woke the screen: ignore until lifted
             if (down) { down = false; tx = ty = -1; }
             else swallow_touch = false;
+        }
+        static bool boot_skip;
+        if (boot_a > 0) {                              // loading: a tap skips it, and presses nothing under it
+            if (down) { boot_skip = true; swallow_touch = true; down = false; tx = ty = -1; }
+            static int64_t boot_end;
+            const char *what = wifi_state() == WS_PORTAL ? NULL               // nothing to join: setup needs the screen
+                             : wifi_state() != WS_CONNECTED ? (now < 20000000 ? "Joining Wi-Fi" : NULL)
+                             : !wifi_time_synced() ? "Setting the clock"
+                             : calendar_count() > 0 && !calendar_loaded() ? "Loading your calendar" : NULL;
+            if (what) boot_what = what;
+            if (!boot_end && (!what || boot_skip || now > 30000000 || calibrating || tilt_step || ota_progress() >= 0 || show_empty))
+                boot_end = now;
+            if (boot_end) boot_a = 1 - (now - boot_end) / 400000.0f;
+            if (boot_a < 0) { boot_a = 0; ESP_LOGI(TAG, "loaded (%.1f s)", now / 1e6); }
+            force_redraw = true;
         }
         if (down && !was_down) ESP_LOGI(TAG, "touch down %d,%d (card %d)", tx, ty, (int)sheet);
 
