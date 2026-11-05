@@ -79,10 +79,13 @@ static esp_err_t post_cmd(httpd_req_t *req)
     return httpd_resp_sendstr(req, "queued\n");
 }
 
-// What the charger says (GET /battery): Settings > Battery's numbers, as JSON
+// What the charger says (GET /battery): Settings > Battery's numbers, as JSON. ?charge_ma= changes the charge current
 static esp_err_t get_battery(httpd_req_t *req)
 {
     if (!token_ok(req)) return ESP_OK;
+    char q[32], v[8];                                  // ?charge_ma=500: set the charge current first
+    if (httpd_req_get_url_query_str(req, q, sizeof q) == ESP_OK && httpd_query_key_value(q, "charge_ma", v, sizeof v) == ESP_OK)
+        battery_set_charge_ma(atoi(v));
     battery_diag_t d;
     battery_diag(&d);
     char out[640];

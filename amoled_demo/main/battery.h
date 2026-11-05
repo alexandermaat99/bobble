@@ -11,6 +11,9 @@ int battery_percent(void);       // 0..100, or -1 when no battery seems connecte
 bool battery_charging(void);     // plugged into a computer's USB (a wall charger can't be sensed)
 int battery_learned_runs(void);  // full discharges learned from (0: generic LiPo table)
 bool battery_logging(void);      // currently recording a discharge from full
+// Since the last charge: seconds with the screen on, out of seconds on battery (plugged in: the last run's)
+void battery_screen_time(uint32_t *on_s, uint32_t *bat_s);
+void battery_save_now(void);     // write what's only in memory (the screen-on time) before everything goes off
 bool battery_empty(void);         // at 0% on battery for a minute: time to shut down until it's charged
 float battery_empty_volts(void);  // where 0% is
 float battery_read_now(void);     // one immediate reading (no smoothing), for the check at power-up
@@ -35,6 +38,7 @@ typedef struct {
     uint8_t st1, st2, ts, irq[3];   // raw: status 1 and 2, TS pin control, interrupt status (what tripped)
 } battery_diag_t;
 void battery_diag(battery_diag_t *d);   // the latest (refreshed every second by battery_update)
+int battery_set_charge_ma(int ma);      // the square's charge current (saved): what was set, -1 elsewhere
 const char *battery_state_text(const battery_diag_t *d);   // "Charging", "Charged", "On battery", "No battery"...
 const char *battery_stage_text(int stage);
 bool battery_charging_now(const battery_diag_t *d);   // current is going into the battery (else: plugged in and charging)

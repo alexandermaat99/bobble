@@ -2,6 +2,7 @@
 #if SQUARE_HW
 #include <string.h>
 #include "esp_timer.h"
+#include "nvs.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_heap_caps.h"
@@ -465,9 +466,22 @@ bool sq_touch_read(int *x, int *y)
 // Charge current: 800 mA fills the two-18650 pack (1S, ~5000-7000 mAh) in ~7-9 h; 500 mA took 10-14. (The charger is
 // linear: what the cell doesn't take is heat in the chip. 1000 mA took it to 61 C even near full, ~0.7 W; from empty
 // it's twice that, for hours with a pack this size.) The chip's codes are 25 mA steps to 200 mA (8), then 100 mA steps
-// to 1000 mA (16); its own default is 200 mA.
+// to 1000 mA (16); its own default is 200 mA. Settings > Battery can pick another (saved): on a 5 W Qi receiver, the
+// step where USB power sags to ~4.4 V is about what the receiver can give.
 #define CHARGE_MA 800
-#define CHARGE_CODE (CHARGE_MA <= 200 ? CHARGE_MA / 25 : CHARGE_MA / 100 + 6)
+static int charge_ma = -1;                              // -1: not loaded yet
+
+static int charge_code(int ma) { return ma <= 200 ? ma / 25 : ma / 100 + 6; }
+
+static void charge_load(void)
+{
+    charge_ma = CHARGE_MA;
+    nvs_handle_t h;
+    uint16_t v;
+    if (nvs_open("demo", NVS_READONLY, &h) != ESP_OK) return;
+    if (nvs_get_u16(h, "chg_ma", &v) == ESP_OK && v >= 25 && v <= 1000) charge_ma = v;
+    nvs_close(h);
+}
 
 static bool pmu_reg(uint8_t reg, uint8_t *v)
 {
@@ -480,10 +494,29 @@ static bool pmu_reg(uint8_t reg, uint8_t *v)
         if (pmu_reg(0x30, &on[1])) { on[1] |= 0x1D; i2c_master_transmit(pmu_dev, on, 2, 50); }
         uint8_t gauge[2] = {0x18, 0};                   // fuel gauge on (bit 3), so 0xA4 holds the charge left in %
         if (pmu_reg(0x18, &gauge[1]) && !(gauge[1] & 0x08)) { gauge[1] |= 0x08; i2c_master_transmit(pmu_dev, gauge, 2, 50); }
+        if (charge_ma < 0) charge_load();
         uint8_t icc[2] = {0x62, 0};                     // charge current (bits 4-0)
-        if (pmu_reg(0x62, &icc[1])) { icc[1] = (icc[1] & 0xE0) | CHARGE_CODE; i2c_master_transmit(pmu_dev, icc, 2, 50); }
+        if (pmu_reg(0x62, &icc[1])) { icc[1] = (icc[1] & 0xE0) | charge_code(charge_ma); i2c_master_transmit(pmu_dev, icc, 2, 50); }
     }
     return i2c_master_transmit_receive(pmu_dev, &reg, 1, v, 1, 20) == ESP_OK;
+}
+
+int sq_charge_set(int ma)
+{
+    ma = ma < 25 ? 25 : ma > 1000 ? 1000 : ma <= 200 ? ma / 25 * 25 : ma / 100 * 100;   // (the chip's steps)
+    uint8_t icc[2] = {0x62, 0};
+    if (!pmu_reg(0x62, &icc[1])) return -1;
+    icc[1] = (icc[1] & 0xE0) | charge_code(ma);
+    if (i2c_master_transmit(pmu_dev, icc, 2, 50) != ESP_OK) return -1;
+    charge_ma = ma;
+    nvs_handle_t h;
+    if (nvs_open("demo", NVS_READWRITE, &h) == ESP_OK) {
+        nvs_set_u16(h, "chg_ma", (uint16_t)ma);
+        nvs_commit(h);
+        nvs_close(h);
+    }
+    ESP_LOGI(TAG, "charge current now %d mA", ma);
+    return ma;
 }
 
 // Everything off: the power chip's soft power-off (common config, bit 0) cuts the board from the battery, leaving only

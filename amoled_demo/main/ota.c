@@ -48,7 +48,8 @@ static esp_err_t ota_post(httpd_req_t *req)
     int left = req->content_len, timeouts = 0;
     while (left > 0) {
         int n = httpd_req_recv(req, buf, left < (int)sizeof buf ? left : (int)sizeof buf);
-        if (n == HTTPD_SOCK_ERR_TIMEOUT && ++timeouts < 5) continue;
+        if (n == HTTPD_SOCK_ERR_TIMEOUT && ++timeouts < 5) continue;   // (five stalls in a row; a weak link stalls
+        timeouts = 0;                                                   // now and then all through 1.6 MB)
         if (n <= 0 || esp_ota_write(ota, buf, n) != ESP_OK) {
             esp_ota_abort(ota);
             progress = -1;

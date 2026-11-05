@@ -998,6 +998,7 @@ static int bright_pref = 255;         // chosen in Settings; saved in NVS
 static int volume_pref = 50;          // likewise
 static volatile bool look_changed;      // (set from the Mac app's request: the loop redraws everything)
 static int look_pref = LOOK_FIELD;    // Settings > Look (Field: the beta's default)
+static int units_pref = UNITS_F;
 static float rest[3];                 // slowly-following accelerometer reading: where the board has been sitting
 
 static void set_brightness(int b)
@@ -1113,6 +1114,19 @@ void ui_look_set(int look)
     nvs_close(h);
 }
 
+int ui_units(void) { return units_pref; }
+
+void ui_units_set(int units)
+{
+    if (units < 0 || units >= N_UNITS || units_pref == units) return;
+    units_pref = units;
+    nvs_handle_t h;
+    if (nvs_open("demo", NVS_READWRITE, &h) != ESP_OK) return;
+    nvs_set_u8(h, "units", units);
+    nvs_commit(h);
+    nvs_close(h);
+}
+
 void device_volume_set(int level, bool save)
 {
     volume_pref = level < 0 ? 0 : (level > 100 ? 100 : level);
@@ -1132,6 +1146,7 @@ static void brightness_load(void)
     if (nvs_get_u8(h, "bright", &v) == ESP_OK) bright_pref = v < 10 ? 10 : v;
     if (nvs_get_u8(h, "volume", &v) == ESP_OK) volume_pref = v > 100 ? 100 : v;
     if (nvs_get_u8(h, "field", &v) == ESP_OK && v < N_LOOKS) look_pref = v;
+    if (nvs_get_u8(h, "units", &v) == ESP_OK && v < N_UNITS) units_pref = v;
     if (nvs_get_u8(h, "locked", &v) == ESP_OK) locked = v;
     nvs_close(h);
     set_brightness(bright_pref);
@@ -1247,6 +1262,7 @@ static void panel_power(bool on)
 static void sleep_until_charged(void)
 {
     ESP_LOGW(TAG, "battery empty (%.2f V): sleeping until it's charged", battery_volts());
+    battery_save_now();                                // (written in the background during the waits below)
     panel_power(false);
     panel_cmd(0x10);
     imu_power(false);
