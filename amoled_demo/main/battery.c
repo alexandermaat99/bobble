@@ -585,7 +585,8 @@ int battery_percent(void)
     int p = percent_of(battery_charging() ? volts - usb_offset : volts);   // on USB: the cell's own voltage
     int64_t now = esp_timer_get_time();
 #if SQUARE_HW
-    // the power chip's fuel gauge counts the charge in and out, so load doesn't fool it; the curve is the fallback.
+    // A curve learned from a real run on this cell wins; until there is one, the power chip's fuel gauge (load doesn't
+    // fool it, but it isn't calibrated to the cell: it read 100% at 4.05 V, which the learned run put near 75%).
     // GET /battery shows both (gauge_pct, and the curve's % in the log line every 10 min), to check one against the other.
     static int64_t compared_at;
     int g = diag.gauge_pct;
@@ -593,7 +594,7 @@ int battery_percent(void)
         compared_at = now;
         ESP_LOGI(TAG, "%.2f V: gauge %d%%, curve %d%% (%d runs)", volts, g, p, curve_runs);
     }
-    if (g >= 0) p = g;
+    if (g >= 0 && !curve_runs) p = g;
 #endif
     if (shown < 0 || battery_charging()) { shown = p; below_since = above_since = 0; return shown; }
     // on battery: drop once the reading has stayed lower for 20 s (to the best of it, so Wi-Fi blips don't count);
