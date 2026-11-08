@@ -454,11 +454,8 @@ void battery_update(void)
     volts = volts < 2.5f ? v : volts * 0.9f + v * 0.1f;  // smooth out ADC noise
     bool usb = plugged_in();
     if (have_usb_prev && usb != usb_prev) { usb_edge_at = now; usb_edge_v = before; }   // plugged in / unplugged
-    static int64_t chimed_at;
-    if (have_usb_prev && usb && !usb_prev && (!chimed_at || now - chimed_at > 3000000)) {   // plugged in: a chime (once,
-        chimed_at = now;                                                                     // if the plug jitters)
-        audio_chime();
-    }
+    if (have_usb_prev && usb && !usb_prev && now - unplugged_at > 10000000)   // plugged in: a chime, but only after 10 s off
+        audio_chime();                                                         // power (a Qi pad drops out for a second now and then)
     if (!usb && (usb_prev || !have_usb_prev)) unplugged_at = now;
     usb_prev = usb;
     have_usb_prev = true;
