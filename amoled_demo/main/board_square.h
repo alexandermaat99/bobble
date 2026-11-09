@@ -22,6 +22,7 @@ void sq_draw(int x0, int y0, int x1, int y1, uint16_t *px, SemaphoreHandle_t don
 // The same DMA copy into any PSRAM buffer (dst and bytes on 64-byte cache lines): `done` once it has landed
 void sq_copy(uint16_t *dst, uint16_t *px, int bytes, SemaphoreHandle_t done);
 void sq_backlight(int level);           // 0 (off) .. 255
+void sq_display_sleep(bool on);         // screen off: panel asleep, LCD controller stopped (light sleep can happen)
 void sq_touch_init(void);
 bool sq_touch_read(int *x, int *y);     // a finger is down (screen pixels); a tap between two reads shows once
 void sq_touch_fast(bool on);            // read the chip every 10 ms (screen on), else every 100 ms

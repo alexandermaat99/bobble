@@ -139,6 +139,8 @@ void wifi_join(const char *ssid, const char *pass)
     connect_to(ssid);
 }
 
+void wifi_cancel(void);
+
 void wifi_forget(void)
 {
     ESP_LOGI(TAG, "forgetting %s", sta_ssid);
@@ -146,9 +148,21 @@ void wifi_forget(void)
     for (int i = 0; i < n_saved; i++) if (strcmp(saved[i].ssid, sta_ssid)) saved[k++] = saved[i];
     n_saved = k;
     saved_store();
+    wifi_cancel();
+}
+
+void wifi_cancel(void)
+{
     sta_ssid[0] = 0;
     state = WS_PORTAL;
     advertise(false);
+}
+
+bool wifi_saved_pass(const char *ssid, char *pass, int size)
+{
+    for (int i = 0; i < n_saved; i++)
+        if (!strcmp(saved[i].ssid, ssid)) { strlcpy(pass, saved[i].pass, size); return true; }
+    return false;
 }
 
 void wifi_suspend(bool on)

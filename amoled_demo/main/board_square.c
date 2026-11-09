@@ -169,29 +169,9 @@ void sq_display_init(void)
     vSemaphoreDelete(init_done);
 }
 
-static void display_init_here(void)
+// The LCD controller: streams the frame out of PSRAM to the panel, ~50 times a second, for as long as it exists
+static void rgb_start(void)
 {
-    backlight_init();
-    ex_dev = add_dev(0x20);
-    if (!ex_dev) ESP_LOGE(TAG, "no I/O expander: the panel can't be set up");
-    ex_take();
-    ex_out = EX_CS | EX_RST;
-    ex_reg(0x01, ex_out);
-    ex_reg(0x03, (uint8_t)~(EX_CS | EX_SDA | EX_SCL | EX_AMP | EX_RST | EX_TINT));   // those are outputs
-    vTaskDelay(pdMS_TO_TICKS(20));
-    ex_set(EX_RST, false);                              // reset the panel and touch (touch INT held low)
-    vTaskDelay(pdMS_TO_TICKS(20));
-    ex_set(EX_RST, true);
-    vTaskDelay(pdMS_TO_TICKS(120));
-    ex_reg(0x03, EX_DIR);                               // let go of touch INT
-    ex_give();
-    panel_cmd(0x01, NULL, 0);                           // software reset
-    vTaskDelay(pdMS_TO_TICKS(120));
-    for (int i = 0; i < sizeof st7701_init / sizeof *st7701_init; i++) {
-        panel_cmd(st7701_init[i].cmd, st7701_init[i].data, st7701_init[i].n);
-        if (st7701_init[i].delay_ms) vTaskDelay(pdMS_TO_TICKS(st7701_init[i].delay_ms));
-    }
-
     esp_lcd_rgb_panel_config_t rc = {
         .clk_src = LCD_CLK_SRC_DEFAULT,
         .timings = {
@@ -223,8 +203,71 @@ static void display_init_here(void)
     fb = f;
     memset(fb, 0, 480 * 480 * 2);
     esp_cache_msync(fb, 480 * 480 * 2, ESP_CACHE_MSYNC_FLAG_DIR_C2M);   // (no dirty lines left to land on DMA's work)
+}
+
+static void display_init_here(void)
+{
+    backlight_init();
+    ex_dev = add_dev(0x20);
+    if (!ex_dev) ESP_LOGE(TAG, "no I/O expander: the panel can't be set up");
+    ex_take();
+    ex_out = EX_CS | EX_RST;
+    ex_reg(0x01, ex_out);
+    ex_reg(0x03, (uint8_t)~(EX_CS | EX_SDA | EX_SCL | EX_AMP | EX_RST | EX_TINT));   // those are outputs
+    vTaskDelay(pdMS_TO_TICKS(20));
+    ex_set(EX_RST, false);                              // reset the panel and touch (touch INT held low)
+    vTaskDelay(pdMS_TO_TICKS(20));
+    ex_set(EX_RST, true);
+    vTaskDelay(pdMS_TO_TICKS(120));
+    ex_reg(0x03, EX_DIR);                               // let go of touch INT
+    ex_give();
+    panel_cmd(0x01, NULL, 0);                           // software reset
+    vTaskDelay(pdMS_TO_TICKS(120));
+    for (int i = 0; i < sizeof st7701_init / sizeof *st7701_init; i++) {
+        panel_cmd(st7701_init[i].cmd, st7701_init[i].data, st7701_init[i].n);
+        if (st7701_init[i].delay_ms) vTaskDelay(pdMS_TO_TICKS(st7701_init[i].delay_ms));
+    }
+
+    rgb_start();
     async_memcpy_config_t mc = {.backlog = 4, .dma_burst_size = 32};   // (rows are 960 bytes: whole bursts)
     if (esp_async_memcpy_install_gdma_ahb(&mc, &mcp) != ESP_OK) { mcp = NULL; ESP_LOGW(TAG, "no DMA copy: the CPU copies"); }
+}
+
+// Screen off: the panel chip to sleep and the LCD controller gone. While the controller exists it reads the frame out
+// of PSRAM nonstop and holds a lock that keeps the chip out of light sleep, so a dark screen drained the battery
+// about as fast as a lit one (the run to empty was one straight line, nights and days). Back on: made again (on core 1,
+// as at start-up, for its interrupt) and the panel woken; the frame comes back blank, for the caller to draw.
+static volatile bool sleep_want;
+static void display_sleep_task(void *arg)
+{
+    if (sleep_want && panel) {
+        ex_take();
+        panel_cmd(0x10, NULL, 0);                       // sleep in (it wants frames for a moment more)
+        ex_give();
+        vTaskDelay(pdMS_TO_TICKS(120));
+        esp_lcd_panel_del(panel);
+        panel = NULL;
+        fb = NULL;
+    } else if (!sleep_want && !panel) {
+        rgb_start();
+        ex_take();
+        panel_cmd(0x11, NULL, 0);                       // sleep out
+        ex_give();
+        vTaskDelay(pdMS_TO_TICKS(120));
+    }
+    xSemaphoreGive(init_done);
+    vTaskDelete(NULL);
+}
+
+void sq_display_sleep(bool on)
+{
+    if (on == !panel) return;
+    sleep_want = on;
+    init_done = xSemaphoreCreateBinary();
+    xTaskCreatePinnedToCore(display_sleep_task, "lcd_sleep", 4096, NULL, 10, NULL, 1);
+    xSemaphoreTake(init_done, portMAX_DELAY);
+    vSemaphoreDelete(init_done);
+    ESP_LOGI(TAG, "display %s", on ? "asleep (LCD controller off)" : "awake");
 }
 
 // Putting the picture right without a restart, to learn which side lost track when it's shifted or broken (asked for
@@ -343,6 +386,7 @@ void sq_copy(uint16_t *dst, uint16_t *px, int bytes, SemaphoreHandle_t done)
 void sq_draw(int x0, int y0, int x1, int y1, uint16_t *px, SemaphoreHandle_t done)
 {
     int w = x1 - x0;
+    if (!fb) { xSemaphoreGive(done); return; }         // (asleep: no frame to draw into)
     if (mcp && w == 480) { sq_copy(fb + y0 * 480, px, w * (y1 - y0) * 2, done); return; }
     for (int y = y0; y < y1; y++, px += w) memcpy(fb + y * 480 + x0, px, w * 2);   // (part of a row: by hand)
     esp_cache_msync(fb + y0 * 480, (y1 - y0) * 480 * 2, ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
@@ -356,48 +400,68 @@ static bool gt_read(uint16_t reg, uint8_t *d, int n)
     return i2c_master_transmit_receive(gt_dev, a, 2, d, n, 20) == ESP_OK;
 }
 
-// The chip flags each new report; between reports the finger is where it last was
-static bool gt_poll(int *x, int *y)
+// The chip flags each new report; between reports the finger is where it last was. *id: the chip's number for this
+// finger (a new one, even in the same place, is a new touch)
+static bool gt_poll(int *x, int *y, int *id)
 {
     static bool down;
-    static int lx, ly;
+    static int lx, ly, lid;
     uint8_t s;
-    *x = lx; *y = ly;
+    *x = lx; *y = ly; *id = lid;
     if (!gt_dev || !gt_read(0x814E, &s, 1)) return down;
     if (s & 0x80) {
-        uint8_t p[4];
-        down = (s & 0x0F) && gt_read(0x8150, p, 4);
-        if (down) { lx = p[0] | (p[1] << 8); ly = p[2] | (p[3] << 8); }
+        uint8_t p[5];
+        down = (s & 0x0F) && gt_read(0x814F, p, 5);
+        if (down) { lid = p[0]; lx = p[1] | (p[2] << 8); ly = p[3] | (p[4] << 8); }
         uint8_t clr[3] = {0x81, 0x4E, 0};
         i2c_master_transmit(gt_dev, clr, 3, 20);
     }
-    *x = lx; *y = ly;
+    *x = lx; *y = ly; *id = lid;
     return down;
 }
 
-// A task reads the chip every 10 ms (every 100 ms while the screen sleeps), so a quick tap that starts and ends
-// between two frames isn't lost: the main loop read it once a frame, 30-50 ms apart with the settings open, and the
-// chip keeps only its latest report. A press that came and went is handed over once, then the let-go.
+// A task reads the chip every 10 ms (every 100 ms while the screen sleeps); the main loop looks once a frame, 30-60 ms
+// apart. Each touch is kept as a stroke (where it went down, where it is now, whether it's over), and they're handed
+// over in turn: a stroke down (once, even if it's already over), then its lift, then the next. Typing fast, a key's
+// lift and the next key's press came within one frame, or within the 30 ms a lift takes to count: the two ran into one
+// touch that slid to the second key, and the first letter was lost. A new finger number, or the finger back after a
+// gap somewhere else, starts a new stroke.
+#define N_STROKES 8
+typedef struct { int px, py, x, y; bool over; } stroke_t;
 static portMUX_TYPE t_mux = portMUX_INITIALIZER_UNLOCKED;
-static volatile bool t_down, t_pressed, t_fast = true;   // t_pressed: went down since the last sq_touch_read
+static stroke_t strokes[N_STROKES];
+static int s_first, s_count;                            // the oldest stroke not yet handed over, how many there are
+static bool s_shown;                                    // the oldest has been handed over as down
+static volatile bool t_fast = true;
 static volatile bool t_paused;                          // not reading the chip (sq_touch_sleep)
-static volatile int t_x, t_y, p_x, p_y;
 
 static void touch_task(void *arg)
 {
-    int ups = 0;                                       // reports in a row with no finger
+    int ups = 0, last_id = -1;                          // ups: reports in a row with no finger
     for (;;) {
-        if (t_paused) { t_down = t_pressed = false; vTaskDelay(pdMS_TO_TICKS(100)); continue; }
-        int x, y;
-        bool d = gt_poll(&x, &y);
-        ups = d ? 0 : ups + 1;
+        if (t_paused) {
+            taskENTER_CRITICAL(&t_mux);
+            s_count = 0;
+            s_shown = false;
+            taskEXIT_CRITICAL(&t_mux);
+            vTaskDelay(pdMS_TO_TICKS(100));
+            continue;
+        }
+        int x, y, id;
+        bool d = gt_poll(&x, &y, &id);
         taskENTER_CRITICAL(&t_mux);
+        stroke_t *cur = s_count ? &strokes[(s_first + s_count - 1) % N_STROKES] : NULL;
+        bool open = cur && !cur->over;
         if (d) {
-            if (!t_down) { t_pressed = true; p_x = x; p_y = y; }
-            t_x = x; t_y = y;
-            t_down = true;
-        } else if (ups >= 3) t_down = false;           // lifted only after 30 ms of none: the chip drops a finger for a
+            bool fresh = !open || id != last_id || (ups > 0 && abs(x - cur->x) + abs(y - cur->y) > 60);
+            if (fresh && s_count < N_STROKES) {
+                if (open) cur->over = true;
+                strokes[(s_first + s_count++) % N_STROKES] = (stroke_t){x, y, x, y, false};
+            } else if (cur) { cur->x = x; cur->y = y; cur->over = false; }   // (no room: the last one carries on)
+            last_id = id;
+        } else if (open && ups >= 2) cur->over = true;  // lifted only after 30 ms of none: the chip drops a finger for a
         taskEXIT_CRITICAL(&t_mux);                      // report now and then (near the edges most), which ended swipes
+        ups = d ? 0 : ups + 1;
         vTaskDelay(pdMS_TO_TICKS(t_fast ? 10 : 100));
     }
 }
@@ -454,10 +518,16 @@ void sq_touch_sleep(bool on)
 bool sq_touch_read(int *x, int *y)
 {
     taskENTER_CRITICAL(&t_mux);
-    bool d = t_down || t_pressed;
-    if (t_down) { *x = t_x; *y = t_y; }
-    else if (t_pressed) { *x = p_x; *y = p_y; }       // (a tap that's already over: down here this once)
-    t_pressed = false;
+    bool d = false;
+    if (s_count) {
+        stroke_t *s = &strokes[s_first];
+        if (!s_shown) {                                 // its press (a tap that's already over: down here this once)
+            s_shown = d = true;
+            *x = s->over ? s->px : s->x;
+            *y = s->over ? s->py : s->y;
+        } else if (!s->over) { d = true; *x = s->x; *y = s->y; }
+        else { s_first = (s_first + 1) % N_STROKES; s_count--; s_shown = false; }   // its lift
+    }
     taskEXIT_CRITICAL(&t_mux);
     return d;
 }

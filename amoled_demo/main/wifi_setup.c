@@ -91,6 +91,23 @@ static void remember_current(void)
     ESP_LOGI(TAG, "remembered %s (%d networks saved)", n.ssid, n_saved);
 }
 
+// This network is remembered with the password it's being joined with: it has worked with it before
+static bool saved_current(void)
+{
+    wifi_config_t c;
+    if (esp_wifi_get_config(WIFI_IF_STA, &c) != ESP_OK) return false;
+    for (int i = 0; i < n_saved; i++)
+        if (!strcmp(saved[i].ssid, (char *)c.sta.ssid) && !strncmp(saved[i].pass, (char *)c.sta.password, 64)) return true;
+    return false;
+}
+
+bool wifi_saved_pass(const char *ssid, char *pass, int size)
+{
+    for (int i = 0; i < n_saved; i++)
+        if (!strcmp(saved[i].ssid, ssid)) { strlcpy(pass, saved[i].pass, size); return true; }
+    return false;
+}
+
 static void saved_load(void)
 {
     nvs_handle_t h;
@@ -279,8 +296,10 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
             start_ap();
             return;
         }
-        last_auth_failed = d->reason == WIFI_REASON_AUTH_FAIL || d->reason == WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT ||
-                           d->reason == WIFI_REASON_HANDSHAKE_TIMEOUT;
+        // (a password that has worked before isn't wrong now: a handshake that timed out, waking or on a weak signal,
+        // had the board give up on a remembered network, and it had to be typed in again)
+        last_auth_failed = (d->reason == WIFI_REASON_AUTH_FAIL || d->reason == WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT ||
+                            d->reason == WIFI_REASON_HANDSHAKE_TIMEOUT) && !saved_current();
         if (state == WS_CONNECTED) { retries = 0; lost_at = esp_timer_get_time(); }
         if (picking) return;                    // the scan in progress decides what to join
         // not there at all (e.g. back home): after two tries, look for another remembered network,
@@ -669,11 +688,10 @@ void wifi_suspend(bool on)
     else go_portal();
 }
 
-void wifi_forget(void)
+// Stop joining (or being on) this network; it stays remembered
+void wifi_cancel(void)
 {
-    ESP_LOGI(TAG, "forgetting %s", sta_ssid);
-    saved_remove(sta_ssid);
-    saved_store();
+    ESP_LOGI(TAG, "leaving %s", sta_ssid);
     esp_timer_stop(ap_off_timer);
     wifi_config_t empty = {0};
     sta_ssid[0] = 0;
@@ -684,4 +702,12 @@ void wifi_forget(void)
     retries = 0;
     start_ap();
     pick_network();                             // another remembered network may be in range
+}
+
+void wifi_forget(void)
+{
+    ESP_LOGI(TAG, "forgetting %s", sta_ssid);
+    saved_remove(sta_ssid);
+    saved_store();
+    wifi_cancel();
 }

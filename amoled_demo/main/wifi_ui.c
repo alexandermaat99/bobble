@@ -56,7 +56,7 @@ static int net_count;
 static int64_t last_scan_us;
 
 static char join_ssid[33], password[64], error_msg[64];
-static bool join_secure, from_keys, caps, symbols, hide_pw;
+static bool join_secure, from_keys, from_saved, caps, symbols, hide_pw;   // from_saved: joining with a remembered password
 static bool naming;   // the keyboard is typing the board's name (Settings > Battery), not a Wi-Fi password
 #define TYPED_MAX (naming ? 31 : 63)
 
@@ -1404,7 +1404,12 @@ static int activate(int id)
         error_msg[0] = 0;
         if (wifi_state() == WS_CONNECTED && !strcmp(n->ssid, wifi_ssid())) { view = V_STATUS; return WIFI_UI_NONE; }
         join_secure = n->secure;
-        if (n->secure) {
+        from_saved = false;
+        if (n->secure && wifi_saved_pass(n->ssid, password, sizeof password)) {   // remembered: no typing
+            from_keys = from_saved = true;
+            strlcpy(join_ssid, n->ssid, sizeof join_ssid);
+            start_join();
+        } else if (n->secure) {
             from_keys = true;
             go_keys(n->ssid);
         } else {
@@ -1455,10 +1460,13 @@ static int activate(int id)
     case ID_FORGET: wifi_forget(); go_list(); break;
     case ID_CANCEL:
         if (naming) { naming = false; password[0] = 0; view = V_BATTERY; break; }
-        if (view == V_STATUS) wifi_forget();
+    {
+        bool joining = view == V_STATUS;
         error_msg[0] = 0;
-        go_list();
+        go_list();                                    // (first: it holds off joining another remembered network)
+        if (joining) wifi_cancel();                   // (stops the attempt; a remembered password stays remembered)
         break;
+    }
     case ID_SHIFT: caps = !caps; build_keyboard(); break;
     case ID_SYM: symbols = !symbols; build_keyboard(); break;
     case ID_SHOW: hide_pw = !hide_pw; build_keyboard(); break;
@@ -1527,6 +1535,8 @@ int wifi_ui_update(int tx, int ty, int64_t now)
             char s[40];
             fit(s, sizeof s, join_ssid[0] ? join_ssid : wifi_ssid(), 14);
             if (from_keys && join_secure) {
+                if (from_saved) password[0] = 0;      // (the remembered one didn't work: type it afresh)
+                from_saved = false;
                 go_keys(join_ssid);
                 snprintf(error_msg, sizeof error_msg, "Wrong password - try again");
             } else {
@@ -1564,8 +1574,10 @@ int wifi_ui_update(int tx, int ty, int64_t now)
         cur_x = tx; cur_y = ty;
         if (abs(ty - press_y) > 14 || abs(tx - press_x) > 14) {
             if (view == V_LIST && press_y >= LIST_TOP && press_y < LIST_BOT) dragging = true;
-            else if (view == V_KEYS) {                // the keyboard: the key under the finger when it lifts, as on a phone
-                int id = hit_test(tx, ty);
+            else if (view == V_KEYS) {                // the keyboard: the key under the finger when it lifts, as on a phone,
+                // once it has clearly slid there (over half a key): a finger rolls a little as it lifts, and that
+                // alone, past 14 px, had a tap land on the key beside the one pressed
+                int id = abs(tx - press_x) > KEY_P / 2 + 4 || abs(ty - press_y) > KEY_ROW / 2 + 4 ? hit_test(tx, ty) : press_id;
                 if (id != press_id) { press_id = id; press_us = repeat_us = now; }
             }
             else if (press_id != ID_BRIGHT && press_id != ID_VOLUME && hit_test(tx, ty) != press_id) press_id = ID_NONE;   // slid off the key
