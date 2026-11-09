@@ -1216,6 +1216,9 @@ static void imu_power(bool on)
 static void power_screen_off(void)
 {
     panel_cmd(0x10);                                   // display chip: sleep in
+#if SQUARE_HW
+    sq_display_sleep(true);                            // (its LCD controller kept it out of light sleep)
+#endif
     // (the square: not down to 40 MHz. There the chip takes PSRAM out of its tuned 120 MHz mode, and back on every
     // idle moment, with the panel scanning out of it all the while; the panel's own lock keeps it out of light sleep
     // anyway. Coming back once left PSRAM slow: rows refilled late, the left of rows showed what was there before,
@@ -1245,6 +1248,10 @@ static void power_screen_on(void)
         if (touch_off) { sq_touch_sleep(false); touch_off = false; }
 #endif
     }
+#if SQUARE_HW
+    sq_display_sleep(false);                           // (waits for the panel itself)
+    return;
+#endif
     panel_cmd(0x11);                                   // sleep out: the chip wants a moment before showing anything
     vTaskDelay(pdMS_TO_TICKS(80));
 }

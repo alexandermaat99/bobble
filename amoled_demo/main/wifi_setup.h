@@ -18,6 +18,8 @@ const char *wifi_ap_pass(void);
 int wifi_ap_clients(void);       // phones currently joined to the setup hotspot
 bool wifi_time_synced(void);
 void wifi_forget(void);          // forget this network (others stay remembered) and go back to setup
+void wifi_cancel(void);          // stop joining this network (it stays remembered) and go back to setup
+bool wifi_saved_pass(const char *ssid, char *pass, int size);   // a remembered network's password
 
 typedef struct { char ssid[33]; int rssi; bool secure; } wifi_net_t;
 void wifi_scan(void);            // starts a background scan
