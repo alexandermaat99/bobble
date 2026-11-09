@@ -33,6 +33,7 @@ void sq_power_off(void);                // off, battery and all, until USB is pl
 int sq_power_key(void);                 // the PWR button since last asked: 0 none, 1 short press, 2 long press
 #include "battery.h"
 void sq_power_read(battery_diag_t *d);  // everything the power chip says about charging (a dozen register reads)
+bool sq_charge_apply(int ma);           // charge at this now, not saved (stepped down while the chip is hot)
 int sq_charge_set(int ma);              // the battery's charge current, to the chip's nearest step (saved); -1: no chip
 // 1: the LCD controller set up again, 2: the panel chip's setup sent again (why: for the log). Each has put a broken
 // picture right, and each has also not (2026-11-01). 3 (testing): the panel chip reset and not set up. 4: its setup

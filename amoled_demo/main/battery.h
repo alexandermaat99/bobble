@@ -34,6 +34,7 @@ typedef struct {
     int stage;                   // 0 trickle, 1 pre-charge, 2 constant current, 3 constant voltage, 4 done, 5 stopped
     int vbat_mv, vbus_mv, vsys_mv, gauge_pct;
     int charge_ma, full_mv, in_limit_ma;   // the chip's settings: charge current, voltage it charges to, USB input limit
+    int charge_now_ma;           // the charge current right now: less than charge_ma while the chip is too hot
     float chip_c;                // the chip's own temperature
     uint8_t st1, st2, ts, irq[3];   // raw: status 1 and 2, TS pin control, interrupt status (what tripped)
 } battery_diag_t;
