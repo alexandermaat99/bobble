@@ -484,21 +484,29 @@ static void input_init(void)
     imu_init(bus);
 }
 
-// Touch calibration: screen = raw * a + b per axis, fitted from taps on known targets
-typedef struct { uint32_t magic; float ax, bx, ay, by; } touch_cal_t;
-#define TOUCH_CAL_MAGIC 0x70C4CA13   // bump to make everyone recalibrate
-static touch_cal_t tcal = {0, 1, 0, 1, 0};
+// Touch calibration: screen x = xx * raw x + xy * raw y + x0 (and y likewise), fitted from taps on known targets. The
+// cross terms take up a glass that sits a little turned or skewed on the panel (per axis scale and offset alone left
+// keys near the corners a letter off).
+typedef struct { uint32_t magic; float xx, xy, x0, yx, yy, y0; } touch_cal_t;
+typedef struct { uint32_t magic; float ax, bx, ay, by; } touch_cal_v1_t;   // (before: scale and offset per axis)
+#define TOUCH_CAL_MAGIC 0x70C4CA14   // bump to make everyone recalibrate
+#define TOUCH_CAL_MAGIC_V1 0x70C4CA13
+static touch_cal_t tcal = {0, 1, 0, 0, 0, 1, 0};
 
 static bool touch_cal_load(void)
 {
     nvs_handle_t h;
-    touch_cal_t c;
-    size_t len = sizeof c;
+    union { touch_cal_t c; touch_cal_v1_t v1; } u;
+    size_t len = sizeof u;
     if (nvs_open("demo", NVS_READONLY, &h) != ESP_OK) return false;
-    bool ok = nvs_get_blob(h, "touchcal", &c, &len) == ESP_OK && len == sizeof c && c.magic == TOUCH_CAL_MAGIC;
+    bool got = nvs_get_blob(h, "touchcal", &u, &len) == ESP_OK;
     nvs_close(h);
-    if (ok) tcal = c;
-    return ok;
+    if (got && len == sizeof u.c && u.c.magic == TOUCH_CAL_MAGIC) { tcal = u.c; return true; }
+    if (got && len == sizeof u.v1 && u.v1.magic == TOUCH_CAL_MAGIC_V1) {   // the old kind: still good, until a new one
+        tcal = (touch_cal_t){TOUCH_CAL_MAGIC, u.v1.ax, 0, u.v1.bx, 0, u.v1.ay, u.v1.by};
+        return true;
+    }
+    return false;
 }
 
 static void touch_cal_save(void)
@@ -530,7 +538,7 @@ static bool read_touch(int *x, int *y)
     int rx, ry;
     if (!read_touch_raw(&rx, &ry)) return false;
     // glass position -> position in the turned content (same mapping the renderer uses)
-    float c = (W - 1) / 2.0f, dx = rx * tcal.ax + tcal.bx - c, dy = ry * tcal.ay + tcal.by - c;
+    float c = (W - 1) / 2.0f, dx = rx * tcal.xx + ry * tcal.xy + tcal.x0 - c, dy = rx * tcal.yx + ry * tcal.yy + tcal.y0 - c;
     float co = cosf(ang * (float)M_PI / 180), si = sinf(ang * (float)M_PI / 180);
     *x = (int)lroundf(c + co * dx + si * dy);
     *y = (int)lroundf(c - si * dx + co * dy);
@@ -538,8 +546,15 @@ static bool read_touch(int *x, int *y)
 }
 
 // ---------------------------------------------------------------- touch calibration screen
+// (the square: its corners too, round from the top left, where the keyboard's outer keys are)
+#if SCREEN_ROUND
 static const int cal_pts[][2] = {{CX, CY}, {CX, 70}, {CX, H - 70}, {70, CY}, {W - 70, CY}};
 #define N_CAL_PTS 5
+#else
+static const int cal_pts[][2] = {{CX, CY}, {60, 60}, {CX, 60}, {W - 60, 60}, {W - 60, CY}, {W - 60, H - 60},
+                                 {CX, H - 60}, {60, H - 60}, {60, CY}};
+#define N_CAL_PTS 9
+#endif
 static bool calibrating, cal_retry;
 static int cal_idx, cal_raw[N_CAL_PTS][2], cal_tries;
 static char cal_note[48];                // shown after a run: why it's starting over, or why it gave up
@@ -553,28 +568,42 @@ static void touch_cal_start(void)
     cal_note[0] = 0;
 }
 
-// least squares fit of target = a * raw + b over the points in `use`
-static void fit_axis(int axis, const bool *use, float *a, float *b)
+// least squares fit of target = a * raw x + b * raw y + c over the points in `use` (3 x 3 normal equations, solved by
+// Cramer's rule); false if the points don't pin it down
+static bool fit_axis(int axis, const bool *use, float *a, float *b, float *c)
 {
-    float sx = 0, sy = 0, sxx = 0, sxy = 0, n = 0;
+    double m[3][3] = {{0}}, v[3] = {0};
     for (int i = 0; i < N_CAL_PTS; i++) {
         if (!use[i]) continue;
-        float r = cal_raw[i][axis], t = cal_pts[i][axis];
-        sx += r; sy += t; sxx += r * r; sxy += r * t; n++;
+        double r[3] = {cal_raw[i][0], cal_raw[i][1], 1}, t = cal_pts[i][axis];
+        for (int j = 0; j < 3; j++) {
+            for (int k = 0; k < 3; k++) m[j][k] += r[j] * r[k];
+            v[j] += r[j] * t;
+        }
     }
-    float d = n * sxx - sx * sx;
-    *a = fabsf(d) > 1e-3f ? (n * sxy - sx * sy) / d : 1;
-    *b = (sy - *a * sx) / n;
+#define DET3(A) (A[0][0] * (A[1][1] * A[2][2] - A[1][2] * A[2][1]) - A[0][1] * (A[1][0] * A[2][2] - A[1][2] * A[2][0]) + \
+                 A[0][2] * (A[1][0] * A[2][1] - A[1][1] * A[2][0]))
+    double d = DET3(m), out[3];
+    if (fabs(d) < 1e-6) return false;
+    for (int col = 0; col < 3; col++) {
+        double t[3][3];
+        memcpy(t, m, sizeof t);
+        for (int j = 0; j < 3; j++) t[j][col] = v[j];
+        out[col] = DET3(t) / d;
+    }
+#undef DET3
+    *a = out[0]; *b = out[1]; *c = out[2];
+    return true;
 }
 
 // Fit both axes; returns the worst remaining miss (px) over the points used, and which point that was
 static float fit_all(const bool *use, touch_cal_t *c, int *worst_i)
 {
-    fit_axis(0, use, &c->ax, &c->bx);
-    fit_axis(1, use, &c->ay, &c->by);
+    if (!fit_axis(0, use, &c->xx, &c->xy, &c->x0) || !fit_axis(1, use, &c->yx, &c->yy, &c->y0)) return 1e9f;
     float worst = 0;
     for (int i = 0; i < N_CAL_PTS; i++) {
-        float ex = cal_raw[i][0] * c->ax + c->bx - cal_pts[i][0], ey = cal_raw[i][1] * c->ay + c->by - cal_pts[i][1];
+        float rx = cal_raw[i][0], ry = cal_raw[i][1];
+        float ex = rx * c->xx + ry * c->xy + c->x0 - cal_pts[i][0], ey = rx * c->yx + ry * c->yy + c->y0 - cal_pts[i][1];
         float e = sqrtf(ex * ex + ey * ey);
         if (use[i] && e > worst) { worst = e; *worst_i = i; }
     }
@@ -583,7 +612,8 @@ static float fit_all(const bool *use, touch_cal_t *c, int *worst_i)
 
 static bool cal_ok(const touch_cal_t *c, float worst)
 {
-    return worst <= 22 && c->ax > 0.8f && c->ax < 1.25f && c->ay > 0.8f && c->ay < 1.25f;
+    return worst <= 22 && c->xx > 0.8f && c->xx < 1.25f && c->yy > 0.8f && c->yy < 1.25f && fabsf(c->xy) < 0.15f &&
+           fabsf(c->yx) < 0.15f;
 }
 
 // Feed raw touches. Each tap counts where the finger rested: the average of its samples, leaving out
@@ -608,15 +638,17 @@ static void touch_cal_update(bool down, int rx, int ry, int64_t now)
                  cal_raw[cal_idx][0], cal_raw[cal_idx][1], n);
         cal_note[0] = 0;
         if (++cal_idx == N_CAL_PTS) {
-            bool use[N_CAL_PTS] = {true, true, true, true, true};
+            bool use[N_CAL_PTS];
+            for (int i = 0; i < N_CAL_PTS; i++) use[i] = true;
             touch_cal_t c = {0};
             int wi = 0;
             float worst = fit_all(use, &c, &wi);
-            if (!cal_ok(&c, worst)) {                  // one stray tap? drop it and fit the other four
+            if (!cal_ok(&c, worst)) {                  // one stray tap? drop it and fit the others
                 use[wi] = false;
                 worst = fit_all(use, &c, &wi);
             }
-            ESP_LOGI(TAG, "touch cal: x = %.3f*raw%+.1f, y = %.3f*raw%+.1f, worst miss %.0f px", c.ax, c.bx, c.ay, c.by, worst);
+            ESP_LOGI(TAG, "touch cal: x = %.3f*rx%+.3f*ry%+.1f, y = %.3f*rx%+.3f*ry%+.1f, worst miss %.0f px", c.xx, c.xy, c.x0,
+                     c.yx, c.yy, c.y0, worst);
             if (cal_ok(&c, worst)) {
                 tcal = c;
                 touch_cal_save();
@@ -931,6 +963,16 @@ static void draw_overlay(uint16_t *buf, int y0, int h)
         return;
     }
     if (show_empty) {
+#if !SCREEN_ROUND                                    // (the square: in the settings' style)
+        const uint16_t red = rgb(255, 69, 58);
+        aa_rrect(buf, y0, h, CX - 58, 150, CX + 50, 208, 14, red);           // an empty battery: outline,
+        aa_rrect(buf, y0, h, CX - 53, 155, CX + 45, 203, 10, rgb(0, 0, 0));
+        aa_rrect(buf, y0, h, CX - 47, 161, CX - 35, 197, 5, red);            // the last sliver,
+        aa_rrect(buf, y0, h, CX + 54, 168, CX + 62, 190, 4, red);            // and its tip
+        ftext_mid(buf, y0, h, CX, 246, &font_body, "Battery empty", rgb(255, 255, 255));
+        ftext_mid(buf, y0, h, CX, 292, &font_label, "Plug in to charge", rgb(150, 150, 158));
+        return;
+#endif
         fill_rrect(buf, y0, h, CX - 60, 150, CX + 52, 210, 10, rgb(220, 60, 60));    // empty battery outline
         fill_rrect(buf, y0, h, CX - 54, 156, CX + 46, 204, 6, rgb(0, 0, 0));
         fill_rect(buf, y0, h, CX + 52, 168, CX + 62, 192, rgb(220, 60, 60));
