@@ -480,6 +480,40 @@ bool battery_charging(void) { return plugged_in(); }
 static battery_diag_t diag;
 static portMUX_TYPE diag_mux = portMUX_INITIALIZER_UNLOCKED;
 
+#if SQUARE_HW
+// Charging hot: the charger is linear, so what the cell doesn't take is heat in the chip (1000 mA from low ran it to
+// ~60 C, and warms the cells beside it). At 150 F (65.5 C) the current steps down (1000 > 800 > 500), a step a minute
+// while it stays that hot; under 140 F (60 C) for two minutes it steps back up, as far as the one chosen. Unplugged:
+// back to the chosen one straight away, for the next charge.
+#define HOT_C 65.5f
+#define COOL_C 60.0f
+static void charge_cool(battery_diag_t *d, int64_t now)
+{
+    static const int steps[] = {500, 800, 1000};
+    static int64_t changed, cool_since;
+    if (!d->chip || d->charge_now_ma < 0 || d->charge_ma < 0) return;
+    int i = 0;
+    while (i < 2 && steps[i] < d->charge_now_ma) i++;  // (where now's sits among the steps)
+    int want = d->charge_now_ma;
+    if (!d->usb) want = d->charge_ma;
+    else if (d->chip_c >= HOT_C) {
+        cool_since = 0;
+        if (now - changed > 60000000 && i > 0 && steps[i - 1] < d->charge_now_ma) want = steps[i - 1];
+    } else if (d->chip_c < COOL_C && d->charge_now_ma < d->charge_ma) {
+        if (!cool_since) cool_since = now;
+        if (now - cool_since > 120000000) {
+            want = steps[i] > d->charge_now_ma ? steps[i] : i < 2 ? steps[i + 1] : d->charge_ma;
+            if (want > d->charge_ma) want = d->charge_ma;
+            cool_since = 0;
+        }
+    } else cool_since = 0;
+    if (want == d->charge_now_ma || !sq_charge_apply(want)) return;
+    ESP_LOGI(TAG, "charge current %d -> %d mA (chip %.1f C, chosen %d mA)", d->charge_now_ma, want, d->chip_c, d->charge_ma);
+    d->charge_now_ma = want;
+    changed = now;
+}
+#endif
+
 static void diag_refresh(int64_t now)
 {
     static int64_t at;
@@ -490,10 +524,13 @@ static void diag_refresh(int64_t now)
     sq_power_read(&d);
 #else
     memset(&d, 0, sizeof d);
-    d.vbus_mv = d.vsys_mv = d.gauge_pct = d.charge_ma = d.full_mv = d.in_limit_ma = d.dir = d.stage = -1;
+    d.vbus_mv = d.vsys_mv = d.gauge_pct = d.charge_ma = d.charge_now_ma = d.full_mv = d.in_limit_ma = d.dir = d.stage = -1;
     d.usb = plugged_in();
     d.battery = volts >= 2.5f;
     d.vbat_mv = d.battery ? (int)(volts * 1000) : -1;
+#endif
+#if SQUARE_HW
+    charge_cool(&d, now);
 #endif
     static battery_diag_t was;
     if (d.chip && (d.usb != was.usb || d.battery != was.battery || d.dir != was.dir || d.stage != was.stage))
@@ -519,7 +556,7 @@ int battery_set_charge_ma(int ma)
     int r = sq_charge_set(ma);
     if (r >= 0) {                                      // show it now, not at the next refresh
         taskENTER_CRITICAL(&diag_mux);
-        diag.charge_ma = r;
+        diag.charge_ma = diag.charge_now_ma = r;
         taskEXIT_CRITICAL(&diag_mux);
     }
     return r;

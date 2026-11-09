@@ -1195,7 +1195,10 @@ static void draw_battery(uint16_t *buf, int y0, int h)
             sizeof v[1]);
     if (d.usb && d.vbus_mv >= 0) volts_text(v[2], sizeof v[2], d.vbus_mv);
     else strlcpy(v[2], d.usb ? "Connected" : "Not connected", sizeof v[2]);
-    if (d.charge_ma >= 0) snprintf(v[3], sizeof v[3], "%d mA", d.charge_ma); else strlcpy(v[3], "-", sizeof v[3]);
+    if (d.charge_now_ma >= 0 && d.charge_now_ma < d.charge_ma)   // (stepped down while the chip is hot)
+        snprintf(v[3], sizeof v[3], "%d of %d mA", d.charge_now_ma, d.charge_ma);
+    else if (d.charge_ma >= 0) snprintf(v[3], sizeof v[3], "%d mA", d.charge_ma);
+    else strlcpy(v[3], "-", sizeof v[3]);
     volts_text(v[4], sizeof v[4], d.full_mv);
     bool f = ui_units() == UNITS_F;
     if (d.chip) snprintf(v[5], sizeof v[5], "%d  %s", (int)lroundf(f ? d.chip_c * 9 / 5 + 32 : d.chip_c), f ? "F" : "C");

@@ -571,13 +571,19 @@ static bool pmu_reg(uint8_t reg, uint8_t *v)
     return i2c_master_transmit_receive(pmu_dev, &reg, 1, v, 1, 20) == ESP_OK;
 }
 
+// The current the chip charges at right now, not saved (battery.c steps it down while the chip is hot)
+bool sq_charge_apply(int ma)
+{
+    uint8_t icc[2] = {0x62, 0};
+    if (!pmu_reg(0x62, &icc[1])) return false;
+    icc[1] = (icc[1] & 0xE0) | charge_code(ma);
+    return i2c_master_transmit(pmu_dev, icc, 2, 50) == ESP_OK;
+}
+
 int sq_charge_set(int ma)
 {
     ma = ma < 25 ? 25 : ma > 1000 ? 1000 : ma <= 200 ? ma / 25 * 25 : ma / 100 * 100;   // (the chip's steps)
-    uint8_t icc[2] = {0x62, 0};
-    if (!pmu_reg(0x62, &icc[1])) return -1;
-    icc[1] = (icc[1] & 0xE0) | charge_code(ma);
-    if (i2c_master_transmit(pmu_dev, icc, 2, 50) != ESP_OK) return -1;
+    if (!sq_charge_apply(ma)) return -1;
     charge_ma = ma;
     nvs_handle_t h;
     if (nvs_open("demo", NVS_READWRITE, &h) == ESP_OK) {
@@ -631,7 +637,7 @@ static int pmu_adc(uint8_t reg)                         // a 14-bit reading in t
 void sq_power_read(battery_diag_t *d)
 {
     memset(d, 0, sizeof *d);
-    d->vbat_mv = d->vbus_mv = d->vsys_mv = d->gauge_pct = d->charge_ma = d->full_mv = d->in_limit_ma = -1;
+    d->vbat_mv = d->vbus_mv = d->vsys_mv = d->gauge_pct = d->charge_ma = d->charge_now_ma = d->full_mv = d->in_limit_ma = -1;
     d->dir = d->stage = -1;
     uint8_t st1, st2, v;
     if (!pmu_reg(0x00, &st1) || !pmu_reg(0x01, &st2)) return;
@@ -649,7 +655,8 @@ void sq_power_read(battery_diag_t *d)
     int t = pmu_adc(0x3C);
     if (t >= 0) d->chip_c = 22 + (7274 - t) / 20.0f;
     if (d->battery && pmu_reg(0xA4, &v) && v <= 100) d->gauge_pct = v;
-    if (pmu_reg(0x62, &v)) { v &= 0x1F; d->charge_ma = v <= 8 ? v * 25 : v <= 16 ? (v - 6) * 100 : -1; }
+    if (pmu_reg(0x62, &v)) { v &= 0x1F; d->charge_now_ma = v <= 8 ? v * 25 : v <= 16 ? (v - 6) * 100 : -1; }
+    d->charge_ma = charge_ma >= 0 ? charge_ma : d->charge_now_ma;   // (the one chosen; now's may be less while hot)
     static const int full[8] = {-1, 4000, 4100, 4200, 4350, 4400, -1, -1};
     static const int limit[8] = {100, 500, 900, 1000, 1500, 2000, -1, -1};
     if (pmu_reg(0x64, &v)) d->full_mv = full[v & 7];

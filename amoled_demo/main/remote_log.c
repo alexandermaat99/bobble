@@ -92,12 +92,12 @@ static esp_err_t get_battery(httpd_req_t *req)
     snprintf(out, sizeof out,
              "{\"state\":\"%s\",\"chip\":%s,\"usb\":%s,\"battery\":%s,\"charge_on\":%s,\"current\":\"%s\","
              "\"stage\":\"%s\",\"battery_mv\":%d,\"usb_mv\":%d,\"system_mv\":%d,\"gauge_pct\":%d,\"shown_pct\":%d,"
-             "\"charge_ma\":%d,\"full_mv\":%d,\"usb_limit_ma\":%d,\"chip_c\":%.1f,\"learned_runs\":%d,\"logging\":%s,"
+             "\"charge_ma\":%d,\"charge_now_ma\":%d,\"full_mv\":%d,\"usb_limit_ma\":%d,\"chip_c\":%.1f,\"learned_runs\":%d,\"logging\":%s,"
              "\"raw\":{\"status1\":\"%02x\",\"status2\":\"%02x\",\"ts\":\"%02x\",\"irq\":\"%02x %02x %02x\"}}\n",
              battery_state_text(&d), d.chip ? "true" : "false", d.usb ? "true" : "false", d.battery ? "true" : "false",
              d.charge_on ? "true" : "false", d.dir == 1 ? "charging" : d.dir == 2 ? "discharging" : d.dir == 0 ? "none" : "-",
              battery_stage_text(d.stage), d.vbat_mv, d.vbus_mv, d.vsys_mv, d.gauge_pct, battery_percent(),
-             d.charge_ma, d.full_mv, d.in_limit_ma, d.chip_c, battery_learned_runs(), battery_logging() ? "true" : "false", d.st1, d.st2, d.ts, d.irq[0], d.irq[1], d.irq[2]);
+             d.charge_ma, d.charge_now_ma, d.full_mv, d.in_limit_ma, d.chip_c, battery_learned_runs(), battery_logging() ? "true" : "false", d.st1, d.st2, d.ts, d.irq[0], d.irq[1], d.irq[2]);
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_sendstr(req, out);
 }
