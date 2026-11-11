@@ -4,15 +4,8 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-#ifdef BOARD_SQUARE                 // the 4" 480x480 square LCD (the "86 box" board)
 #define W 480
 #define H 480
-#define SCREEN_ROUND 0
-#else                               // the 1.75" 466x466 round AMOLED
-#define W 466
-#define H 466
-#define SCREEN_ROUND 1
-#endif
 #define CX (W / 2)
 #define CY (H / 2)
 

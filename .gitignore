@@ -12,8 +12,8 @@ amoled_demo/main/secrets.h
 # Built or downloaded
 build/
 build-release/
-build-release-square/
 build-square/
+build-release-square/
 *.log
 .build/
 managed_components/
@@ -25,3 +25,6 @@ __pycache__/
 .build-*/
 .cache/
 *.bin
+# (each build folder keeps its own settings: amoled_demo/CMakeLists.txt)
+amoled_demo/sdkconfig
+amoled_demo/sdkconfig.old

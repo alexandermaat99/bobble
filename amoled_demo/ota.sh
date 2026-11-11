@@ -1,6 +1,6 @@
 #!/bin/zsh
 # Build the firmware and send it to the board over Wi-Fi.
-#   ./ota.sh                  # board at bobble.local
+#   ./ota.sh                  # Bobble Square at bobble.local
 #   ./ota.sh 192.168.68.62    # or by IP if .local names don't resolve
 set -e -o pipefail
 cd "${0:A:h}"

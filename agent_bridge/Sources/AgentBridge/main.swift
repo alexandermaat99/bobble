@@ -8,7 +8,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let menu = NSMenu()
     private let chats = Chats()
     private let device = Device()
-    private let sims = [Device(sim: Device.bubble), Device(sim: Device.square)]   // the simulators, when they're running (chats go to all)
+    private let sims = [Device(sim: Device.square)]   // the simulator, when it's running (chats go to it too)
     private var server: HookServer!
     private var voice: VoiceChat!                 // talking with Claude through the square Bobble
     private let updater = Updater()              // new builds from the Bobble repo's releases
@@ -48,7 +48,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
             s.start()
         }
-        voice = VoiceChat(chats: chats, devices: [device] + sims.filter { $0.sim?.name == Device.square.name })   // (the Square: it has the speaker and mics)
+        voice = VoiceChat(chats: chats, devices: [device] + sims)
         updater.board = device
         updater.busy = { [weak self] in                 // (open with -forceBoardUpdate YES to test it mid-chat)
             if UserDefaults.standard.bool(forKey: "forceBoardUpdate") { return false }
@@ -309,7 +309,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard let l = sender.representedObject as? String else { return }
         UserDefaults.standard.set(l, forKey: "look")
         device.setLook(l)
-        for s in sims where s.sim?.name == Device.square.name { s.setLook(l) }
+        for s in sims { s.setLook(l) }
     }
 
     @objc private func toggleHide() {

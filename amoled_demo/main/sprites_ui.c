@@ -4,7 +4,6 @@
 #include "gfx.h"
 #include "sprites_ui.h"
 
-#if !SCREEN_ROUND
 typedef struct {
     const char *head[11], *torso[6];
     uint8_t pal[6][3];        // A B C D F G
@@ -79,4 +78,3 @@ void sprite_draw(uint16_t *buf, int y0, int h, int who, const pose_t *p, float c
         }
     }
 }
-#endif

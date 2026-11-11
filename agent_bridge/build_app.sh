@@ -5,7 +5,8 @@
 #   ./build_app.sh --install  build, copy to /Applications, zip it to ~/Desktop/Bobble.zip, and start it there
 #   ./build_app.sh --release "Pairing code can be dismissed"
 #                             the next version (0.3, 0.4… in ./VERSION), --install, and the display's release firmware
-#                             (the round board's, and the square's as bobble-firmware-square.bin),
+#                             (bobble-firmware-square.bin: Bobble Square's; the round Bobble Bubble is archived at the
+#                             bubble-archive tag and gets no more releases),
 #                             then publish both as a GitHub release ("Bobble 0.3 — <summary>", notes from the commits
 #                             since the last one): every installed copy updates itself, then its paired Bobble, within a
 #                             few hours (needs gh: brew install gh, then gh auth login)
@@ -42,18 +43,9 @@ if [[ $1 == --release ]]; then                # (in the clean copy now)
         exit 1
     fi
     mkdir -p build
-    echo "building the square's firmware too..."
-    if ! (cd $fw && . ~/esp/esp-idf/export.sh >/dev/null 2>&1 && mkdir -p build-release-square &&
-          idf.py -B build-release-square -D BOBBLE_SQUARE=1 -D BOBBLE_RELEASE=1 -D BOBBLE_BUILD=$build \
-                 -D SDKCONFIG=build-release-square/sdkconfig -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.square" \
-                 build > build-release-square/last_build.log 2>&1); then
-        grep -E "error:" $fw/build-release-square/last_build.log | head -20
-        echo "square firmware build failed - nothing released (full output: $fw/build-release-square/last_build.log)"
-        exit 1
-    fi
-    cp $fw/build-release/amoled_demo.bin build/bobble-firmware.bin
-    cp $fw/build-release-square/amoled_demo.bin build/bobble-firmware-square.bin   # (an update only: the setup page and
-                                                                                    # flash_new.sh are the round board's)
+    # (named for the square, as the Mac apps out there look for it; no bobble-firmware.bin, the round board's name, so
+    # an older app never sends this to a Bubble)
+    cp $fw/build-release/amoled_demo.bin build/bobble-firmware-square.bin
     # (and what a blank board needs besides, for flash_new.sh and the setup page: offsets as in flash_args)
     cp $fw/build-release/bootloader/bootloader.bin build/bobble-bootloader.bin
     cp $fw/build-release/partition_table/partition-table.bin build/bobble-partitions.bin
@@ -119,7 +111,7 @@ if [[ $1 == --release ]]; then                # out to everyone: the newest rele
     [[ -n $app_log ]] && notes+=$'\n\n**Mac app**\n'"$app_log"
     [[ -n $fw_log ]] && notes+=$'\n\n**Display**\n'"$fw_log"
     notes+=$'\n\n'"Build $build. The Mac app updates itself, then its paired Bobble once no chat is busy."
-    gh release create "build-$build" ~/Desktop/Bobble.zip build/bobble-{firmware,firmware-square,bootloader,partitions,otadata}.bin --repo "$repo" \
+    gh release create "build-$build" ~/Desktop/Bobble.zip build/bobble-{firmware-square,bootloader,partitions,otadata}.bin --repo "$repo" \
         --target "$(git -C $src rev-parse HEAD)" --title "Bobble $version — $summary" --notes "$notes"
     echo "released Bobble $version (build $build) to $repo"
     ./publish_pages.sh build $version            # (the setup page, for flashing new Bobbles from the browser)

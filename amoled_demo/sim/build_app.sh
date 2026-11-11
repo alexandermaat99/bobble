@@ -1,15 +1,13 @@
 #!/bin/zsh
-# Builds the simulators (the firmware in main/, running on this Mac) into ~/Applications and starts them: "Bobble
-# Bubble.app" (the round 1.75" board) and "Bobble Square.app" (the square 4" one, BOARD_SQUARE). They can run together.
-#   ./build_app.sh            build, install and (re)start both
+# Builds the simulator (the firmware in main/, running on this Mac) into ~/Applications and starts it: "Bobble
+# Square.app". (The round Bobble Bubble's is archived at the bubble-archive tag.)
+#   ./build_app.sh            build, install and (re)start it
 #   ./build_app.sh --no-open  just build and install
-# Logs: run ~/Applications/Bobble\ Bubble.app/Contents/MacOS/BobbleSim (or Bobble Square's BobbleSquare) from a terminal.
+# Logs: run ~/Applications/Bobble\ Square.app/Contents/MacOS/BobbleSquare from a terminal.
 set -e -o pipefail
 cd "${0:A:h}"
 ./link_firmware.sh
 swift build -c release 2>&1 | grep -vE "ld: warning: search path" || true
-# (the screen's size is fixed at compile time: the square one is its own build)
-SIM_DEFINES="BOARD_SQUARE=1 $SIM_DEFINES" swift build -c release --scratch-path .build-square 2>&1 | grep -vE "ld: warning: search path" || true
 icons=../../agent_bridge/tools/make_icon.swift            # (the "display" option from Bobble's icon choices)
 if [[ -f $icons && ( ! -f build/AppIcon.icns || $icons -nt build/AppIcon.icns ) ]]; then
     set_=build/AppIcon.iconset
@@ -52,12 +50,10 @@ PLIST
     cp -R "$build" "$HOME/Applications/$1.app"
     echo "installed ~/Applications/$1.app"
 }
-# (Bubble keeps the old simulator's id, so its window and settings carry over)
-bundle "Bobble Bubble" app.bobble.Simulator BobbleSim .build/release/BobbleSim
-bundle "Bobble Square" app.bobble.Square BobbleSquare .build-square/release/BobbleSim
-rm -rf "$HOME/Applications/Bobble Simulator.app" "build/Bobble Simulator.app"   # (the old single app)
+bundle "Bobble Square" app.bobble.Square BobbleSquare .build/release/BobbleSim
+pkill -x BobbleSim 2>/dev/null || true             # (the archived Bubble's, and before it the single Bobble Simulator)
+rm -rf "$HOME/Applications/Bobble Bubble.app" "build/Bobble Bubble.app" "$HOME/Applications/Bobble Simulator.app" "build/Bobble Simulator.app"
 if [[ $1 != --no-open ]]; then
     sleep 0.5
-    open "$HOME/Applications/Bobble Bubble.app"
     open "$HOME/Applications/Bobble Square.app"
 fi

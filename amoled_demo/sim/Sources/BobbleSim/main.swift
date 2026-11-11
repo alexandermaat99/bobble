@@ -1,4 +1,4 @@
-// Bobble Bubble / Bobble Square (the simulators): the display's glass (round, or the square board's) floating on the desktop (no window around it), with the firmware (main/,
+// Bobble Square (the simulator): the display's glass floating on the desktop (no window around it), with the firmware (main/,
 // unchanged) running behind it. The mouse is a finger; the Device menu turns, lays down and picks up the board, presses
 // BOOT, and sets the battery.
 //   click/drag on the glass: touch      drag the rim (or ⌘-drag anywhere): move it      ⌘+ / ⌘- / ⌘9 (tiny): size
@@ -6,28 +6,19 @@
 import AppKit
 import Firmware
 
-// The glass this build of the firmware draws: Bobble Bubble, 466 round (the AMOLED), or Bobble Square, 480 square (the
-// 4" LCD: BOARD_SQUARE). Two apps, so both can run at once.
-let side = Int(sim_glass_side()), round = sim_glass_round()
-let appName = round ? "Bobble Bubble" : "Bobble Square"
+// The glass the firmware draws: Bobble Square's 480 px
+let side = Int(sim_glass_side())
+let appName = "Bobble Square"
 
 final class GlassView: NSView {
     private var raw = [UInt16](repeating: 0, count: side * side)
     private var rgba = [UInt8](repeating: 0, count: side * side * 4)
-    private var mask = [Float](repeating: 1, count: side * side)   // the round glass, with a soft edge (square: all of it)
     private var seq: UInt32 = 0
     private var lastLook = (bright: -1, on: false)
     private var image: CGImage?
 
     override init(frame: NSRect) {
         super.init(frame: frame)
-        let n = side, c = Float(n) / 2
-        for y in 0..<n where round {
-            for x in 0..<n {
-                let dx = Float(x) + 0.5 - c, dy = Float(y) + 0.5 - c
-                mask[y * n + x] = max(0, min(1, c - (dx * dx + dy * dy).squareRoot()))
-            }
-        }
     }
     required init?(coder: NSCoder) { fatalError() }
 
@@ -38,17 +29,17 @@ final class GlassView: NSView {
         guard s != seq || look != lastLook else { return }
         seq = s
         lastLook = look
-        let k = look.on ? Float(look.bright) / 255 : 0   // (on an AMOLED, brightness scales every pixel)
-        let glow: Float = round ? 0 : 0.03                // (an LCD's backlight shows through its black)
+        let k = look.on ? Float(look.bright) / 255 : 0   // (the backlight's brightness)
+        let glow: Float = 0.03                            // (an LCD's backlight shows through its black)
         let n = side * side
         raw.withUnsafeBufferPointer { src in
             rgba.withUnsafeMutableBufferPointer { dst in
                 for i in 0..<n {
-                    let v = src[i].byteSwapped, m = mask[i] * k   // (the panel takes big-endian RGB565)
+                    let v = src[i].byteSwapped, m = k            // (the panel takes big-endian RGB565)
                     dst[i * 4] = UInt8((Float(Int(v >> 11) * 255 / 31) * (1 - glow) + 255 * glow) * m)
                     dst[i * 4 + 1] = UInt8((Float(Int((v >> 5) & 63) * 255 / 63) * (1 - glow) + 255 * glow) * m)
                     dst[i * 4 + 2] = UInt8((Float(Int(v & 31) * 255 / 31) * (1 - glow) + 255 * glow) * m)
-                    dst[i * 4 + 3] = UInt8(255 * mask[i])
+                    dst[i * 4 + 3] = 255
                 }
             }
         }
@@ -71,9 +62,9 @@ final class GlassView: NSView {
         let g = glassRect
         let r = bounds.width * 0.06                   // (the square board's corners)
         NSColor(white: 0.13, alpha: 1).setFill()      // the rim
-        (round ? NSBezierPath(ovalIn: bounds) : NSBezierPath(roundedRect: bounds, xRadius: r, yRadius: r)).fill()
+        NSBezierPath(roundedRect: bounds, xRadius: r, yRadius: r).fill()
         let gr = max(0, r - GlassView.rim)            // (the glass follows the rim's corners, inside it)
-        let glass = round ? NSBezierPath(ovalIn: g) : NSBezierPath(roundedRect: g, xRadius: gr, yRadius: gr)
+        let glass = NSBezierPath(roundedRect: g, xRadius: gr, yRadius: gr)
         NSColor.black.setFill()
         glass.fill()
         guard let image, let cg = NSGraphicsContext.current?.cgContext else { return }
@@ -92,7 +83,7 @@ final class GlassView: NSView {
     private var touching = false
     override func mouseDown(with e: NSEvent) {
         let p = convert(e.locationInWindow, from: nil), g = glassRect
-        let onGlass = round ? hypot(p.x - g.midX, p.y - g.midY) <= g.width / 2 : g.contains(p)
+        let onGlass = g.contains(p)
         if !onGlass || e.modifierFlags.contains(.command) { window?.performDrag(with: e); return }
         touching = true
         let (x, y) = glassPoint(e)
@@ -106,11 +97,6 @@ final class GlassView: NSView {
         sim_touch(x, y, false)
     }
 
-    // Round: clicks beside the circle go to whatever's behind
-    override func hitTest(_ p: NSPoint) -> NSView? {
-        let q = convert(p, from: superview)
-        return !round || hypot(q.x - bounds.midX, q.y - bounds.midY) <= bounds.width / 2 ? self : nil
-    }
     override var acceptsFirstResponder: Bool { true }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
@@ -157,7 +143,7 @@ final class App: NSObject, NSApplicationDelegate {
         if let f = UserDefaults.standard.string(forKey: "frame").map(NSRectFromString), f.width > 0 {
             window.setFrame(f, display: false)
         } else if let s = NSScreen.main?.visibleFrame {
-            let x = s.minX + (round ? 10 : 20 + App.tinySide)   // (Square beside Bubble)
+            let x = s.minX + 10
             window.setFrame(NSRect(x: x, y: s.minY + 15, width: App.tinySide, height: App.tinySide), display: false)
         }
         for n in [NSWindow.didMoveNotification, NSWindow.didResizeNotification] {
@@ -247,7 +233,7 @@ final class App: NSObject, NSApplicationDelegate {
         m.addItem(i)
     }
 
-    // Sizes: the glass's 466 pixels at 1x (Actual Size), in steps of a sixth, down to Tiny (a glance-sized corner badge)
+    // Sizes: the glass's 480 pixels at 1x (Actual Size), in steps of a sixth, down to Tiny (a glance-sized corner badge)
     private static let tinySide: CGFloat = 200
     private func resize(_ side: CGFloat) {
         let s = max(App.tinySide, min(1000, side)), f = window.frame

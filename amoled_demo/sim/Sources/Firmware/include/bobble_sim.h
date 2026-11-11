@@ -4,11 +4,10 @@
 #include <stdint.h>
 
 void sim_start(int argc, char **argv);     // runs app_main on its own thread (as on the board)
-// The glass: sim_glass_side() pixels square (466 round, or 480 for the square board: BOARD_SQUARE), RGB565,
+// The glass: sim_glass_side() pixels square (480, Bobble Square's), RGB565,
 // big-endian as the panel takes it. Copies it out if it changed since `seq` (returns the new
 // seq); brightness 0..255 and whether the panel is on (asleep: off).
 int sim_glass_side(void);
-bool sim_glass_round(void);
 uint32_t sim_copy_glass(uint16_t *out, uint32_t seq);
 int sim_brightness(void);
 bool sim_panel_on(void);
