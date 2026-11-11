@@ -103,6 +103,7 @@ static struct { uint32_t magic, on_ms, bat_ms; } sot = {SOT_MAGIC, 0, 0};
 static int64_t sot_saved_at, plugged_at;
 
 static int shown = -1;                // % on screen
+static bool charger_full(void);       // (the power chip says Full)
 // On USB the board reads well above the cell's own voltage (charger): learned from the step at each plug / unplug
 #if SQUARE_HW
 static float usb_offset = 0.10f;      // (the power chip measures at the cell: ~0.19 ohm x the 500 mA charge current)
@@ -263,7 +264,8 @@ static void log_tick(int64_t now)
     int mv = (int)(volts * 1000);
     bool usb = plugged_in();
 
-    if (run == RUN_IDLE && mv >= FULL_MV + 20) run = RUN_ARMED;
+    if (run == RUN_IDLE && (mv >= FULL_MV + 20 || (usb && charger_full()))) run = RUN_ARMED;   // (the charger says Full: after a restart
+                                                                                           // the voltage may have settled below)
     if (run == RUN_ARMED && !usb && mv < FULL_MV && unplugged_at && now - unplugged_at > 120000000) {   // settled
         lg = (typeof(lg)){.magic = LOG_MAGIC, .step_min = 2};
         lg.mv[lg.n++] = mv;
@@ -613,6 +615,8 @@ static void top_tick(int64_t now)
     if (!top_out) top_out = now;
     else if (now - top_out > 60000000) top_at = 0;
 }
+
+static bool charger_full(void) { return diag.stage == 4; }
 
 static int top_pct(int64_t now)
 {
