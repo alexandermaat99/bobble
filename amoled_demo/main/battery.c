@@ -95,7 +95,6 @@ static enum { RUN_IDLE, RUN_ARMED, RUN_LOGGING } run;   // ARMED: battery seen f
 static int64_t run_t0;                // esp_timer time of entry 0
 static uint16_t run_min_mv;
 static int64_t rise_since;
-static int unsaved;
 
 // Screen-on time since the last charge, and the time on battery it's out of (saved every few minutes, so a reboot
 // or OTA carries on). Starts over when it's unplugged after 5 minutes or more on the charger; plugged in, it shows the
@@ -179,7 +178,7 @@ static void save_curve(void)
     nvs_put("bcurve", &c, sizeof c);
 }
 
-static void save_log(void) { nvs_put("blog", &lg, sizeof lg); unsaved = 0; }
+static void save_log(void) { nvs_put("blog", &lg, sizeof lg); }
 
 // The run just ended (learned from or not) is kept as the last one, until the next run ends
 static void keep_log(void) { if (lg.n) nvs_put("blast", &lg, sizeof lg); }
@@ -250,11 +249,13 @@ static void load_learning(float v_now)
     // ran flat: it's on the charger now, or it's come back far from where it stopped (above: recharged; below: it
     // went on draining while it was off, as the square's did in deep sleep, down from 3.70 V to 3.13 V)
     if (last_mv <= NEAR_EMPTY_MV && (plugged_in() || abs(mv - last_mv) >= 60)) learn_from_log();
-    else if (abs(mv - last_mv) < 60 && !plugged_in()) {  // a reboot or OTA mid-run: carry on
+    // a reboot or OTA mid-run: carry on. The voltage only had to stay put or fall (the log can be a point behind, and
+    // it sags under the start-up's load); a rise is a charge
+    else if (mv - last_mv < 60 && last_mv - mv < 200 && !plugged_in()) {
         run = RUN_LOGGING;
         run_t0 = esp_timer_get_time() - (int64_t)lg.n * lg.step_min * 60000000;
         run_min_mv = last_mv;
-    } else drop_log("battery was charged before it ran out");
+    } else drop_log(mv > last_mv ? "battery was charged before it ran out" : "it fell too far while the board was off");
 }
 
 static void log_tick(int64_t now)
@@ -293,7 +294,7 @@ static void log_tick(int64_t now)
     }
     lg.mv[lg.n++] = mv;
     if (mv <= EMPTY_MV) { learn_from_log(); return; }
-    if (++unsaved >= 5 || mv <= NEAR_EMPTY_MV) save_log();
+    save_log();                                       // (every point, so a restart loses none of it)
 }
 
 // A run recorded earlier, sent back to learn from (POST /battery/run): taken up by battery_update, between runs
