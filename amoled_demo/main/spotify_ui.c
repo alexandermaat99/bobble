@@ -445,11 +445,47 @@ static void tiles_speaker(uint16_t *buf, int y0, int h, float cx, float cy, int 
     }
 }
 
-// a time in a tile
-static void tiles_time(uint16_t *buf, int y0, int h, int x0, int x1, const char *t, const font_t *f, uint16_t bg)
+// a time in a round tile, filled to frac with liquid in c: a wavy surface with a lighter wave behind it, that moves on
+// a step each second (when the time changes: no extra frames). The time reads black where the liquid's up to it.
+static void tiles_time(uint16_t *buf, int y0, int h, int x0, int x1, const char *t, const font_t *f, float frac, uint16_t c)
 {
-    aa_rrect(buf, y0, h, x0, T_ROW_Y0, x1, T_ROW_Y1, 26, bg);
-    ftext_cx(buf, y0, h, (x0 + x1) / 2, tiles_mid(f, (T_ROW_Y0 + T_ROW_Y1) / 2.0f), f, t, T_INK);
+    const float cx = (x0 + x1) / 2.0f, cy = (T_ROW_Y0 + T_ROW_Y1) / 2.0f, r = (T_ROW_Y1 - T_ROW_Y0) / 2.0f;
+    frac = frac < 0 ? 0 : frac > 1 ? 1 : frac;
+    float level = cy + r - 2 * r * frac, ph = (float)((int)(progress * s.duration_ms / 1000) % 60) * 0.9f + (x0 > CX ? 2 : 0);
+    float amp = frac <= 0 || frac >= 1 ? 0 : 2.6f;    // (empty or full: flat)
+    uint16_t back = tile_hot(c), sc = SWAP16(c), sb = SWAP16(back), sk = SWAP16(T_CASE);
+    int ya = (int)(cy - r - 1) > y0 ? (int)(cy - r - 1) : y0, yb = (int)(cy + r + 2) < y0 + h ? (int)(cy + r + 2) : y0 + h;
+    for (int y = ya; y < yb; y++) {
+        uint16_t *row = buf + (y - y0) * W;
+        float dy = y + 0.5f - cy;
+        for (int x = (int)(cx - r - 1); x <= (int)(cx + r + 1); x++) {
+            float dx = x + 0.5f - cx, cov = r + 0.5f - sqrtf(dx * dx + dy * dy);   // (the round edge, smoothed)
+            if (cov <= 0 || x < 0 || x >= W) continue;
+            float s1 = level + amp * sinf(dx * 0.11f + ph), s2 = level - 1.5f + amp * sinf(dx * 0.09f - ph * 1.3f + 1.7f);
+            float py = y + 0.5f, f1 = py - s1 + 0.5f, f2 = py - s2 + 0.5f;    // (each surface smoothed over a pixel)
+            f1 = f1 < 0 ? 0 : f1 > 1 ? 1 : f1;
+            f2 = f2 < 0 ? 0 : f2 > 1 ? 1 : f2;
+            uint16_t px = sk;                          // the dark tile, then the far wave, then the near one
+            int pr = (px >> 11) & 31, pg = (px >> 5) & 63, pb = px & 31;
+            pr += (int)((((sb >> 11) & 31) - pr) * f2); pg += (int)((((sb >> 5) & 63) - pg) * f2); pb += (int)(((sb & 31) - pb) * f2);
+            pr += (int)((((sc >> 11) & 31) - pr) * f1); pg += (int)((((sc >> 5) & 63) - pg) * f1); pb += (int)(((sc & 31) - pb) * f1);
+            if (cov < 1) {                             // on the edge: over what's behind
+                uint16_t bg = SWAP16(row[x]);
+                pr = ((bg >> 11) & 31) + (int)((pr - ((bg >> 11) & 31)) * cov);
+                pg = ((bg >> 5) & 63) + (int)((pg - ((bg >> 5) & 63)) * cov);
+                pb = (bg & 31) + (int)((pb - (bg & 31)) * cov);
+            }
+            row[x] = SWAP16((uint16_t)(pr << 11 | pg << 5 | pb));
+        }
+    }
+    if (!t[0]) return;
+    int ty = tiles_mid(f, cy), ct, cb, cut = (int)lroundf(level);
+    gfx_get_clip(&ct, &cb);
+    gfx_clip(ct, cut < cb ? cut : cb);                // above the liquid: white
+    ftext_cx(buf, y0, h, (int)cx, ty, f, t, C_WHITE);
+    gfx_clip(cut > ct ? cut : ct, cb);                // in it: black
+    ftext_cx(buf, y0, h, (int)cx, ty, f, t, T_INK);
+    gfx_clip(ct, cb);
 }
 
 // the logo in a dark tile, what to do in a light one
@@ -503,21 +539,17 @@ static void draw_tiles(uint16_t *buf, int y0, int h)
     draw_ftext(buf, y0, h, 32, iy0 + 37, &font_small, l1, s.note[0] ? T_RED : T_INK2);
 
     // the row: times either end, the keys between
+    // the times in round tiles either end: how far it's got filling up in orange, what's left draining in red
     if (s.duration_ms > 0) {
-        // the bigger font if the song's longest time fits (so it doesn't change size as the seconds go by)
-        l1[0] = '-';
-        fmt_time(l1 + 1, sizeof l1 - 1, s.duration_ms);
-        for (char *q = l1; *q; q++) if (*q >= '0' && *q <= '9') *q = '8';
-        const font_t *tf = ftext_width(&font_body, l1) <= tbtns[0].x0 - 10 - 14 - 16 ? &font_body : &font_label;
         fmt_time(line, sizeof line, (int)(progress * s.duration_ms));
-        tiles_time(buf, y0, h, 14, tbtns[0].x0 - 10, line, tf, T_ORANGE);
+        tiles_time(buf, y0, h, 14, tbtns[0].x0 - 10, line, &font_label, progress, T_ORANGE);
         int left = s.duration_ms - (int)(progress * s.duration_ms);
         line[0] = '-';
         fmt_time(line + 1, sizeof line - 1, left);
-        tiles_time(buf, y0, h, tbtns[2].x1 + 10, W - 14, line, tf, T_RED);
+        tiles_time(buf, y0, h, tbtns[2].x1 + 10, W - 14, line, &font_label, 1 - progress, T_RED);
     } else {
-        tiles_time(buf, y0, h, 14, tbtns[0].x0 - 10, "", &font_body, T_CASE);
-        tiles_time(buf, y0, h, tbtns[2].x1 + 10, W - 14, "", &font_body, T_CASE);
+        tiles_time(buf, y0, h, 14, tbtns[0].x0 - 10, "", &font_label, 0, T_CASE);
+        tiles_time(buf, y0, h, tbtns[2].x1 + 10, W - 14, "", &font_label, 0, T_CASE);
     }
     for (int i = 0; i < 3; i += 2) {
         const btn_t *b = &tbtns[i];
