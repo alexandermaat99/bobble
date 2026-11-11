@@ -630,6 +630,18 @@ int battery_percent(void)
         ESP_LOGI(TAG, "%.2f V: gauge %d%%, curve %d%% (%d runs)", volts, g, p, curve_runs);
     }
     if (g >= 0 && !curve_runs) p = g;
+    // Topping up (the charger holding the cell at full while its current tapers off): the charger offset above is
+    // the one at full current, and the chip can't measure the current, so p stalled near 80% to the end. Instead it
+    // climbs from where it was to 99 over about 40 minutes; Full is 100.
+    static int64_t topup_at;
+    static int topup_from;
+    if (battery_charging() && diag.stage == 3) {
+        if (!topup_at) { topup_at = now; topup_from = shown >= 0 ? shown : p; }
+        float t = (now - topup_at) / 2.4e9f;
+        int r = topup_from + (int)((99 - topup_from) * (t > 1 ? 1 : t));
+        if (r > p) p = r;
+    } else topup_at = 0;
+    if (diag.stage == 4) p = 100;
 #endif
     if (shown < 0 || battery_charging()) { shown = p; below_since = above_since = 0; return shown; }
     // on battery: drop once the reading has stayed lower for 20 s (to the best of it, so Wi-Fi blips don't count);
