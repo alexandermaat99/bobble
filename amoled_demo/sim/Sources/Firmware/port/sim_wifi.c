@@ -195,7 +195,8 @@ static esp_err_t glass_get(httpd_req_t *req)
     return httpd_resp_send(req, (const char *)px, sizeof px);
 }
 
-// (emulator only) POST /sim/input?touch=x,y | touch=up | boot=1|0 | tilt=degrees | flat=1: drive it from a script
+// (emulator only) POST /sim/input?touch=x,y | touch=up | boot=1|0 | tilt=degrees | flat=1 | battery=mV[&usb=1]: drive it
+// from a script
 static esp_err_t input_post(httpd_req_t *req)
 {
     char q[96] = "", v[32];
@@ -208,6 +209,11 @@ static esp_err_t input_post(httpd_req_t *req)
     if (httpd_query_key_value(q, "boot", v, sizeof v) == ESP_OK) sim_boot_button(atoi(v));
     if (httpd_query_key_value(q, "tilt", v, sizeof v) == ESP_OK) sim_set_tilt((float)atof(v), false);
     if (httpd_query_key_value(q, "flat", v, sizeof v) == ESP_OK) sim_set_tilt(0, true);
+    if (httpd_query_key_value(q, "battery", v, sizeof v) == ESP_OK) {
+        char u[4] = "0";
+        httpd_query_key_value(q, "usb", u, sizeof u);
+        sim_set_battery(atoi(v), atoi(u));
+    }
     return httpd_resp_sendstr(req, "ok\n");
 }
 

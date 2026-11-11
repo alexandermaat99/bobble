@@ -47,6 +47,7 @@
 #include "pet_ui.h"
 #include "agent.h"
 #include "screen.h"
+#include "tiles.h"
 #include "statusbar.h"
 #include "remote_log.h"
 #include "board_square.h"
@@ -624,11 +625,63 @@ static void touch_cal_update(bool down, int rx, int ry, int64_t now)
     was = down;
 }
 
-// The square, in the settings' style: a blue ring with a soft halo to tap, the words in the Inter fonts, and the steps as
-// a row of dots (done white, this one blue)
+// The full-screen steps (touch and tilt calibration, an update, an empty battery) in each look. Classic: the settings'
+// style, a blue ring with a soft halo to tap, the words in the Inter fonts, the steps as a row of dots (done white, this
+// one blue). Field: its dot grid, Space Mono capitals, orange, square keys and steps. Tiles: flat bright tiles and pills.
+#define F_ORANGE rgb(255, 102, 26)
+#define F_YELLOW rgb(255, 204, 0)
+#define F_RED    rgb(255, 59, 48)
+#define F_GREEN  rgb(38, 208, 124)
+#define F_GREY   rgb(118, 118, 126)
+#define F_DIM    rgb(56, 56, 62)
+
 static void ftext_mid(uint16_t *buf, int y0, int h, int cx, int y, const font_t *f, const char *t, uint16_t col)
 {
     draw_ftext(buf, y0, h, cx - ftext_width(f, t) / 2, y, f, t, col);
+}
+
+// Field's words: in capitals
+static void ftext_mid_up(uint16_t *buf, int y0, int h, int cx, int y, const font_t *f, const char *t, uint16_t col)
+{
+    char u[64];
+    size_t i = 0;
+    for (; t[i] && i + 1 < sizeof u; i++) u[i] = t[i] >= 'a' && t[i] <= 'z' ? t[i] - 32 : t[i];
+    u[i] = 0;
+    ftext_mid(buf, y0, h, cx, y, f, u, col);
+}
+
+static void field_grid(uint16_t *buf, int y0, int h)   // Field's dot grid, every 24 px
+{
+    for (int y = y0 - y0 % 24 + 12; y < y0 + h; y += 24) {
+        if (y < y0) continue;
+        for (int x = 12; x < W; x += 24) buf[(y - y0) * W + x] = rgb(34, 34, 38);
+    }
+}
+
+// n steps in a row at y, i the one up: done ones lit, the rest dim. Classic: dots (r across, the others 1 less); Field:
+// little squares; Tiles: pills, the one up longer
+static void step_row(uint16_t *buf, int y0, int h, int y, int n, int i, float gap, float r, uint16_t on)
+{
+    for (int k = 0; k < n; k++) {
+        float x = CX + (k - (n - 1) / 2.0f) * gap;
+        if (ui_field()) {
+            float s = k == i ? 4 : 3;
+            aa_rrect(buf, y0, h, x - s, y - s, x + s, y + s, 1, k == i ? on : k < i ? rgb(255, 255, 255) : F_DIM);
+        } else if (ui_tiles()) {
+            float hw = k == i ? 7 : 3.5f;
+            aa_rrect(buf, y0, h, x - hw, y - 3.5f, x + hw, y + 3.5f, 3.5f, k == i ? on : k < i ? T_PAPER : T_CASE2);
+        } else aa_disc(buf, y0, h, x, y, k == i ? r : r - 1, k == i ? on : k < i ? rgb(255, 255, 255) : rgb(70, 70, 76));
+    }
+}
+
+// Field's corner brackets round a box (cx ± rx, cy ± ry), 14 px arms
+static void brackets(uint16_t *buf, int y0, int h, int cx, int cy, int rx, int ry, uint16_t c)
+{
+    for (int q = 0; q < 4; q++) {
+        int bx = cx + (q & 1 ? rx : -rx), by = cy + (q & 2 ? ry : -ry), sx = q & 1 ? -1 : 1, sy = q & 2 ? -1 : 1;
+        fill_rect(buf, y0, h, sx > 0 ? bx : bx - 13, by - (sy > 0 ? 0 : 1), sx > 0 ? bx + 14 : bx + 1, by + (sy > 0 ? 2 : 1), c);
+        fill_rect(buf, y0, h, bx - (sx > 0 ? 0 : 1), sy > 0 ? by : by - 13, bx + (sx > 0 ? 2 : 1), sy > 0 ? by + 14 : by + 1, c);
+    }
 }
 
 static void touch_cal_draw(uint16_t *buf, int y0, int h)
@@ -637,13 +690,37 @@ static void touch_cal_draw(uint16_t *buf, int y0, int h)
     int tx = cal_pts[cal_idx][0], ty = cal_pts[cal_idx][1];
     bool centre = cal_idx == 0;
     int top = centre ? 92 : CY - 70;                  // (the words sit clear of whichever dot is up)
+    int dy = centre ? 318 : CY + 34;
+    if (ui_field()) {                                 // a crosshair in brackets, the point to hit a white square
+        field_grid(buf, y0, h);
+        fill_rect(buf, y0, h, tx - 34, ty - 34, tx + 35, ty + 35, 0);
+        brackets(buf, y0, h, tx, ty, 30, 30, F_ORANGE);
+        fill_rect(buf, y0, h, tx - 20, ty - 1, tx - 8, ty + 1, F_ORANGE);
+        fill_rect(buf, y0, h, tx + 9, ty - 1, tx + 21, ty + 1, F_ORANGE);
+        fill_rect(buf, y0, h, tx - 1, ty - 20, tx + 1, ty - 8, F_ORANGE);
+        fill_rect(buf, y0, h, tx - 1, ty + 9, tx + 1, ty + 21, F_ORANGE);
+        aa_rrect(buf, y0, h, tx - 4, ty - 4, tx + 4, ty + 4, 1, white);
+        ftext_mid_up(buf, y0, h, CX, top + 4, &font_mono_l, "Touch calibration", white);
+        if (cal_retry && centre) ftext_mid_up(buf, y0, h, CX, top + 46, &font_mono_s, "That didn't line up. Try again.", F_YELLOW);
+        else ftext_mid_up(buf, y0, h, CX, top + 46, &font_mono_s, "Tap the middle of the cross", F_GREY);
+        step_row(buf, y0, h, dy, N_CAL_PTS, cal_idx, 18, 0, F_ORANGE);
+        ftext_mid_up(buf, y0, h, CX, dy + 22, &font_mono_s, "Press BOOT to cancel", F_DIM);
+        return;
+    }
+    if (ui_tiles()) {                                 // a yellow tile of a dot, the point to hit in black
+        ftext_mid(buf, y0, h, CX, top, &font_body, "Touch calibration", white);
+        if (cal_retry && centre) ftext_mid(buf, y0, h, CX, top + 46, &font_label, "That didn't line up. Try again.", T_ORANGE);
+        else ftext_mid(buf, y0, h, CX, top + 46, &font_label, "Tap the middle of the dot", T_GREY);
+        step_row(buf, y0, h, dy, N_CAL_PTS, cal_idx, 18, 0, T_YELLOW);
+        ftext_mid(buf, y0, h, CX, dy + 22, &font_small, "Press BOOT to cancel", T_GREY);
+        aa_disc(buf, y0, h, tx, ty, 26, T_YELLOW);
+        aa_disc(buf, y0, h, tx, ty, 5, T_INK);
+        return;
+    }
     ftext_mid(buf, y0, h, CX, top, &font_body, "Touch calibration", white);
     if (cal_retry && centre) ftext_mid(buf, y0, h, CX, top + 46, &font_label, "That didn't line up. Try again.", rgb(255, 159, 10));
     else ftext_mid(buf, y0, h, CX, top + 46, &font_label, "Tap the middle of the dot", grey);
-    int dy = centre ? 318 : CY + 34;
-    for (int i = 0; i < N_CAL_PTS; i++)
-        aa_disc(buf, y0, h, CX + (i - (N_CAL_PTS - 1) / 2.0f) * 18, dy, i == cal_idx ? 4.5f : 3.5f,
-                i == cal_idx ? blue : i < cal_idx ? white : rgb(70, 70, 76));
+    step_row(buf, y0, h, dy, N_CAL_PTS, cal_idx, 18, 4.5f, blue);
     ftext_mid(buf, y0, h, CX, dy + 22, &font_small, "Press BOOT to cancel", rgb(100, 100, 108));
     aa_disc(buf, y0, h, tx, ty, 34, rgb(8, 34, 64));    // halo
     aa_disc(buf, y0, h, tx, ty, 22, blue);              // ring
@@ -685,66 +762,111 @@ static void tilt_cal_draw(uint16_t *buf, int y0, int h)
 {
     const uint16_t white = rgb(255, 255, 255), blue = rgb(10, 132, 255), grey = rgb(150, 150, 158),
                    dim = rgb(70, 70, 76), green = rgb(48, 209, 88), orange = rgb(255, 159, 10);
+    bool fl = ui_field(), ti = ui_tiles();
+    uint16_t ac = fl ? F_ORANGE : ti ? T_SKY : blue, table_c = fl ? F_DIM : ti ? T_CASE2 : dim;
     const float ix = CX, iy = 186;                    // the picture's middle
+    int title_y = ti ? 282 : 274;
+    if (fl) field_grid(buf, y0, h);
+    if (fl) fill_rect(buf, y0, h, ix - 84, iy - 84, ix + 85, iy + 85, 0);
+    if (fl) brackets(buf, y0, h, ix, iy, 84, 84, F_DIM);
+    if (ti) aa_rrect(buf, y0, h, ix - 82, iy - 82, ix + 82, iy + 82, 34, T_CASE);   // (Tiles: the picture on a tile)
     if (tilt_step >= 7) {                             // done, or the positions didn't agree
         bool ok = tilt_step == 7;
-        aa_disc(buf, y0, h, ix, iy, 32, ok ? green : orange);
+        uint16_t c = ok ? (fl ? F_GREEN : ti ? T_SKY : green) : (fl ? F_YELLOW : ti ? T_ORANGE : orange), mark = ti ? T_INK : white;
+        if (fl) aa_rrect(buf, y0, h, ix - 32, iy - 32, ix + 32, iy + 32, 9, c);
+        else aa_disc(buf, y0, h, ix, iy, 32, c);
         if (ok) {
             const float chk[] = {ix - 13, iy + 1, ix - 4, iy + 10, ix + 14, iy - 9};
-            aa_path(buf, y0, h, chk, 3, false, 5.5f, white);
+            aa_path(buf, y0, h, chk, 3, false, 5.5f, mark);
         } else {
-            aa_rrect(buf, y0, h, ix - 3, iy - 17, ix + 3, iy + 4, 3, white);
-            aa_disc(buf, y0, h, ix, iy + 13, 3.8f, white);
+            aa_rrect(buf, y0, h, ix - 3, iy - 17, ix + 3, iy + 4, 3, mark);
+            aa_disc(buf, y0, h, ix, iy + 13, 3.8f, mark);
         }
-        ftext_mid(buf, y0, h, CX, 244, &font_body, ok ? "Tilt calibrated" : "Let's try again", white);
-        if (!ok) ftext_mid(buf, y0, h, CX, 288, &font_label, "The positions didn't agree", grey);
+        const char *t = ok ? "Tilt calibrated" : "Let's try again";
+        if (fl) ftext_mid_up(buf, y0, h, CX, 248, &font_mono_l, t, white);
+        else ftext_mid(buf, y0, h, CX, ti ? 282 : 244, &font_body, t, white);
+        if (!ok && fl) ftext_mid_up(buf, y0, h, CX, 292, &font_mono_s, "The positions didn't agree", F_GREY);
+        else if (!ok) ftext_mid(buf, y0, h, CX, ti ? 326 : 288, &font_label, "The positions didn't agree", ti ? T_GREY : grey);
         return;
     }
     static const char *title[] = {"Stand it upright", "Right edge down", "Upside down", "Left edge down",
                                   "Lay it flat", "Now face down"};
     int i = tilt_step - 1;
     float p = tilt_progress > 1 ? 1 : tilt_progress < 0 ? 0 : tilt_progress;   // held still for a second
-    ring(buf, y0, h, ix, iy, 66, p > 0.02f ? p : 0, 4, blue, rgb(44, 44, 48));
+    ring(buf, y0, h, ix, iy, 66, p > 0.02f ? p : 0, 4, ac, fl ? F_DIM : ti ? T_CASE2 : rgb(44, 44, 48));
     if (i < 4) {                                      // an arrow at the table: down, right, up, left
         static const float dir[4][2] = {{0, 1}, {1, 0}, {0, -1}, {-1, 0}};
         float vx = dir[i][0], vy = dir[i][1], px = -vy, py = vx;
         const float shaft[] = {ix - vx * 28, iy - vy * 28, ix + vx * 23, iy + vy * 23};
         const float head[] = {ix + vx * 6 + px * 18, iy + vy * 6 + py * 18, ix + vx * 24, iy + vy * 24,
                               ix + vx * 6 - px * 18, iy + vy * 6 - py * 18};
-        aa_path(buf, y0, h, shaft, 2, false, 7, blue);
-        aa_path(buf, y0, h, head, 3, false, 7, blue);
+        aa_path(buf, y0, h, shaft, 2, false, 7, ac);
+        aa_path(buf, y0, h, head, 3, false, 7, ac);
         const float table[] = {ix + vx * 38 + px * 30, iy + vy * 38 + py * 30, ix + vx * 38 - px * 30, iy + vy * 38 - py * 30};
-        aa_path(buf, y0, h, table, 2, false, 3, dim);
-    } else {                                          // the board side on, its glass (blue) up or down, on the table
+        aa_path(buf, y0, h, table, 2, false, 3, table_c);
+    } else {                                          // the board side on, its glass up or down, on the table
         bool up = i == 4;
-        aa_rrect(buf, y0, h, ix - 40, iy - 5, ix + 40, iy + 5, 3.5f, rgb(120, 120, 128));
-        aa_rrect(buf, y0, h, ix - 37, up ? iy - 7.5f : iy + 3.5f, ix + 37, up ? iy - 3.5f : iy + 7.5f, 2, blue);
+        aa_rrect(buf, y0, h, ix - 40, iy - 5, ix + 40, iy + 5, 3.5f, fl ? F_GREY : ti ? T_MIST : rgb(120, 120, 128));
+        aa_rrect(buf, y0, h, ix - 37, up ? iy - 7.5f : iy + 3.5f, ix + 37, up ? iy - 3.5f : iy + 7.5f, 2, ac);
         const float table[] = {ix - 50, iy + 16, ix + 50, iy + 16};
-        aa_path(buf, y0, h, table, 2, false, 3, dim);
+        aa_path(buf, y0, h, table, 2, false, 3, table_c);
     }
-    ftext_mid(buf, y0, h, CX, 274, &font_body, title[i], white);
-    for (int k = 0; k < TILT_POSES; k++)
-        aa_disc(buf, y0, h, CX + (k - (TILT_POSES - 1) / 2.0f) * 16, 334, k == i ? 4 : 3,
-                k == i ? blue : k < i ? white : dim);
-    ftext_mid(buf, y0, h, CX, 438, &font_small, "Press BOOT to cancel", rgb(80, 80, 88));
+    if (fl) {
+        ftext_mid_up(buf, y0, h, CX, title_y + 4, &font_mono_l, title[i], white);
+        step_row(buf, y0, h, 334, TILT_POSES, i, 16, 0, ac);
+        ftext_mid_up(buf, y0, h, CX, 438, &font_mono_s, "Press BOOT to cancel", F_DIM);
+        return;
+    }
+    ftext_mid(buf, y0, h, CX, title_y, &font_body, title[i], white);
+    step_row(buf, y0, h, ti ? 342 : 334, TILT_POSES, i, 16, 4, ac);
+    ftext_mid(buf, y0, h, CX, 438, &font_small, "Press BOOT to cancel", ti ? T_GREY : rgb(80, 80, 88));
 }
 
-// A firmware update coming in over Wi-Fi: a download mark, a bar, how far it's got
+// A firmware update coming in over Wi-Fi: a download mark, a bar, how far it's got. (Field: the mark on an orange key,
+// the bar in segments; Tiles: the mark on a light blue tile, a fat bar)
 static void ota_draw(uint16_t *buf, int y0, int h)
 {
     const uint16_t white = rgb(255, 255, 255), blue = rgb(10, 132, 255), grey = rgb(150, 150, 158);
     const float ix = CX, iy = 170;
+    int p = ota_progress();
+    char t[8];
+    snprintf(t, sizeof t, "%d%%", p);
+    if (ui_field() || ui_tiles()) {
+        bool fl = ui_field();
+        if (fl) field_grid(buf, y0, h);
+        aa_rrect(buf, y0, h, ix - 40, iy - 40, ix + 40, iy + 40, fl ? 9 : 26, fl ? F_ORANGE : T_SKY);
+        uint16_t mark = fl ? white : T_INK;
+        const float shaft[] = {ix, iy - 20, ix, iy + 16}, head[] = {ix - 15, iy + 2, ix, iy + 17, ix + 15, iy + 2};
+        aa_path(buf, y0, h, shaft, 2, false, 6, mark);
+        aa_path(buf, y0, h, head, 3, false, 6, mark);
+        if (fl) {
+            ftext_mid_up(buf, y0, h, CX, 240, &font_mono_l, "Updating", white);
+            ftext_mid_up(buf, y0, h, CX, 284, &font_mono_s, "Don't unplug Bobble", F_GREY);
+            const int n = 20, gap = 3;                // the bar: 20 segments, lit as it comes in
+            float sw = (240 - (n - 1) * gap) / (float)n;
+            int lit = p > 1 ? (p > 100 ? 100 : p) * n / 100 : 0;
+            for (int k = 0; k < n; k++) {
+                float x = CX - 120 + k * (sw + gap);
+                fill_rect(buf, y0, h, (int)x, 326, (int)(x + sw), 346, k < lit ? F_ORANGE : F_DIM);
+            }
+            ftext_mid(buf, y0, h, CX, 360, &font_mono, t, white);
+            return;
+        }
+        ftext_mid(buf, y0, h, CX, 236, &font_body, "Updating", white);
+        ftext_mid(buf, y0, h, CX, 280, &font_label, "Don't unplug Bobble", T_GREY);
+        aa_rrect(buf, y0, h, CX - 120, 326, CX + 120, 346, 10, T_CASE2);
+        if (p > 1) aa_rrect(buf, y0, h, CX - 120, 326, CX - 100 + 220 * (p > 100 ? 100 : p) / 100.0f, 346, 10, T_SKY);
+        ftext_mid(buf, y0, h, CX, 360, &font_body, t, white);
+        return;
+    }
     aa_disc(buf, y0, h, ix, iy, 40, blue);
     const float shaft[] = {ix, iy - 20, ix, iy + 16}, head[] = {ix - 15, iy + 2, ix, iy + 17, ix + 15, iy + 2};
     aa_path(buf, y0, h, shaft, 2, false, 6, white);
     aa_path(buf, y0, h, head, 3, false, 6, white);
     ftext_mid(buf, y0, h, CX, 236, &font_body, "Updating", white);
     ftext_mid(buf, y0, h, CX, 280, &font_label, "Don't unplug Bobble", grey);
-    int p = ota_progress();
     aa_rrect(buf, y0, h, CX - 120, 334, CX + 120, 342, 4, rgb(58, 58, 64));
     if (p > 1) aa_rrect(buf, y0, h, CX - 120, 334, CX - 120 + 240 * (p > 100 ? 100 : p) / 100.0f, 342, 4, blue);
-    char t[8];
-    snprintf(t, sizeof t, "%d%%", p);
     ftext_mid(buf, y0, h, CX, 356, &font_label, t, grey);
 }
 
@@ -884,23 +1006,25 @@ static void draw_overlay(uint16_t *buf, int y0, int h)
     if (ota_progress() >= 0) {                        // firmware update in progress
         ota_draw(buf, y0, h);
         return;
-        char p[24];
-        snprintf(p, sizeof p, "%d%%", ota_progress());
-        text_c(buf, y0, h, 180, 3, "Updating", rgb(255, 255, 255));
-        text_c(buf, y0, h, 222, 3, p, rgb(0, 230, 200));
-        fill_rect(buf, y0, h, CX - 120, 270, CX + 120, 280, rgb(70, 70, 90));
-        fill_rect(buf, y0, h, CX - 120, 270, CX - 120 + 240 * ota_progress() / 100, 280, rgb(0, 230, 200));
-        text_c(buf, y0, h, 300, 1, "don't unplug", rgb(140, 140, 160));
-        return;
     }
     if (show_empty) {
-        const uint16_t red = rgb(255, 69, 58);
-        aa_rrect(buf, y0, h, CX - 58, 150, CX + 50, 208, 14, red);           // an empty battery: outline,
-        aa_rrect(buf, y0, h, CX - 53, 155, CX + 45, 203, 10, rgb(0, 0, 0));
-        aa_rrect(buf, y0, h, CX - 47, 161, CX - 35, 197, 5, red);            // the last sliver,
-        aa_rrect(buf, y0, h, CX + 54, 168, CX + 62, 190, 4, red);            // and its tip
-        ftext_mid(buf, y0, h, CX, 246, &font_body, "Battery empty", rgb(255, 255, 255));
-        ftext_mid(buf, y0, h, CX, 292, &font_label, "Plug in to charge", rgb(150, 150, 158));
+        bool fl = ui_field(), ti = ui_tiles();
+        // an empty battery: outline, the last sliver and its tip (Field: square-cornered; Tiles: black on a red tile)
+        uint16_t red = fl ? F_RED : ti ? T_INK : rgb(255, 69, 58), in = ti ? T_RED : rgb(0, 0, 0);
+        float r = fl ? 4 : 14;
+        if (fl) field_grid(buf, y0, h);
+        if (ti) aa_rrect(buf, y0, h, CX - 96, 118, CX + 96, 240, 30, T_RED);
+        aa_rrect(buf, y0, h, CX - 58, 150, CX + 50, 208, r, red);
+        aa_rrect(buf, y0, h, CX - 53, 155, CX + 45, 203, r - 4, in);
+        aa_rrect(buf, y0, h, CX - 47, 161, CX - 35, 197, fl ? 1 : 5, red);
+        aa_rrect(buf, y0, h, CX + 54, 168, CX + 62, 190, fl ? 1 : 4, red);
+        if (fl) {
+            ftext_mid_up(buf, y0, h, CX, 250, &font_mono_l, "Battery empty", rgb(255, 255, 255));
+            ftext_mid_up(buf, y0, h, CX, 296, &font_mono_s, "Plug in to charge", F_GREY);
+        } else {
+            ftext_mid(buf, y0, h, CX, ti ? 262 : 246, &font_body, "Battery empty", rgb(255, 255, 255));
+            ftext_mid(buf, y0, h, CX, ti ? 308 : 292, &font_label, "Plug in to charge", ti ? T_GREY : rgb(150, 150, 158));
+        }
         return;
     }
     if (calibrating) { touch_cal_draw(buf, y0, h); return; }

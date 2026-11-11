@@ -1,6 +1,7 @@
 #include <math.h>
 #include "boot_ui.h"
 #include "gfx.h"
+#include "screen.h"
 
 #define N_SHAPES 5
 #define R 54.0f                           // the shapes' size (their outlines are about 0.75..1.2 of it)
@@ -23,7 +24,13 @@ static float shape(int k, float th)
     }
 }
 
-static const uint8_t cols[4][3] = {{66, 133, 244}, {234, 67, 53}, {251, 188, 4}, {52, 168, 83}};   // blue red yellow green
+// the colours it goes through, in each look: Classic blue red yellow green; Field's orange blue yellow red; Tiles' light
+// blue orange yellow red
+static const uint8_t cols[N_LOOKS][4][3] = {
+    [LOOK_CLASSIC] = {{66, 133, 244}, {234, 67, 53}, {251, 188, 4}, {52, 168, 83}},
+    [LOOK_FIELD] = {{255, 102, 26}, {36, 130, 255}, {255, 204, 0}, {255, 59, 48}},
+    [LOOK_TILES] = {{112, 182, 252}, {248, 150, 50}, {250, 222, 62}, {242, 76, 46}},
+};
 
 static float ease(float p)                // ease out with a little overshoot (as a spring would)
 {
@@ -53,7 +60,8 @@ void boot_ui_frame(float t, float a)
     p = p < 0 ? 0 : p / MORPH;
     float e = ease(p), ec = e < 0 ? 0 : e > 1 ? 1 : e;
     int from = i % N_SHAPES, to = (i + 1) % N_SHAPES;
-    const uint8_t *c0 = cols[i % 4], *c1 = cols[(i + 1) % 4];
+    int look = ui_look();
+    const uint8_t *c0 = cols[look][i % 4], *c1 = cols[look][(i + 1) % 4];
     f_r = c0[0] + (int)((c1[0] - c0[0]) * ec);
     f_g = c0[1] + (int)((c1[1] - c0[1]) * ec);
     f_b = c0[2] + (int)((c1[2] - c0[2]) * ec);
@@ -106,8 +114,13 @@ void boot_ui_draw(uint16_t *buf, int y0, int h, const char *what)
         }
     }
 
-    if (what && a > 0.05f) {
-        int v = (int)(150 * a), tw = ftext_width(&font_label, what);
-        draw_ftext(buf, y0, h, CX - tw / 2, CY + 104, &font_label, what, rgb(v, v, v + 10));
+    if (what && a > 0.05f) {                           // (Field: in mono capitals)
+        int v = (int)(150 * a);
+        char u[64];
+        const font_t *f = ui_field() ? &font_mono_s : &font_label;
+        size_t i = 0;
+        for (; what[i] && i + 1 < sizeof u; i++) u[i] = ui_field() && what[i] >= 'a' && what[i] <= 'z' ? what[i] - 32 : what[i];
+        u[i] = 0;
+        draw_ftext(buf, y0, h, CX - ftext_width(f, u) / 2, CY + 104, f, u, rgb(v, v, v + 10));
     }
 }
