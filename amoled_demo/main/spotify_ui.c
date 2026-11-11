@@ -24,7 +24,7 @@
 #define RING_IN 220
 #define RING_OUT 229
 
-enum { ID_NONE, ID_PREV, ID_PLAY, ID_NEXT, ID_VDOWN, ID_VUP, ID_VOL };   // ID_VOL: the Tiles look's volume tile
+enum { ID_NONE, ID_PREV, ID_PLAY, ID_NEXT, ID_VDOWN, ID_VUP, ID_VOL };   // ID_VOL: the volume (slider, tile or knob)
 typedef struct { int x0, y0, x1, y1, id; } btn_t;
 #define CTRL_Y 442
 #define BAR_Y 398
@@ -62,10 +62,14 @@ static spotify_state_t s;
 static float progress;                 // 0..1 for the ring
 static bool down;
 static int press_id, press_x, press_y;
-// The Tiles look's volume tile, dragged up and down: the volume as the finger has it, until Spotify's catches up
+// The volume (Classic's slider, the Tiles tile, the Field knob), dragged up and down: the volume as the finger has it,
+// until Spotify's catches up. A tap mutes it, and another brings it back.
 static int drag_vol = -1, drag_from, drag_moved;   // drag_moved: the furthest the finger's gone up or down
 static int64_t drag_until;             // (shown this long after letting go)
-static int unmute_vol = -1;            // the Field knob, tapped to mute: the volume a second tap brings back
+static int unmute_vol = -1;            // muted by a tap: the volume a second tap brings back
+// Classic's volume: a slider like the control panel's, beside the cover
+#define C_VOL_X0 (ART_X + ART_SZ + 18)
+#define C_VOL_X1 (C_VOL_X0 + 54)
 static int shown_volume(void) { return drag_vol >= 0 ? drag_vol : s.volume; }
 
 // Spotify titles can contain non-ASCII; keep what the font can show
@@ -162,11 +166,30 @@ static void draw_square_idle(uint16_t *buf, int y0, int h)
     if (s.note[0]) ftext_c(buf, y0, h, LOGO_Y + LOGO_R + 152, &font_small, s.note, C_NOTE);
 }
 
+static void tiles_speaker(uint16_t *buf, int y0, int h, float cx, float cy, int waves, uint16_t c);
+
 static void draw_square(uint16_t *buf, int y0, int h)
 {
     char line[96], l1[96];
     if (!spotify_art(&(uint32_t){0}))                   // cover still loading: a grey tile where it goes
         fill_rrect(buf, y0, h, ART_X, ART_Y, ART_X + ART_SZ, ART_Y + ART_SZ, 18, rgb(28, 28, 32));
+
+    // the volume: a slider like the control panel's, lit from the bottom (drag it; a tap mutes)
+    int vol = shown_volume();
+    if (vol >= 0) {
+        const uint16_t mod = pressed(ID_VOL) ? rgb(58, 58, 64) : rgb(36, 36, 40);
+        aa_rrect(buf, y0, h, C_VOL_X0, ART_Y, C_VOL_X1, ART_Y + ART_SZ, 22, mod);
+        float fy = ART_Y + ART_SZ - ART_SZ * (vol > 100 ? 100 : vol) / 100.0f, vy = ART_Y + ART_SZ - 30;
+        if (ART_Y + ART_SZ - fy >= 2) {
+            int ct, cb;
+            gfx_get_clip(&ct, &cb);
+            gfx_clip((int)fy > ct ? (int)fy : ct, cb);
+            aa_rrect(buf, y0, h, C_VOL_X0, ART_Y, C_VOL_X1, ART_Y + ART_SZ, 22, rgb(228, 228, 234));
+            gfx_clip(ct, cb);
+        }
+        tiles_speaker(buf, y0, h, (C_VOL_X0 + C_VOL_X1) / 2.0f - 4, vy, vol == 0 ? -1 : vol < 50 ? 1 : 2,
+                      vy - 12 > fy ? rgb(36, 36, 40) : C_WHITE);
+    }
 
     strlcpy(line, s.title, sizeof line);
     ascii(line);
@@ -404,11 +427,12 @@ static void tiles_level(uint16_t *buf, int y0, int h, float x0, float x1, float 
     gfx_clip(ct, cb);
 }
 
-// a speaker with waves (none when silent)
+// a speaker with waves (none when silent; -1: muted, crossed out)
 static void tiles_speaker(uint16_t *buf, int y0, int h, float cx, float cy, int waves, uint16_t c)
 {
-    static const float cone[] = {3, 9, 7, 9, 12, 4.5f, 12, 19.5f, 7, 15, 3, 15};
+    static const float cone[] = {3, 9, 7, 9, 12, 4.5f, 12, 19.5f, 7, 15, 3, 15}, slash[] = {2, 2, 22, 22};
     aa_icon(buf, y0, h, cx, cy, 24, cone, 6, true, 2, c);
+    if (waves < 0) aa_icon(buf, y0, h, cx + 2, cy, 24, slash, 2, false, 2, c);
     for (int k = 1; k <= waves; k++) {
         float p[2 * 8], r = 4.5f + 4.5f * k;
         for (int i = 0; i < 8; i++) {
@@ -452,7 +476,7 @@ static void draw_tiles(uint16_t *buf, int y0, int h)
     float vx = ART_X + ART_SZ + 10 + T_SIDE / 2.0f, vy = ART_Y + ART_SZ - 32, vtop = ART_Y + ART_SZ * (1 - vol / 100.0f);
     tiles_level(buf, y0, h, ART_X + ART_SZ + 10, ART_X + ART_SZ + 10 + T_SIDE, vol >= 0 ? vol / 100.0f : 0,
                 pressed(ID_VOL) ? tile_hot(T_SKY) : T_SKY);
-    tiles_speaker(buf, y0, h, vx - 4, vy, vol == 0 ? 0 : vol < 50 ? 1 : 2, vol >= 0 && vy > vtop ? T_INK : C_WHITE);
+    tiles_speaker(buf, y0, h, vx - 4, vy, vol == 0 ? -1 : vol < 50 ? 1 : 2, vol >= 0 && vy > vtop ? T_INK : C_WHITE);
     if (vol >= 0) {
         snprintf(line, sizeof line, "%d", vol);
         float ny = ART_Y + 26;
@@ -537,6 +561,8 @@ static int hit(int x, int y)
     if (ui_field() && s.volume >= 0 && hypotf(x - F_KNOB_X, y - F_CTRL_Y) < F_KNOB_R + 22) return ID_VOL;
     if (ui_tiles() && s.volume >= 0 && x >= ART_X + ART_SZ + 4 && x < ART_X + ART_SZ + 16 + T_SIDE && y >= ART_Y - 8 &&
         y < ART_Y + ART_SZ + 8) return ID_VOL;
+    if (!ui_field() && !ui_tiles() && s.volume >= 0 && x >= C_VOL_X0 - 10 && x < C_VOL_X1 + 20 && y >= ART_Y - 8 &&
+        y < ART_Y + ART_SZ + 8) return ID_VOL;
     for (int i = 0; i < NBTN; i++) {
         if (i >= 3 && s.volume < 0) break;
         if (x >= b[i].x0 - 6 && x < b[i].x1 + 6 && y >= b[i].y0 - 8 && y < b[i].y1 + 10) return b[i].id;
@@ -579,10 +605,7 @@ void spotify_ui_update(int tx, int ty, int64_t now_us)
     } else if (down) {
         down = false;
         if (press_id == ID_VOL) {
-            if (drag_moved <= 8 && ui_tiles()) {       // a tap on the tile: to where it was tapped
-                int v = (ART_Y + ART_SZ - press_y) * 100 / ART_SZ;
-                drag_vol = v < 0 ? 0 : v > 100 ? 100 : v;
-            } else if (drag_moved <= 8 && ui_field()) {   // a tap on the knob: mute, and again to unmute
+            if (drag_moved <= 8) {                     // a tap: mute, and again to unmute
                 if (drag_from > 0) { unmute_vol = drag_from; drag_vol = 0; }
                 else drag_vol = unmute_vol > 0 ? unmute_vol : 30;
             }
@@ -609,13 +632,13 @@ bool spotify_ui_dirty(void)
     static uint32_t seen_art;
     static int seen_sec = -1;
     static bool seen_playing;
-    static int seen_vol;                               // (the Tiles look shows it)
+    static int seen_vol;
     static char seen_title[96];
     uint32_t ver;
     spotify_art(&ver);
     int sec = (int)(progress * s.duration_ms / 1000);
     bool d = ver != seen_art || sec != seen_sec || s.playing != seen_playing || strcmp(seen_title, s.title) ||
-             ((ui_tiles() || ui_field()) && shown_volume() != seen_vol);
+             shown_volume() != seen_vol;
     seen_art = ver;
     seen_sec = sec;
     seen_playing = s.playing;
