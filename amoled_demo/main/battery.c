@@ -117,7 +117,7 @@ static int below_max;                 // highest reading while below the shown %
 
 // Flash writes pause both cores' access to PSRAM for a moment, which would show as a hitch if done here on the
 // render loop: keep a copy and let a small background task write it
-#define N_SLOTS 6                     // one for each key: bsag, boff, bcurve, blog, blast, bsot
+#define N_SLOTS 7                     // one for each key: bsag, boff, bcurve, blog, blast, bsot, btop
 EXT_RAM_BSS_ATTR static struct { const char *key; uint8_t data[sizeof lg]; size_t len; bool pending, erase; } slots[N_SLOTS];
 static SemaphoreHandle_t slot_lock;
 static TaskHandle_t writer;
@@ -414,6 +414,7 @@ static void sag_sample(float raw, int64_t now)
 }
 
 static void diag_refresh(int64_t now);
+static void top_tick(int64_t now);
 
 static void sot_tick(int64_t now, bool first)
 {
@@ -445,6 +446,7 @@ void battery_update(void)
     int64_t now = esp_timer_get_time();
     if (!ok || now - last < 500000) return;
     diag_refresh(now);
+    top_tick(now);
     bool first = last == 0;
     sot_tick(now, first);                             // (before usb_prev and last move on)
     last = now;
@@ -567,6 +569,58 @@ int battery_set_charge_ma(int ma)
 #endif
 }
 
+// ---------------------------------------------------------------- topping up
+// The last stretch of a charge: the charger holds the cell at full while its current tapers off. The power chip can't
+// measure that current, so the voltage (less the charger offset at full current) stalls near 80% to the end. The %
+// climbs by time instead, from where it was to 99 over as long as topping up took the last times (learned from
+// Topping up to Full, NVS "btop"; 40 min until one's been seen). A blip out of it for under a minute doesn't start over.
+#define TOP_MAGIC 0x70B0F001
+static struct { uint32_t magic; float min; uint8_t n; } top = {TOP_MAGIC, 40, 0};
+static int64_t top_at, top_out;      // when topping up started (0: it isn't); since when it's been out of it
+static int top_from;                 // the % then
+
+static void top_tick(int64_t now)
+{
+    static bool loaded;
+    if (!loaded) {
+        loaded = true;
+        typeof(top) t;
+        if (nvs_get("btop", &t, sizeof t) && t.magic == TOP_MAGIC && t.min > 5 && t.min < 300) top = t;
+    }
+    if (!plugged_in()) { top_at = 0; return; }
+    if (diag.stage == 3) {
+        if (!top_at) {
+            top_at = now;
+            top_from = shown >= 0 ? shown : 0;
+            ESP_LOGI(TAG, "topping up from %d%%: to 99%% over %.0f min", top_from, top.min);
+        }
+        top_out = 0;
+        return;
+    }
+    if (!top_at) return;
+    if (diag.stage == 4) {                            // Full: how long that took
+        float m = (now - top_at) / 60e6f;
+        if (m > 5 && m < 300 && top_from < 95) {
+            int w = top.n > 3 ? 3 : top.n;            // (newer charges count more, as the cell ages)
+            top.min = (top.min * w + m) / (w + 1);
+            if (top.n < 255) top.n++;
+            nvs_put("btop", &top, sizeof top);
+            ESP_LOGI(TAG, "topped up in %.0f min: %.0f min learned (%d charges)", m, top.min, top.n);
+        }
+        top_at = 0;
+        return;
+    }
+    if (!top_out) top_out = now;
+    else if (now - top_out > 60000000) top_at = 0;
+}
+
+static int top_pct(int64_t now)
+{
+    if (!top_at) return -1;
+    float t = (now - top_at) / (top.min * 60e6f);
+    return top_from + (int)((99 - top_from) * (t > 1 ? 1 : t));
+}
+
 const char *battery_state_text(const battery_diag_t *d)
 {
     if (!d->battery) return d->usb ? "No battery found" : "No battery";
@@ -627,21 +681,13 @@ int battery_percent(void)
     int g = diag.gauge_pct;
     if (!compared_at || now - compared_at > 600000000) {
         compared_at = now;
-        ESP_LOGI(TAG, "%.2f V: gauge %d%%, curve %d%% (%d runs)", volts, g, p, curve_runs);
+        ESP_LOGI(TAG, "%.2f V: gauge %d%%, curve %d%% (%d runs), charger %s, top-up %d%% (%.0f min learned)", volts, g, p,
+                 curve_runs, battery_stage_text(diag.stage), top_pct(now), top.min);
     }
     if (g >= 0 && !curve_runs) p = g;
-    // Topping up (the charger holding the cell at full while its current tapers off): the charger offset above is
-    // the one at full current, and the chip can't measure the current, so p stalled near 80% to the end. Instead it
-    // climbs from where it was to 99 over about 40 minutes; Full is 100.
-    static int64_t topup_at;
-    static int topup_from;
-    if (battery_charging() && diag.stage == 3) {
-        if (!topup_at) { topup_at = now; topup_from = shown >= 0 ? shown : p; }
-        float t = (now - topup_at) / 2.4e9f;
-        int r = topup_from + (int)((99 - topup_from) * (t > 1 ? 1 : t));
-        if (r > p) p = r;
-    } else topup_at = 0;
-    if (diag.stage == 4) p = 100;
+    int r = top_pct(now);                              // topping up: by time (see top_tick); Full is 100
+    if (r > p) p = r;
+    if (diag.stage == 4 && plugged_in()) p = 100;
 #endif
     if (shown < 0 || battery_charging()) { shown = p; below_since = above_since = 0; return shown; }
     // on battery: drop once the reading has stayed lower for 20 s (to the best of it, so Wi-Fi blips don't count);
