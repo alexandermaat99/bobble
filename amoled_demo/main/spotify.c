@@ -569,6 +569,7 @@ static void assign_thumbs(int n, const char *const *url, int16_t *const *slot, c
 {
     if (!thumbs && !SCREEN_ROUND) thumbs = heap_caps_calloc(MAX_THUMBS, sizeof *thumbs, MALLOC_CAP_SPIRAM);
     bool used[MAX_THUMBS];
+    int kept = 0, fresh = 0, dropped = 0;             // (for the log: why covers went missing)
     memcpy(used, keep, sizeof used);
     for (int i = 0; i < n; i++) {
         *slot[i] = -1;
@@ -577,6 +578,7 @@ static void assign_thumbs(int n, const char *const *url, int16_t *const *slot, c
                 *slot[i] = k;
                 used[k] = true;
                 thumbs[k].tried = false;              // (one that failed gets another go)
+                kept += thumbs[k].ok;
                 break;
             }
     }
@@ -586,11 +588,14 @@ static void assign_thumbs(int n, const char *const *url, int16_t *const *slot, c
         for (int e = 0; e < MAX_THUMBS && k < 0; e++) if (!used[e] && !thumbs[e].url[0]) k = e;
         for (int e = 0; e < MAX_THUMBS && k < 0; e++) if (!used[e]) k = e;
         if (k < 0) break;
+        if (thumbs[k].ok) { dropped++; ESP_LOGI(TAG, "library covers: dropped %.80s", url_path(thumbs[k].url)); }
         thumbs[k].ok = thumbs[k].tried = false;
         strlcpy(thumbs[k].url, url[i], URL_LEN);
         *slot[i] = k;
         used[k] = true;
+        fresh++;
     }
+    if (fresh || dropped) ESP_LOGI(TAG, "library covers: %d kept, %d new, %d dropped", kept, fresh, dropped);
 }
 
 // Download into jpg over a kept-open connection (the covers mostly come from one host): its length, or -1
@@ -662,7 +667,9 @@ static void load_thumbs(int64_t budget_us)
         if (k < 0 || k >= MAX_THUMBS) continue;
         thumb_t *t = &thumbs[k];
         if (!t->url[0] || t->ok || t->tried) continue;
-        if (uxQueueMessagesWaiting(cmds) || esp_timer_get_time() - t0 > budget_us || !jpeg_bufs()) {
+        bool give_way = uxQueueMessagesWaiting(cmds) || esp_timer_get_time() - t0 > budget_us;
+        if (give_way || !jpeg_bufs()) {
+            if (!give_way) ESP_LOGW(TAG, "library covers: no memory for the JPEG decoder");
             busy_us += esp_timer_get_time() - t0;
             return;
         }
