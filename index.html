@@ -1,0 +1,82 @@
+<!doctype html>
+<!-- The Bobble setup page (GitHub Pages, gh-pages branch): flashes a new Bobble from the browser with ESP Web Tools.
+     agent_bridge/build_app.sh --release publishes it with that release's firmware and a manifest.json beside it. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Set Up a Bobble</title>
+<script type="module" src="https://unpkg.com/esp-web-tools@10.1.1/dist/web/install-button.js?module"></script>
+<style>
+  :root {
+    --bg: #f6f5f2; --card: #ffffff; --text: #1d1d1f; --muted: #6e6e73; --line: #e4e2dd; --accent: #e8735a; --accent-text: #fff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) { --bg: #0d0d0f; --card: #18181b; --text: #f2f2f4; --muted: #9a9aa2; --line: #2a2a30; }
+  }
+  :root[data-theme="dark"] { --bg: #0d0d0f; --card: #18181b; --text: #f2f2f4; --muted: #9a9aa2; --line: #2a2a30; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Inter", system-ui, sans-serif; }
+  main { max-width: 560px; margin: 0 auto; padding: 48px 16px 64px; }
+  .face { width: 64px; height: 64px; border-radius: 50%; background: var(--accent); display: flex; gap: 10px; align-items: center; justify-content: center; margin-bottom: 20px; }
+  .face i { width: 9px; height: 20px; border-radius: 5px; background: #fff; display: block; }
+  h1 { font-size: 30px; line-height: 1.2; margin: 0 0 8px; letter-spacing: -0.01em; }
+  .lede { color: var(--muted); margin: 0 0 32px; }
+  ol { list-style: none; padding: 0; margin: 0; counter-reset: step; }
+  li { counter-increment: step; background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 18px 20px 18px 60px; margin-bottom: 12px; position: relative; }
+  li::before { content: counter(step); position: absolute; left: 20px; top: 18px; width: 26px; height: 26px; border-radius: 50%; background: var(--line); color: var(--text); font-weight: 600; font-size: 14px; display: flex; align-items: center; justify-content: center; }
+  li b { display: block; margin-bottom: 2px; }
+  li p { margin: 0; color: var(--muted); font-size: 15px; }
+  .install { margin-top: 14px; }
+  esp-web-install-button button[slot="activate"], .btn {
+    font: inherit; font-weight: 600; background: var(--accent); color: var(--accent-text); border: 0; border-radius: 10px; padding: 10px 18px; cursor: pointer; text-decoration: none; display: inline-block;
+  }
+  .note { font-size: 14px; color: var(--muted); margin-top: 10px; }
+  code { font: 14px ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--line); padding: 1px 5px; border-radius: 5px; }
+  footer { margin-top: 32px; font-size: 14px; color: var(--muted); }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<main>
+  <div class="face" aria-hidden="true"><i></i><i></i></div>
+  <h1>Set up a Bobble</h1>
+  <p class="lede">Put the Bobble software on a new display from this page, then connect it to your Mac. Version <span id="ver">…</span>.</p>
+  <ol>
+    <li>
+      <b>Plug the Bobble into this computer</b>
+      <p>Use a USB-C cable that carries data, not just power. Use Chrome, Edge or Arc on a computer: Safari and phones can't do this step.</p>
+    </li>
+    <li>
+      <b>Install the software</b>
+      <p>Choose the Bobble's port (usually "USB JTAG/serial debug unit"). For a new Bobble, or one changing hands, say yes to erasing it.</p>
+      <div class="install">
+        <esp-web-install-button manifest="manifest.json">
+          <button slot="activate">Install Bobble</button>
+          <span slot="unsupported">This browser can't reach USB devices. Open this page in Chrome or Edge on a computer.</span>
+          <span slot="not-allowed">This page needs to be opened over https.</span>
+        </esp-web-install-button>
+      </div>
+      <p class="note">It takes about a minute. The Bobble restarts by itself when it's done.</p>
+    </li>
+    <li>
+      <b>Get it online</b>
+      <p>Tap the bubble on the Bobble's screen and scan the code with your phone, then pick your Wi-Fi.</p>
+    </li>
+    <li>
+      <b>Connect your Mac</b>
+      <p>Get the Bobble app, open it (the first time: System Settings › Privacy &amp; Security › Open Anyway), choose <b style="display:inline">Pair with Display…</b> from its menu, and type the code your Bobble shows.</p>
+      <div class="install"><a class="btn" href="https://github.com/alexandermaat99/bobble/releases/latest/download/Bobble.zip">Download the Mac app</a></div>
+    </li>
+  </ol>
+  <footer>
+    After this, the Mac app keeps itself and the Bobble up to date.
+    No browser handy? With the Bobble plugged in, run <code>./flash_new.sh</code> from <a href="https://github.com/alexandermaat99/bobble">the repo</a>'s <code>amoled_demo</code> folder.
+  </footer>
+</main>
+<script>
+  fetch("manifest.json").then(r => r.json()).then(m => { document.getElementById("ver").textContent = m.version; })
+    .catch(() => { document.getElementById("ver").textContent = "latest"; });
+</script>
+</body>
+</html>
