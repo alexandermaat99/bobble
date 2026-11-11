@@ -102,25 +102,31 @@ static esp_err_t get_battery(httpd_req_t *req)
     return httpd_resp_sendstr(req, out);
 }
 
-// GET /battery/run: the last discharge run (kept until the next one ends), {"step_min": 8, "mv": [4149, ...]} from full.
+// GET /battery/run: the last discharge run (kept until the next one ends), {"step_min": 8, "mv": [4149, ...], "gauge":
+// [100, ...]} from full (the fuel gauge's % beside each reading; null where none was kept).
 // POST /battery/run with the same: learn from it (a run recorded before, e.g. one that wasn't learned from)
 static esp_err_t get_run(httpd_req_t *req)
 {
     if (!token_ok(req)) return ESP_OK;
     enum { MAX = 240 };
     uint16_t *mv = heap_caps_malloc(MAX * sizeof *mv, MALLOC_CAP_SPIRAM);
-    char *out = heap_caps_malloc(MAX * 6 + 64, MALLOC_CAP_SPIRAM);
-    int step = 0, n = mv && out ? battery_last_run(mv, MAX, &step) : 0;
+    uint8_t *gauge = heap_caps_malloc(MAX, MALLOC_CAP_SPIRAM);
+    char *out = heap_caps_malloc(MAX * 11 + 64, MALLOC_CAP_SPIRAM);
+    int step = 0, n = mv && gauge && out ? battery_last_run(mv, gauge, MAX, &step) : 0;
     esp_err_t r;
     if (!n) r = httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "no run kept");
     else {
         int o = snprintf(out, 64, "{\"step_min\":%d,\"mv\":[", step);
         for (int i = 0; i < n; i++) o += snprintf(out + o, 8, "%s%d", i ? "," : "", mv[i]);
+        o += snprintf(out + o, 16, "],\"gauge\":[");      // (the fuel gauge's % beside each; null: none)
+        for (int i = 0; i < n; i++)
+            o += gauge[i] > 100 ? snprintf(out + o, 8, "%snull", i ? "," : "") : snprintf(out + o, 8, "%s%d", i ? "," : "", gauge[i]);
         strcpy(out + o, "]}\n");
         httpd_resp_set_type(req, "application/json");
         r = httpd_resp_sendstr(req, out);
     }
     heap_caps_free(mv);
+    heap_caps_free(gauge);
     heap_caps_free(out);
     return r;
 }

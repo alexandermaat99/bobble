@@ -19,7 +19,7 @@ float battery_empty_volts(void);  // where 0% is
 float battery_read_now(void);     // one immediate reading (no smoothing), for the check at power-up
 // The last discharge run (learned from or not; kept until the next one ends): its readings, one every step_min
 // minutes from full. 0: none kept.
-int battery_last_run(uint16_t *mv, int max, int *step_min);
+int battery_last_run(uint16_t *mv, uint8_t *gauge, int max, int *step_min);   // (gauge: the fuel gauge's %, 255 none; or NULL)
 // Learn from a run recorded earlier (as battery_last_run gives it): done shortly, between runs. false: not a run
 // (too long, readings out of range) or one is already waiting.
 bool battery_teach_run(const uint16_t *mv, int n, int step_min);
