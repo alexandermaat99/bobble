@@ -21,7 +21,7 @@ For scripts and previews:
 
     tools/glass.py out.png [port]          # what's on the glass, as a PNG
     tools/swipe.py 400 233 60 233          # drag a finger (the same point twice: a tap)
-    curl -X POST 'localhost:8466/sim/input?boot=1'    # also tilt=<degrees>, flat=1, touch=x,y / touch=up
+    curl -X POST 'localhost:8466/sim/input?boot=1'    # also tilt=<degrees>, flat=1, touch=x,y / touch=up, battery=<mV>&usb=1
 
 Logs go to stdout: run `~/Applications/Bobble\ Square.app/Contents/MacOS/BobbleSquare` from a terminal, or read `/log`
 as for the board. Saved data: `~/Library/Application Support/BobbleSquare/nvs.bin`, next to its `port` file.

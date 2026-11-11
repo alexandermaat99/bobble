@@ -292,13 +292,15 @@ const esp_partition_t *esp_ota_get_next_update_partition(const esp_partition_t *
 const esp_partition_t *esp_ota_get_running_partition(void) { return &slot; }
 esp_err_t esp_ota_get_state_partition(const esp_partition_t *p, esp_ota_img_states_t *st) { *st = ESP_OTA_IMG_VALID; return ESP_OK; }
 esp_err_t esp_ota_mark_app_valid_cancel_rollback(void) { return ESP_OK; }
-esp_err_t esp_ota_begin(const esp_partition_t *p, size_t size, esp_ota_handle_t *out)
+// An update sent to it comes in (so the Updating screen shows, as on the board) and is then turned down: the emulator
+// runs the firmware it was built with (rebuild it instead)
+esp_err_t esp_ota_begin(const esp_partition_t *p, size_t size, esp_ota_handle_t *out) { *out = 1; return ESP_OK; }
+esp_err_t esp_ota_write(esp_ota_handle_t h, const void *d, size_t n) { return ESP_OK; }
+esp_err_t esp_ota_end(esp_ota_handle_t h)
 {
     ESP_LOGW("sim", "an update was sent: the emulator runs the firmware it was built with (rebuild it instead)");
     return ESP_ERR_NOT_SUPPORTED;
 }
-esp_err_t esp_ota_write(esp_ota_handle_t h, const void *d, size_t n) { return ESP_ERR_NOT_SUPPORTED; }
-esp_err_t esp_ota_end(esp_ota_handle_t h) { return ESP_ERR_NOT_SUPPORTED; }
 esp_err_t esp_ota_abort(esp_ota_handle_t h) { return ESP_OK; }
 esp_err_t esp_ota_set_boot_partition(const esp_partition_t *p) { return ESP_ERR_NOT_SUPPORTED; }
 

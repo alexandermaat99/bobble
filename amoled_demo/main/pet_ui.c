@@ -23,6 +23,7 @@
 #include "icons_ui.h"
 #include "sprites_ui.h"
 #include "screen.h"
+#include "tiles.h"
 
 #define EYE_GAP 88          // eye centres sit this far either side of the middle
 #define EYE_D   124         // eye diameter
@@ -1338,13 +1339,30 @@ static void draw_bubble(uint16_t *buf, int y0, int h)
 }
 
 // Pairing with the Mac: a card over everything with the code to type into Agent Bridge, then "Paired" for a moment
+// Field's words, in capitals, centred on cx
+static void mono_mid(uint16_t *buf, int y0, int h, int cx, int y, const font_t *f, const char *t, uint16_t col)
+{
+    char u[64];
+    size_t i = 0;
+    for (; t[i] && i + 1 < sizeof u; i++) u[i] = t[i] >= 'a' && t[i] <= 'z' ? t[i] - 32 : t[i];
+    u[i] = 0;
+    draw_ftext(buf, y0, h, cx - ftext_width(f, u) / 2, y, f, u, col);
+}
+
+// The pairing card. Classic: a rounded grey card, the code big in the middle. Field: a rimmed panel, the code's digits
+// in keys of their own, mono capitals. Tiles: a dark tile with the code on a yellow one.
 static void draw_pairing(uint16_t *buf, int y0, int h)
 {
-    fill_rrect(buf, y0, h, CX - 170, CY - 92, CX + 170, CY + 122, 28, rgb(30, 30, 38));
+    bool fl = ui_field(), ti = ui_tiles();
+    if (fl) {
+        aa_rrect(buf, y0, h, CX - 170, CY - 92, CX + 170, CY + 122, 8, rgb(56, 56, 62));
+        aa_rrect(buf, y0, h, CX - 168, CY - 90, CX + 168, CY + 120, 6, rgb(20, 20, 23));
+    } else fill_rrect(buf, y0, h, CX - 170, CY - 92, CX + 170, CY + 122, ti ? 34 : 28, ti ? T_CASE : rgb(30, 30, 38));
     const font_t *s = &font_label, *b = &font_big;
     if (!strcmp(pair_shown, "ok")) {
         draw_badge(buf, y0, h, CX, CY - 22, 26);
-        draw_ftext(buf, y0, h, CX - ftext_width(b, "Paired") / 2, CY + 14, b, "Paired", rgb(235, 235, 240));
+        if (fl) mono_mid(buf, y0, h, CX, CY + 20, &font_mono_l, "Paired", rgb(255, 255, 255));
+        else draw_ftext(buf, y0, h, CX - ftext_width(b, "Paired") / 2, CY + 14, b, "Paired", rgb(235, 235, 240));
         return;
     }
     char code[10];                                    // "482 913": easier to read off
@@ -1353,7 +1371,29 @@ static void draw_pairing(uint16_t *buf, int y0, int h)
     snprintf(t1, sizeof t1, "Pair %s with your Mac", agent_device_name());
     const char *t2 = "Type this code in the Bobble app";
     const char *t3 = "Not you? Tap to close";
+    if (fl) {
+        if (ftext_width(&font_mono_s, t1) > 310) snprintf(t1, sizeof t1, "%s", agent_device_name());
+        mono_mid(buf, y0, h, CX, CY - 70, &font_mono_s, t1, rgb(118, 118, 126));
+        for (int k = 0; k < 6; k++) {                 // a key for each digit, the two threes apart
+            int x = CX - 141 + k * 44 + (k >= 3 ? 18 : 0);
+            aa_rrect(buf, y0, h, x, CY - 40, x + 38, CY + 12, 6, rgb(56, 56, 62));
+            aa_rrect(buf, y0, h, x + 2, CY - 38, x + 36, CY + 10, 4, rgb(0, 0, 0));
+            char d[2] = {pair_shown[k], 0};
+            draw_ftext(buf, y0, h, x + 19 - ftext_width(&font_mono_l, d) / 2, CY - 27, &font_mono_l, d, rgb(255, 255, 255));
+        }
+        mono_mid(buf, y0, h, CX, CY + 46, &font_mono_s, t2, rgb(118, 118, 126));
+        mono_mid(buf, y0, h, CX, CY + 82, &font_mono_s, t3, rgb(255, 102, 26));
+        return;
+    }
     if (ftext_width(s, t1) > 320) snprintf(t1, sizeof t1, "%s", agent_device_name());
+    if (ti) {
+        draw_ftext(buf, y0, h, CX - ftext_width(s, t1) / 2, CY - 72, s, t1, T_GREY);
+        aa_rrect(buf, y0, h, CX - 136, CY - 42, CX + 136, CY + 26, 22, T_YELLOW);
+        draw_ftext(buf, y0, h, CX - ftext_width(b, code) / 2, CY - 34, b, code, T_INK);
+        draw_ftext(buf, y0, h, CX - ftext_width(s, t2) / 2, CY + 48, s, t2, T_GREY);
+        draw_ftext(buf, y0, h, CX - ftext_width(s, t3) / 2, CY + 82, s, t3, rgb(96, 96, 96));
+        return;
+    }
     draw_ftext(buf, y0, h, CX - ftext_width(s, t1) / 2, CY - 72, s, t1, rgb(160, 160, 172));
     draw_ftext(buf, y0, h, CX - ftext_width(b, code) / 2, CY - 34, b, code, rgb(255, 255, 255));
     draw_ftext(buf, y0, h, CX - ftext_width(s, t2) / 2, CY + 48, s, t2, rgb(120, 120, 132));
