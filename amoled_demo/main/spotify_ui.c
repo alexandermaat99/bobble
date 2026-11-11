@@ -445,9 +445,9 @@ static void tiles_speaker(uint16_t *buf, int y0, int h, float cx, float cy, int 
     }
 }
 
-// a time in a round tile, filled to frac with liquid in c: a wavy surface with a lighter wave behind it, that moves on
-// a step each second (when the time changes: no extra frames). The time reads black where the liquid's up to it.
-static void tiles_time(uint16_t *buf, int y0, int h, int x0, int x1, const char *t, const font_t *f, float frac, uint16_t c)
+// a round tile filled to frac with liquid in c: a wavy surface with a lighter wave behind it, that moves on a step each
+// second (when the time changes: no extra frames)
+static void tiles_time(uint16_t *buf, int y0, int h, int x0, int x1, float frac, uint16_t c)
 {
     const float cx = (x0 + x1) / 2.0f, cy = (T_ROW_Y0 + T_ROW_Y1) / 2.0f, r = (T_ROW_Y1 - T_ROW_Y0) / 2.0f;
     frac = frac < 0 ? 0 : frac > 1 ? 1 : frac;
@@ -478,14 +478,6 @@ static void tiles_time(uint16_t *buf, int y0, int h, int x0, int x1, const char 
             row[x] = SWAP16((uint16_t)(pr << 11 | pg << 5 | pb));
         }
     }
-    if (!t[0]) return;
-    int ty = tiles_mid(f, cy), ct, cb, cut = (int)lroundf(level);
-    gfx_get_clip(&ct, &cb);
-    gfx_clip(ct, cut < cb ? cut : cb);                // above the liquid: white
-    ftext_cx(buf, y0, h, (int)cx, ty, f, t, C_WHITE);
-    gfx_clip(cut > ct ? cut : ct, cb);                // in it: black
-    ftext_cx(buf, y0, h, (int)cx, ty, f, t, T_INK);
-    gfx_clip(ct, cb);
 }
 
 // the logo in a dark tile, what to do in a light one
@@ -539,18 +531,10 @@ static void draw_tiles(uint16_t *buf, int y0, int h)
     draw_ftext(buf, y0, h, 32, iy0 + 37, &font_small, l1, s.note[0] ? T_RED : T_INK2);
 
     // the row: times either end, the keys between
-    // the times in round tiles either end: how far it's got filling up in orange, what's left draining in red
-    if (s.duration_ms > 0) {
-        fmt_time(line, sizeof line, (int)(progress * s.duration_ms));
-        tiles_time(buf, y0, h, 14, tbtns[0].x0 - 10, line, &font_label, progress, T_ORANGE);
-        int left = s.duration_ms - (int)(progress * s.duration_ms);
-        line[0] = '-';
-        fmt_time(line + 1, sizeof line - 1, left);
-        tiles_time(buf, y0, h, tbtns[2].x1 + 10, W - 14, line, &font_label, 1 - progress, T_RED);
-    } else {
-        tiles_time(buf, y0, h, 14, tbtns[0].x0 - 10, "", &font_label, 0, T_CASE);
-        tiles_time(buf, y0, h, tbtns[2].x1 + 10, W - 14, "", &font_label, 0, T_CASE);
-    }
+    // round tiles either end: how far it's got filling up in orange, what's left draining in red
+    bool timed = s.duration_ms > 0;
+    tiles_time(buf, y0, h, 14, tbtns[0].x0 - 10, timed ? progress : 0, T_ORANGE);
+    tiles_time(buf, y0, h, tbtns[2].x1 + 10, W - 14, timed ? 1 - progress : 0, T_RED);
     for (int i = 0; i < 3; i += 2) {
         const btn_t *b = &tbtns[i];
         aa_rrect(buf, y0, h, b->x0, b->y0, b->x1, b->y1, 22, pressed(b->id) ? tile_hot(T_CASE2) : T_CASE2);
