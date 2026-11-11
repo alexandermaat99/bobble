@@ -531,10 +531,10 @@ static void draw_tiles(uint16_t *buf, int y0, int h)
     draw_ftext(buf, y0, h, 32, iy0 + 37, &font_small, l1, s.note[0] ? T_RED : T_INK2);
 
     // the row: times either end, the keys between
-    // round tiles either end: how far it's got filling up in orange, what's left draining in red
+    // round tiles either end, in the song's orange: how far it's got filling up, what's left draining
     bool timed = s.duration_ms > 0;
     tiles_time(buf, y0, h, 14, tbtns[0].x0 - 10, timed ? progress : 0, T_ORANGE);
-    tiles_time(buf, y0, h, tbtns[2].x1 + 10, W - 14, timed ? 1 - progress : 0, T_RED);
+    tiles_time(buf, y0, h, tbtns[2].x1 + 10, W - 14, timed ? 1 - progress : 0, T_ORANGE);
     for (int i = 0; i < 3; i += 2) {
         const btn_t *b = &tbtns[i];
         aa_rrect(buf, y0, h, b->x0, b->y0, b->x1, b->y1, 22, pressed(b->id) ? tile_hot(T_CASE2) : T_CASE2);
