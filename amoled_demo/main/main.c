@@ -2074,7 +2074,7 @@ void app_main(void)
             sw_x0 = tx + (int)lroundf(pg_off);         // swipe made then used to be ignored till it came to rest)
             pg_vel = 0;
         }
-        if (page_has_touch && down && tx >= 0 && !pg_drag) {
+        if (page_has_touch && down && tx >= 0 && !pg_drag && !(page == PAGE_MUSIC && spotify_ui_holds_touch())) {
             int dx = tx - sw_x0, dy = ty - sw_y0;
             if (abs(dx) > 16 && abs(dx) * 2 > abs(dy) * 3) {
                 pg_drag = true;

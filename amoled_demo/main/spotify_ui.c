@@ -63,7 +63,8 @@ static float progress;                 // 0..1 for the ring
 static bool down;
 static int press_id, press_x, press_y;
 // The volume (Classic's slider, the Tiles tile, the Field knob), dragged up and down: the volume as the finger has it,
-// until Spotify's catches up. A tap mutes it, and another brings it back.
+// until Spotify's catches up. A tap on the slider or tile goes to where it was tapped; a tap on its speaker (or on the
+// knob) mutes it, and another brings it back. While a finger's on it, the page doesn't swipe.
 static int drag_vol = -1, drag_from, drag_moved;   // drag_moved: the furthest the finger's gone up or down
 static int64_t drag_until;             // (shown this long after letting go)
 static int unmute_vol = -1;            // muted by a tap: the volume a second tap brings back
@@ -570,6 +571,8 @@ static int hit(int x, int y)
     return ID_NONE;
 }
 
+bool spotify_ui_holds_touch(void) { return down && press_id == ID_VOL; }
+
 void spotify_ui_cancel_touch(void)
 {
     if (press_id == ID_VOL) drag_vol = -1;             // (a swipe took it: as it was)
@@ -595,19 +598,20 @@ void spotify_ui_update(int tx, int ty, int64_t now_us)
         if (press_id == ID_VOL) { drag_vol = drag_from = shown_volume(); drag_moved = 0; }
     } else if (tx >= 0) {
         if (press_id == ID_VOL) {                      // up and down: the volume follows the finger
-            if (abs(tx - press_x) > 24 && abs(tx - press_x) > abs(ty - press_y)) spotify_ui_cancel_touch();   // (a swipe)
-            else {
-                if (abs(ty - press_y) > drag_moved) drag_moved = abs(ty - press_y);
-                int v = drag_from + (press_y - ty) * 100 / (ui_field() ? 120 : ART_SZ);   // (the knob: quicker, near the edge)
-                drag_vol = v < 0 ? 0 : v > 100 ? 100 : v;
-            }
+            if (abs(ty - press_y) > drag_moved) drag_moved = abs(ty - press_y);
+            int v = drag_from + (press_y - ty) * 100 / (ui_field() ? 120 : ART_SZ);   // (the knob: quicker, near the edge)
+            drag_vol = v < 0 ? 0 : v > 100 ? 100 : v;
         } else if (abs(tx - press_x) > 16 || abs(ty - press_y) > 16) press_id = ID_NONE;   // it's a swipe, not a tap
     } else if (down) {
         down = false;
         if (press_id == ID_VOL) {
-            if (drag_moved <= 8) {                     // a tap: mute, and again to unmute
+            bool speaker = ui_field() || press_y >= ART_Y + ART_SZ - 60;   // (the knob, or the speaker at the foot)
+            if (drag_moved <= 8 && speaker) {          // a tap on the speaker: mute, and again to unmute
                 if (drag_from > 0) { unmute_vol = drag_from; drag_vol = 0; }
                 else drag_vol = unmute_vol > 0 ? unmute_vol : 30;
+            } else if (drag_moved <= 8) {              // elsewhere: to where it was tapped
+                int v = (ART_Y + ART_SZ - press_y) * 100 / ART_SZ;
+                drag_vol = v < 0 ? 0 : v > 100 ? 100 : v;
             }
             if (drag_vol != s.volume) {
                 char a[8];
