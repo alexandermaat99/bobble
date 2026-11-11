@@ -11,7 +11,7 @@ repo=${BOBBLE_REPO:-$(cat update_repo)}
 page=${BOBBLE_PAGE:-../amoled_demo/flasher/index.html}
 out=$(mktemp -d)
 cp $page $out/index.html
-for f in bootloader partitions otadata firmware; do cp $bins/bobble-$f.bin $out/; done
+for f in bootloader partitions otadata firmware-square; do cp $bins/bobble-$f.bin $out/; done
 # ESP Web Tools' manifest: where each piece goes (as in the firmware's flash_args)
 cat > $out/manifest.json <<JSON
 {
@@ -24,7 +24,7 @@ cat > $out/manifest.json <<JSON
       {"path": "bobble-bootloader.bin", "offset": 0},
       {"path": "bobble-partitions.bin", "offset": 32768},
       {"path": "bobble-otadata.bin", "offset": 61440},
-      {"path": "bobble-firmware.bin", "offset": 131072}
+      {"path": "bobble-firmware-square.bin", "offset": 131072}
     ]
   }]
 }

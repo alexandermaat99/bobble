@@ -244,7 +244,6 @@ static void button(uint16_t *buf, int y0, int h, float cx, float rad, uint16_t b
     draw_ftext(buf, y0, h, (int)cx - ftext_width(&font_small, label) / 2, LABEL_Y, &font_small, label, C_LABEL2);
 }
 
-#if !SCREEN_ROUND
 // ---------------------------------------------------------------- the Field look (Settings > Look)
 // Teenage Engineering-ish, like the other pages': the dot grid, a level meter of lit segments where the orb was (blue
 // while it listens, orange while Claude speaks, a yellow scanner while it thinks, a flat line when it's idle or
@@ -492,7 +491,6 @@ static void draw_tiles(uint16_t *buf, int y0, int h)
         }
     }
 }
-#endif
 
 // ---------------------------------------------------------------- the menu (tap the model, or hold the speaker)
 
@@ -564,14 +562,12 @@ static float orb_size(void)
 
 void chat_ui_draw(uint16_t *buf, int y0, int h)
 {
-#if !SCREEN_ROUND
     if (ui_field() || ui_tiles()) {
         if (ui_field()) draw_field(buf, y0, h);
         else draw_tiles(buf, y0, h);
         if (menu) draw_menu(buf, y0, h);
         return;
     }
-#endif
     // the orb first (its glow goes behind the pill)
     draw_orb(buf, y0, h, orb_size(), cs.active ? 1 : 0.6f, cs.active && cs.muted,
              t_anim * (cs.state == CS_THINKING ? 3.0f : 0.6f));

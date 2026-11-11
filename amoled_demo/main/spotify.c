@@ -451,14 +451,13 @@ static void load_art(const char *url)
 
     int64_t t1 = esp_timer_get_time();
     esp_jpeg_image_output_t out;
-    uint16_t *raw = decode_jpg(len, SCREEN_ROUND ? W : ART_SZ, &out);
+    uint16_t *raw = decode_jpg(len, ART_SZ, &out);
     if (!raw) { art_fail(url, "decode failed"); return; }
     int64_t t2 = esp_timer_get_time();
 
     // scale to fill the round screen, darken so text and controls stay readable, and fade the edge of
     // the circle to black so the square cover never shows corners (e.g. mid-swipe). Done once per album.
     uint16_t *dst = art[art_cur == 0 ? 1 : 0];
-#if !SCREEN_ROUND
     // the square: the cover as it is, a rounded tile at the top on black (corners anti-aliased)
     memset(dst, 0, W * H * 2);
     const float rad = 18;
@@ -477,23 +476,6 @@ static void load_art(const char *url)
             dst[(ART_Y + y) * W + ART_X + x] = SWAP16((uint16_t)(r << 11 | g << 5 | bl));
         }
     }
-#else
-    const float fade_in = 165, fade_out = 233;        // radius where the fade starts / reaches black
-    for (int y = 0; y < H; y++) {
-        int sy = y * out.height / H;
-        int k = (y > 90 && y < 400) ? 90 : 140;       // out of 256: darker behind the text and buttons
-        float dy = y - CY + 0.5f;
-        for (int x = 0; x < W; x++) {
-            float dx = x - CX + 0.5f, rr = sqrtf(dx * dx + dy * dy);
-            int kk = k;
-            if (rr >= fade_out) kk = 0;
-            else if (rr > fade_in) { float t = (fade_out - rr) / (fade_out - fade_in); kk = (int)(k * t * t * (3 - 2 * t)); }
-            uint16_t c = SWAP16(raw[sy * out.width + x * out.width / W]);
-            int r = (c >> 11) * kk >> 8, g = ((c >> 5) & 63) * kk >> 8, bl = (c & 31) * kk >> 8;
-            dst[y * W + x] = SWAP16((uint16_t)(r << 11 | g << 5 | bl));
-        }
-    }
-#endif
     heap_caps_free(raw);
     art_cur = art_cur == 0 ? 1 : 0;
     art_version++;
@@ -567,7 +549,7 @@ static const char *url_path(const char *u)
 // uses (an empty one first). keep: slots the lists not being replaced still use.
 static void assign_thumbs(int n, const char *const *url, int16_t *const *slot, const bool *keep)
 {
-    if (!thumbs && !SCREEN_ROUND) thumbs = heap_caps_calloc(MAX_THUMBS, sizeof *thumbs, MALLOC_CAP_SPIRAM);
+    if (!thumbs) thumbs = heap_caps_calloc(MAX_THUMBS, sizeof *thumbs, MALLOC_CAP_SPIRAM);
     bool used[MAX_THUMBS];
     int kept = 0, fresh = 0, dropped = 0;             // (for the log: why covers went missing)
     memcpy(used, keep, sizeof used);
@@ -1074,8 +1056,8 @@ static void load_library(void)
         int n = 0;
         if (!new_pl) for (int i = 0; i < n_playlists; i++) if (playlists[i].thumb >= 0) keep[playlists[i].thumb] = true;
         if (ns < 0) for (int i = 0; i < n_shows; i++) if (shows[i].thumb >= 0) keep[shows[i].thumb] = true;
-        for (int i = 0; new_pl && i < np; i++, n++) { url[n] = SCREEN_ROUND ? "" : img[i]; slot[n] = &pl[i].thumb; }
-        for (int i = 0; i < ns; i++, n++) { url[n] = SCREEN_ROUND ? "" : img[MAX_PL + i]; slot[n] = &sh[i].thumb; }
+        for (int i = 0; new_pl && i < np; i++, n++) { url[n] = img[i]; slot[n] = &pl[i].thumb; }
+        for (int i = 0; i < ns; i++, n++) { url[n] = img[MAX_PL + i]; slot[n] = &sh[i].thumb; }
         assign_thumbs(n, url, slot, keep);            // (the round screen's rows have no artwork: none)
     }
     EXT_RAM_BSS_ATTR static sp_device_t dv[MAX_DEV];   // off the task stack

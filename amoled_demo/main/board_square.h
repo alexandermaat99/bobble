@@ -8,7 +8,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
-#if defined(BOARD_SQUARE) && !defined(BOBBLE_SIM)
+#ifndef BOBBLE_SIM
 #define SQUARE_HW 1
 #else
 #define SQUARE_HW 0

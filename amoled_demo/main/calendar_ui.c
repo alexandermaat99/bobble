@@ -35,10 +35,6 @@
 #define TICK_IN 184
 #define TICK_OUT 191
 
-enum { V_FACE, V_AGENDA };
-static int view;
-
-static uint8_t *ang_lut, *rad_lut;   // per pixel: clockwise angle from 12 o'clock (0..255), distance from centre
 static uint16_t ring_col[256];
 static uint16_t palette[6];
 
@@ -52,41 +48,22 @@ static int64_t last_copy;
 static bool down, dragging;
 static int press_x, press_y, scroll, scroll_at_press;
 static float fling, last_drag_y;          // agenda keeps gliding after a flick
-static int press_id;
 static bool follow_now;                   // (the square) keep the agenda at what's next until it's scrolled by hand
-enum { ID_NONE, ID_AGENDA, ID_BACK, ID_BG };
-
-static const struct { int x0, y0, x1, y1; } agenda_btn = {CX - 100, 306, CX + 100, 364}, back_btn = {CX - 100, 384, CX + 100, 442};
 
 void cal_ui_init(void)
 {
-    if (SCREEN_ROUND) {                              // (only the round board has the dial: 460 KB of PSRAM)
-        ang_lut = heap_caps_malloc(W * H, MALLOC_CAP_SPIRAM);
-        rad_lut = heap_caps_malloc(W * H, MALLOC_CAP_SPIRAM);
-    }
-    for (int y = 0; y < H && ang_lut && rad_lut; y++)
-        for (int x = 0; x < W; x++) {
-            float dx = x - CX + 0.5f, dy = y - CY + 0.5f;
-            float a = atan2f(dx, -dy);                 // 0 at 12 o'clock, clockwise
-            if (a < 0) a += 2 * (float)M_PI;
-            ang_lut[y * W + x] = (uint8_t)((int)(a / (2 * (float)M_PI) * 256) & 255);
-            float r = sqrtf(dx * dx + dy * dy);
-            rad_lut[y * W + x] = r > 255 ? 255 : (uint8_t)r;
-        }
     palette[0] = rgb(0, 210, 190);
     palette[1] = rgb(255, 150, 60);
     palette[2] = rgb(170, 110, 255);
     palette[3] = rgb(255, 90, 150);
     palette[4] = rgb(70, 150, 255);
     palette[5] = rgb(240, 210, 60);
-#if !SCREEN_ROUND                          // the square: the phone's own calendar colours (dark mode)
     palette[0] = rgb(10, 132, 255);        // blue
     palette[1] = rgb(255, 159, 10);        // orange
     palette[2] = rgb(191, 90, 242);        // purple
     palette[3] = rgb(48, 209, 88);         // green
     palette[4] = rgb(255, 55, 95);         // pink
     palette[5] = rgb(255, 214, 10);        // yellow
-#endif
 }
 
 // ---------------------------------------------------------------- helpers
@@ -221,15 +198,8 @@ static int64_t ticked_us;
 #define TITLE_CHARS 16                   // large text per line in an agenda row
 static int row_height(int type, int idx)
 {
-#if !SCREEN_ROUND
     (void)idx;
     return type == 0 ? 46 : type == 2 ? 44 : 64;   // day heading, "nothing scheduled", an event or reminder (a card)
-#endif
-    if (type == 0) return 50;            // day heading
-    if (type == 2) return 44;            // "nothing scheduled"
-    char l1[40], l2[40];
-    wrap2(type == 3 ? rems[idx].title : items[idx].title, TITLE_CHARS, l1, l2, sizeof l1);
-    return l2[0] ? 92 : 68;              // time line + one or two title lines
 }
 
 // Where the agenda starts: today's next meeting (or the one going on) at the top, with the day's heading above it if
@@ -247,7 +217,7 @@ static void scroll_to_now(void)
             if (day == 1) tomorrow_y = y;
         } else {
             if (day == 0 && types[r] == 1 && !items[idx[r]].all_day && items[idx[r]].end > now_t)
-                target = first ? day_y : y - (SCREEN_ROUND ? 0 : 18);   // (the square: clear of the fade at the list's top)
+                target = first ? day_y : y - 18;   // (clear of the fade at the list's top)
             first = false;
         }
         y += row_height(types[r], idx[r]);
@@ -257,28 +227,19 @@ static void scroll_to_now(void)
 }
 
 bool cal_ui_animating(void) { return fling != 0; }
-bool cal_ui_is_face(void) { return view == V_FACE; }
-void cal_ui_cancel_touch(void) { down = dragging = false; press_id = ID_NONE; fling = 0; }
+void cal_ui_cancel_touch(void) { down = dragging = false; fling = 0; }
 
 void cal_ui_enter(void)
 {
-    view = V_FACE;
     down = false;
-#if !SCREEN_ROUND
     fling = 0;
     follow_now = true;                     // (the square's agenda is always there: start it at what's next)
-#endif
     last_copy = 0;                         // (no forced download here: it would land mid-animation)
 }
 
 // ---------------------------------------------------------------- agenda layout
-#if !SCREEN_ROUND
 #define LIST_TOP (ui_tiles() ? 262 : 242)   // (Tiles: its timeline is a tile of its own, a little lower)
 #define LIST_BOT H
-#else
-#define LIST_TOP 68
-#define LIST_BOT 376
-#endif
 #define AGENDA_DAYS 7
 
 // row types: 0 = day header (idx = 0 today / 1 tomorrow), 1 = event, 2 = nothing scheduled, 3 = reminder
@@ -346,30 +307,7 @@ static int max_scroll(void)
 // ---------------------------------------------------------------- drawing
 void cal_ui_render_bg(uint16_t *buf, int y0, int y1)
 {
-    if (!SCREEN_ROUND || view != V_FACE || !ang_lut) {   // (the square has no dial: plain black)
-        memset(buf, 0, (y1 - y0) * W * 2);
-        return;
-    }
-    uint16_t tick = rgb(90, 90, 110);
-    for (int y = y0; y < y1; y++) {
-        uint16_t *o = buf + (y - y0) * W;
-        const uint8_t *al = ang_lut + y * W, *rl = rad_lut + y * W;
-        for (int x = 0; x < W; x++) {
-            int r = rl[x];
-            uint16_t c = 0;
-            if (r >= RING_IN && r <= RING_OUT) c = ring_col[al[x]];
-            else if (r >= TICK_IN && r <= TICK_OUT && ((al[x] * 12 + 6) & 255) < 14) c = tick;   // hour marks
-            o[x] = c;
-        }
-    }
-}
-
-static bool pressed(int id) { return down && !dragging && press_id == id; }
-
-static void draw_button(uint16_t *buf, int y0, int h, int x0, int ya, int x1, int yb, const char *label, bool on)
-{
-    fill_rrect(buf, y0, h, x0, ya, x1, yb, 18, on ? C_PRESS : C_PANEL);
-    draw_text(buf, y0, h, (x0 + x1) / 2 - text_width(label, 3) / 2, (ya + yb) / 2 - 10, 3, label, C_WHITE);
+    memset(buf, 0, (y1 - y0) * W * 2);
 }
 
 static int reminders_due_today(void)
@@ -446,105 +384,6 @@ static void compute_face(void)
     else if (due) snprintf(face.more, sizeof face.more, "%d reminder%s today", due, due > 1 ? "s" : "");
 }
 
-static void draw_face(uint16_t *buf, int y0, int h)
-{
-    compute_face();
-    float a = clock_minutes(now_t) / 720.0f * 2 * (float)M_PI;   // "now" marker on the ring
-    int mx = CX + (int)(210 * sinf(a)), my = CY - (int)(210 * cosf(a));
-    fill_circle(buf, y0, h, mx, my, 13, 0);
-    fill_circle(buf, y0, h, mx, my, 9, C_WHITE);
-
-    text_c(buf, y0, h, 90, 2, face.date, C_GREY);
-    text_c(buf, y0, h, 114, 3, face.time, C_WHITE);
-    if (!calendar_loaded()) {
-        text_c(buf, y0, h, 200, 2, face.err1, C_GREY);
-        text_c(buf, y0, h, 224, 2, face.err2, C_GREY);
-        return;
-    }
-    if (face.allday[0]) text_c(buf, y0, h, 148, 2, face.allday, C_GREY);
-    if (!face.has_show) {
-        text_c(buf, y0, h, 200, 2, "Nothing coming up", C_GREY);
-        text_c(buf, y0, h, 224, 2, "this week", C_GREY);
-    } else {
-        text_c(buf, y0, h, 176, 2, face.label, face.label_col);
-        text_c(buf, y0, h, face.t2[0] ? 202 : 214, 3, face.t1, C_WHITE);
-        if (face.t2[0]) text_c(buf, y0, h, 228, 3, face.t2, C_WHITE);
-        text_c(buf, y0, h, 264, 2, face.countdown, C_GREY);
-        if (face.more[0]) text_c(buf, y0, h, 286, 2, face.more, C_DIM);
-    }
-    draw_button(buf, y0, h, agenda_btn.x0, agenda_btn.y0, agenda_btn.x1, agenda_btn.y1, "Agenda", pressed(ID_AGENDA));
-    if (calendar_error()[0]) text_c(buf, y0, h, 374, 2, "Offline - cached", C_RED);
-}
-
-static void draw_agenda(uint16_t *buf, int y0, int h)
-{
-    char line[48], t1[16], t2[16], l1[40], l2[40];
-    text_c(buf, y0, h, 40, 3, "Agenda", C_WHITE);
-    compute_agenda();
-    int *types = ag_types, *idx = ag_idx, n = ag_n;
-
-    gfx_clip(LIST_TOP, LIST_BOT);
-    int y = LIST_TOP - scroll;
-    for (int r = 0; r < n; r++) {
-        int rh = ag_h[r];
-        if (y + rh > y0 && y < y0 + h && y + rh > LIST_TOP && y < LIST_BOT) {
-            if (types[r] == 0) {                          // "Today  Tue Oct 13"
-                time_t d = calendar_window_start() + idx[r] * 86400 + 3600;   // +1 h: safe across DST
-                struct tm tm;
-                localtime_r(&d, &tm);
-                char wd[12];
-                strftime(line, sizeof line, idx[r] < 2 ? "%a %b %e" : "%b %e", &tm);
-                strftime(wd, sizeof wd, "%A", &tm);   // later days go by name: "Monday Oct 19"
-                const char *day = idx[r] == 0 ? "Today" : idx[r] == 1 ? "Tomorrow" : wd;
-                draw_text(buf, y0, h, CX - 150, y + 14, 3, day, C_ACCENT);
-                draw_text(buf, y0, h, CX - 150 + text_width(day, 3) + 14, y + 20, 2, line, C_GREY);
-                fill_rect(buf, y0, h, CX - 150, y + 44, CX + 150, y + 46, C_DIM);
-            } else if (types[r] == 2) {
-                draw_text(buf, y0, h, CX - 140, y + 14, 2, "Nothing scheduled", C_DIM);
-            } else if (types[r] == 3) {                   // reminder: checkbox, when, title
-                reminder_t *rm = &rems[idx[r]];
-                uint16_t lc = rgb(rm->r, rm->g, rm->b);
-                bool ticked = !strcmp(ticked_id, rm->id), overdue = rm->due < calendar_window_start() ||
-                              (rm->has_time && rm->due < now_t);
-                int cy = y + rh / 2;
-                fill_circle(buf, y0, h, CX - 146, cy, 13, lc);
-                if (!ticked) fill_circle(buf, y0, h, CX - 146, cy, 10, 0);          // empty ring until tapped
-                if (rm->has_time) fmt_time(t1, sizeof t1, rm->due, true);
-                snprintf(line, sizeof line, "%s%s%s", overdue ? "Overdue  " : "", rm->has_time ? t1 : "", rm->has_time ? "" : rm->list);
-                draw_text(buf, y0, h, CX - 124, y + 10, 2, line, overdue ? C_RED : C_GREY);
-                wrap2(rm->title, TITLE_CHARS, l1, l2, sizeof l1);
-                draw_text(buf, y0, h, CX - 124, y + 32, 3, l1, ticked ? C_DIM : C_WHITE);
-                if (l2[0]) draw_text(buf, y0, h, CX - 124, y + 56, 3, l2, ticked ? C_DIM : C_WHITE);
-            } else {                                      // time on top, title below in large text
-                ical_item_t *it = &items[idx[r]];
-                bool past = it->end <= now_t, now = !it->all_day && it->start <= now_t && now_t < it->end;
-                if (now) fill_rrect(buf, y0, h, CX - 160, y + 3, CX + 160, y + rh - 3, 12, C_PANEL);
-                fill_rrect(buf, y0, h, CX - 154, y + 10, CX - 148, y + rh - 10, 3, past ? C_DIM : color_of(idx[r]));
-                if (it->all_day) strlcpy(line, "All day", sizeof line);
-                else {
-                    fmt_time(t1, sizeof t1, it->start, true);
-                    fmt_time(t2, sizeof t2, it->end, true);
-                    snprintf(line, sizeof line, "%s - %s%s", t1, t2, now ? "  now" : "");
-                }
-                draw_text(buf, y0, h, CX - 136, y + 10, 2, line, past ? C_DIM : (now ? C_ACCENT : C_GREY));
-                wrap2(it->title, TITLE_CHARS, l1, l2, sizeof l1);
-                draw_text(buf, y0, h, CX - 136, y + 32, 3, l1, past ? C_DIM : C_WHITE);
-                if (l2[0]) draw_text(buf, y0, h, CX - 136, y + 56, 3, l2, past ? C_DIM : C_WHITE);
-            }
-        }
-        y += rh;
-    }
-    gfx_clip(0, H);
-    int ms = max_scroll();
-    if (ms > 0) {                                         // scroll bar
-        int track = LIST_BOT - LIST_TOP - 16, total = ms + (LIST_BOT - LIST_TOP);
-        int th = track * (LIST_BOT - LIST_TOP) / total, ty = LIST_TOP + 8 + (track - th) * scroll / ms;
-        fill_rrect(buf, y0, h, CX + 166, ty, CX + 171, ty + th, 2, C_DIM);
-    }
-    draw_button(buf, y0, h, back_btn.x0, back_btn.y0, back_btn.x1, back_btn.y1, "Back", pressed(ID_BACK));
-}
-
-#if !SCREEN_ROUND
 // ---------------------------------------------------------------- the square
 #define C_TEXT2  rgb(152, 152, 160)
 #define C_SEP    rgb(36, 36, 40)
@@ -1360,31 +1199,15 @@ static void draw_square(uint16_t *buf, int y0, int h)
         draw_list(buf, y0, h);
     }
 }
-#endif
 
 void cal_ui_draw(uint16_t *buf, int y0, int h)
 {
-#if !SCREEN_ROUND
     if (ui_field()) draw_field(buf, y0, h);
     else if (ui_tiles()) draw_tiles(buf, y0, h);
     else draw_square(buf, y0, h);
-    return;
-#endif
-    if (view == V_FACE) draw_face(buf, y0, h);
-    else draw_agenda(buf, y0, h);
 }
 
 // ---------------------------------------------------------------- input
-static int hit_test(int x, int y)
-{
-    if (!SCREEN_ROUND) return ID_NONE;                  // (the square: no buttons; the list scrolls)
-    if (view == V_FACE) {
-        if (x >= agenda_btn.x0 - 8 && x < agenda_btn.x1 + 8 && y >= agenda_btn.y0 - 10 && y < agenda_btn.y1 + 24 && calendar_loaded()) return ID_AGENDA;
-        return ID_BG;
-    }
-    if (x >= back_btn.x0 - 8 && x < back_btn.x1 + 8 && y >= back_btn.y0 - 10 && y < back_btn.y1 + 24) return ID_BACK;
-    return ID_NONE;
-}
 
 bool cal_ui_update(int tx, int ty, int64_t now_us)
 {
@@ -1400,14 +1223,13 @@ bool cal_ui_update(int tx, int ty, int64_t now_us)
         }
         rebuild_ring();
         last_copy = now_us;
-        if (!SCREEN_ROUND && follow_now && !down) {
+        if (follow_now && !down) {
             scroll_to_now();
             int ms = max_scroll();
             if (scroll > ms) scroll = ms;
         }
     }
 
-    bool next_screen = false;
     if (tx >= 0 && !down) {
         down = true;
         dragging = false;
@@ -1415,11 +1237,9 @@ bool cal_ui_update(int tx, int ty, int64_t now_us)
         scroll_at_press = scroll;
         last_drag_y = ty;
         fling = 0;
-        press_id = hit_test(tx, ty);
     } else if (tx >= 0) {
         if (abs(ty - press_y) > 14 || abs(tx - press_x) > 14) {
-            if (view == V_AGENDA || (!SCREEN_ROUND && press_y >= LIST_TOP)) dragging = true, follow_now = false;
-            else press_id = ID_NONE;
+            if (press_y >= LIST_TOP) dragging = true, follow_now = false;
         }
         if (dragging) {
             scroll = scroll_at_press - (ty - press_y);
@@ -1431,9 +1251,7 @@ bool cal_ui_update(int tx, int ty, int64_t now_us)
     } else if (down) {
         down = false;
         if (!dragging) {
-            if (press_id == ID_AGENDA) { view = V_AGENDA; scroll_to_now(); int ms = max_scroll(); if (scroll > ms) scroll = ms; }
-            else if (press_id == ID_BACK) view = V_FACE;
-            else if ((view == V_AGENDA || !SCREEN_ROUND) && press_y >= LIST_TOP && press_y < LIST_BOT && !ticked_id[0]) {
+            if (press_y >= LIST_TOP && press_y < LIST_BOT && !ticked_id[0]) {
                 int types[MAX_ITEMS * 2], idx[MAX_ITEMS * 2], n = agenda_rows(types, idx, MAX_ITEMS * 2), y = LIST_TOP - scroll;
                 for (int r = 0; r < n; r++) {
                     int rh = row_height(types[r], idx[r]);
@@ -1445,11 +1263,9 @@ bool cal_ui_update(int tx, int ty, int64_t now_us)
                     y += rh;
                 }
             }
-            else if (press_id == ID_BG) next_screen = true;   // plain tap on the face (unused for now)
         }
         if (!dragging) fling = 0;
         dragging = false;
-        press_id = ID_NONE;
     }
     if (!down && fling != 0) {                         // glide, slowing down
         scroll += (int)lroundf(fling);
@@ -1458,5 +1274,5 @@ bool cal_ui_update(int tx, int ty, int64_t now_us)
         if (scroll <= 0 || scroll >= ms) { scroll = scroll < 0 ? 0 : (scroll > ms ? ms : scroll); fling = 0; }
         if (fabsf(fling) < 0.5f) fling = 0;
     }
-    return next_screen;
+    return false;
 }

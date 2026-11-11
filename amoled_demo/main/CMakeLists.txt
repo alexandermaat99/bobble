@@ -9,9 +9,7 @@ endif()
 if(BOBBLE_BUILD)
     target_compile_definitions(${COMPONENT_LIB} PRIVATE BOBBLE_BUILD=${BOBBLE_BUILD})
 endif()
-# The 4" square board (Waveshare ESP32-S3-Touch-LCD-4B) is its own build, with its own folder and settings:
-#   idf.py -B build-square -D BOBBLE_SQUARE=1 -D SDKCONFIG=build-square/sdkconfig \
-#          -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.square" build
-if(BOBBLE_SQUARE)
-    target_compile_definitions(${COMPONENT_LIB} PRIVATE BOARD_SQUARE=1)
+# Restarting the panel's DMA every frame shifts and breaks the picture (see sdkconfig.defaults): never build with it
+if(CONFIG_LCD_RGB_RESTART_IN_VSYNC)
+    message(FATAL_ERROR "CONFIG_LCD_RGB_RESTART_IN_VSYNC is on in ${SDKCONFIG}: delete that file and build again")
 endif()

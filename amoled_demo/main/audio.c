@@ -435,7 +435,7 @@ void audio_set_speaker_mute(bool m) { speaker_mute = m; }
 float audio_mic_level(void) { return mic_lvl; }
 float audio_out_level(void) { return out_lvl; }
 
-#elif defined(BOBBLE_SIM) && defined(BOARD_SQUARE)
+#else
 // ---------------------------------------------------------------- the Square simulator: the page works, silently
 // (no sound of its own: the board's speaker and microphones are the only ones a chat uses, never the Mac's)
 static int64_t queued_until;                     // when what it's been "sent" would have finished playing
@@ -458,18 +458,4 @@ float audio_mic_level(void) { return 0; }
 float audio_out_level(void) { return audio_queued_ms() > 0 ? 0.5f : 0; }
 static inline void level_unused(void) { (void)level_update; }
 
-#else
-// ---------------------------------------------------------------- the round board: no speaker or microphones
-bool audio_available(void) { return false; }
-bool audio_start(audio_mic_cb cb) { (void)cb; return false; }
-void audio_stop(void) {}
-void audio_play(const int16_t *pcm, int n) { (void)pcm; (void)n; }
-void audio_flush(void) {}
-int audio_queued_ms(void) { return 0; }
-void audio_set_speaker_mute(bool m) { (void)m; }
-void audio_click(void) {}
-void audio_chime(void) {}
-float audio_mic_level(void) { return 0; }
-float audio_out_level(void) { return 0; }
-static inline void level_unused(void) { (void)level_update; }
 #endif

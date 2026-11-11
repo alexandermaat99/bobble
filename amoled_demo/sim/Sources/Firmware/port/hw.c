@@ -34,11 +34,7 @@ const char *sim_support_dir(void)
 {
     static char dir[1024];
     if (!dir[0]) {
-#ifdef BOARD_SQUARE                                    // (Bobble Square: its own flash, so both can run at once)
         snprintf(dir, sizeof dir, "%s/Library/Application Support/BobbleSquare", getenv("HOME"));
-#else
-        snprintf(dir, sizeof dir, "%s/Library/Application Support/BobbleSim", getenv("HOME"));
-#endif
         mkdir(dir, 0755);
     }
     return dir;
@@ -118,7 +114,6 @@ esp_err_t esp_lcd_panel_draw_bitmap(esp_lcd_panel_handle_t p, int x0, int y0, in
 }
 
 int sim_glass_side(void) { return GLASS; }
-bool sim_glass_round(void) { return SCREEN_ROUND; }
 
 uint32_t sim_copy_glass(uint16_t *out, uint32_t seq)
 {

@@ -76,7 +76,6 @@ static int64_t meet_pin_until;                // the calendar's logo was tapped:
 #define ICON_EDGE 14                           // the top icon comes no closer than this to the top of the glass
 #define DOTS_R 216                             // the logos' arc down the left edge: radius, and radians between them
 #define DOTS_STEP 0.17f
-#if !SCREEN_ROUND
 #define DOTS_X 28                              // square: a straight column down the left edge instead, this far in
 #define EDGE_R 24                              // ...and the glow and the meeting ring follow its rounded corners
 // How far (px) a point (dx, dy from the middle) is inside a rounded square of half-width `half`, corner radius rr
@@ -87,7 +86,6 @@ static float sq_inside(float dx, float dy, float half, float rr)
     float ox = qx > 0 ? qx : 0, oy = qy > 0 ? qy : 0, m = qx > qy ? qx : qy;
     return rr - sqrtf(ox * ox + oy * oy) - (m < 0 ? m : 0);
 }
-#endif
 // Each chat's colour (by its slot): the eyes take on the shown chat's, its dot wears it. Soft tints, so they still
 // read as bright eyes on black.
 static const int chat_col[AGENT_MAX][3] = {
@@ -115,15 +113,9 @@ static int64_t swap_t0, swap_in_t0 = -10000000;
 // The square board's crowd (a character per chat, or Bobble's own when there are none: see the end of the file; it's
 // all the square shows, never the eyes); nothing on the round one. awake: something's being said (keeps the screen on).
 static bool crowd_on, crowd_drawn_last, crowd_awake;
-#if !SCREEN_ROUND
 static void crowd_update(int64_t now, float dt);
 static bool crowd_tap(int x, int y, int64_t now);
 static void crowd_draw(uint16_t *buf, int y0, int h);
-#else
-static void crowd_update(int64_t now, float dt) {}
-static bool crowd_tap(int x, int y, int64_t now) { return false; }
-static void crowd_draw(uint16_t *buf, int y0, int h) {}
-#endif
 // What the bubble looks like this frame: worked out by pet_ui_update, drawn by pet_ui_draw, compared to the
 // frame before to find what to redraw
 typedef struct {
@@ -288,17 +280,11 @@ static void check_reminders(int64_t now)
         reminder_due = rems[i].due && rems[i].due <= t && t - rems[i].due < (rems[i].has_time ? 12 : 24) * 3600;
 }
 
-// Where logo i of n sits: on an arc down the left edge of the glass (square: a column), the first at the top
+// Where logo i of n sits: in a column down the left edge, the first at the top
 static void dot_pos(int i, int n, int *x, int *y)
 {
-#if !SCREEN_ROUND
     *x = DOTS_X;
     *y = (int)lroundf(CY + (i - (n - 1) / 2.0f) * DOTS_R * DOTS_STEP);   // (spaced as on the arc)
-    return;
-#endif
-    float th = (float)M_PI - (i - (n - 1) / 2.0f) * DOTS_STEP;
-    *x = (int)lroundf(CX + DOTS_R * cosf(th));
-    *y = (int)lroundf(CY + DOTS_R * sinf(th));
 }
 
 static void tap(int x, int y, int64_t now)
@@ -895,14 +881,12 @@ bool pet_ui_wants_wifi(void)
 bool pet_ui_dirty(void)
 {
     if (!dirty) return false;
-#if !SCREEN_ROUND
     // The crowd is the whole page each time, and turned onto the glass that's every row: at 20+ a second the panel's
     // scan-out out of PSRAM fell behind (broken rows). Its poses change 3-7 times a second: 10 frames is plenty.
     static int64_t last;
     int64_t now = esp_timer_get_time();
     if (crowd_on && now - last < 100000) return false;   // (stays dirty: it goes out next time)
     last = now;
-#endif
     dirty = false;
     return true;
 }
@@ -958,11 +942,7 @@ int pet_ui_take_rects(int r[2][4])
     int n = 0;
     if (c > a) { r[n][0] = (int)a - 3; r[n][1] = (int)b - 3; r[n][2] = (int)c + 3; r[n][3] = (int)d + 3; n++; }
     if (memcmp(&dots, &dots_drawn, sizeof dots)) {   // the logos changed: just the bottom of the glass, on its own
-#if SCREEN_ROUND
-        r[n][0] = 0; r[n][1] = CY - 160; r[n][2] = CX - DOTS_R + 44; r[n][3] = CY + 160; n++;   // (the left edge)
-#else
         r[n][0] = 0; r[n][1] = CY - 160; r[n][2] = DOTS_X + 44; r[n][3] = CY + 160; n++;
-#endif
     }
     dots_drawn = dots;
     if (!n) { r[0][0] = CX - 1; r[0][1] = CY - 1; r[0][2] = CX + 1; r[0][3] = CY + 1; n = 1; }   // (nothing to speak of)
@@ -1022,7 +1002,6 @@ static void draw_eye(uint16_t *buf, int y0, int h, const eye_t *e)
 // The countdown ring just inside the glass's edge: a faint track, and the time left from 12 o'clock clockwise
 #define RING_R 219
 #define RING_T 5
-#if !SCREEN_ROUND
 // Square: the same track round the rounded square, and the time left measured along it (so it drains at an even
 // pace down the straight sides and round the corners alike)
 #define RING_IN (CX - RING_R)                   // (as far in from the edge as the round one)
@@ -1054,32 +1033,6 @@ static void draw_ring(uint16_t *buf, int y0, int h, float frac, int bright)
         }
     }
 }
-#else
-static void draw_ring(uint16_t *buf, int y0, int h, float frac, int bright)
-{
-    float ro = RING_R + RING_T / 2.0f, ri = RING_R - RING_T / 2.0f, lim = frac * 2 * (float)M_PI;
-    int ya = CY - (int)ro - 1, yb = CY + (int)ro + 2;
-    if (ya < y0) ya = y0;
-    if (yb > y0 + h) yb = y0 + h;
-    for (int y = ya; y < yb; y++) {
-        float dy = y + 0.5f - CY, o2 = (ro + 1) * (ro + 1) - dy * dy, i2 = (ri - 1) * (ri - 1) - dy * dy;
-        if (o2 <= 0) continue;
-        int xo = (int)ceilf(sqrtf(o2)), xi = i2 > 0 ? (int)floorf(sqrtf(i2)) : 0;
-        uint16_t *row = buf + (y - y0) * W;
-        for (int x = CX - xo; x < CX + xo; x++) {
-            if (x > CX - xi && x < CX + xi - 1) { x = CX + xi - 1; continue; }   // skip the middle
-            if (x < 0 || x >= W) continue;
-            float dx = x + 0.5f - CX, d = sqrtf(dx * dx + dy * dy);
-            float a = clampf(fminf(ro - d, d - ri) + 0.5f, 0, 1);
-            if (a <= 0) continue;
-            float ang = atan2f(dx, -dy);
-            if (ang < 0) ang += 2 * (float)M_PI;
-            int v = (int)((ang <= lim ? bright : 38) * a);
-            row[x] = rgb(v, v, v);
-        }
-    }
-}
-#endif
 
 // Colour v (0..255 per channel) faded towards black by a (the screen behind the bubble is black)
 static uint16_t dim(const int v[3], float a) { return rgb((int)(v[0] * a), (int)(v[1] * a), (int)(v[2] * a)); }
@@ -1172,7 +1125,7 @@ static void draw_label_row(uint16_t *buf, int y0, int h, int y, float alpha)
     const font_t *f = &font_label;
     char t[52];
     snprintf(t, sizeof t, "%s", bl_label);
-    int mw = bl_model[0] ? ftext_width(f, bl_model) : 0, room = (SCREEN_ROUND ? 300 : 380) - (mw ? mw + 12 : 0);   // (square: no curve to clear)
+    int mw = bl_model[0] ? ftext_width(f, bl_model) : 0, room = 380 - (mw ? mw + 12 : 0);
     if (ftext_width(f, t) > room && mw) {             // the chat's name matters more: the model makes way
         room += mw + 12;
         mw = 0;
@@ -1410,30 +1363,7 @@ static void draw_pairing(uint16_t *buf, int y0, int h)
 // The halo: brightest at the edge of the glass, fading out over ~55 px towards the middle, faint
 #define HALO_IN 178
 #define HALO_OUT 233
-#if !SCREEN_ROUND
 static void draw_halo(uint16_t *buf, int y0, int h) {}   // square: none (a glow round a square edge looked wrong)
-#else
-static void draw_halo(uint16_t *buf, int y0, int h)
-{
-    if (!halo_q[0] && !halo_q[1] && !halo_q[2]) return;
-    float peak = 0.42f;
-    for (int y = y0; y < y0 + h; y++) {
-        float dy = y + 0.5f - CY, o2 = HALO_OUT * HALO_OUT - dy * dy, i2 = HALO_IN * HALO_IN - dy * dy;
-        if (o2 <= 0) continue;
-        int xo = (int)ceilf(sqrtf(o2)), xi = i2 > 0 ? (int)floorf(sqrtf(i2)) : 0;
-        uint16_t *row = buf + (y - y0) * W;
-        for (int x = CX - xo; x < CX + xo; x++) {
-            if (x > CX - xi && x < CX + xi - 1) { x = CX + xi - 1; continue; }   // (just the band near the edge)
-            if (x < 0 || x >= W) continue;
-            float dx = x + 0.5f - CX, d = sqrtf(dx * dx + dy * dy);
-            float a = clampf((d - HALO_IN) / (HALO_OUT - HALO_IN), 0, 1);
-            a = a * a * peak;
-            if (a <= 0.004f) continue;
-            row[x] = rgb((int)(halo[0] * a), (int)(halo[1] * a), (int)(halo[2] * a));   // (on black)
-        }
-    }
-}
-#endif
 
 void pet_ui_draw(uint16_t *buf, int y0, int h)
 {
@@ -1477,7 +1407,6 @@ void pet_ui_draw(uint16_t *buf, int y0, int h)
 // its bubble and walks off to wait in a line along the left edge, smaller and dimmer, till it's busy again or closes
 // (characters always walk to a new place, never slide). With no chats, or a meeting to announce, Bobble's own character (the host) is there too, saying
 // what the eyes would have (the welcome, a meeting); a tap on it during the welcome goes on to Wi-Fi setup.
-#if !SCREEN_ROUND
 #define CROWD_MAX 3
 #define CROWD_PX 5                            // screen pixels to a sprite pixel
 #define CROWD_FEET (H - 14)                   // where the characters stand
@@ -1936,4 +1865,3 @@ static void crowd_draw(uint16_t *buf, int y0, int h)
         draw_ftext(buf, y0, h, W - 14 - ftext_width(mf, t), H - (fl ? 44 : 34), mf, t, fl ? rgb(255, 102, 26) : rgb(120, 120, 132));
     }
 }
-#endif

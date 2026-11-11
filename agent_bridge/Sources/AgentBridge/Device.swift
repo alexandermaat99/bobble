@@ -9,7 +9,9 @@ final class Device {
     // A Bobble on the network: its name ("Bobble 3F2A", or what it was named) and id (from its hardware; boards on
     // older firmware have none)
     struct Board: Equatable { let endpoint: NWEndpoint; let name: String; let id: String? }
-    private(set) var boards: [Board] = []             // every Bobble seen, for choosing one to pair with
+    private(set) var boards: [Board] = []             // every Bobble Square seen, for choosing one to pair with
+    private var found: [Board] = []                   // every Bobble on the network, before the round ones are left out
+    private var square: [NWEndpoint: Bool] = [:]      // what each said it is (GET /info); none yet: still to ask
 
     private(set) var status: Status = .searching { didSet { if status != oldValue { onChange() } } }
     private var browser: NWBrowser?
@@ -31,13 +33,13 @@ final class Device {
             ?? UserDefaults(suiteName: "dev.agentbridge.AgentBridge")?.string(forKey: "deviceKey") ?? ""   // (from when it was Agent Bridge)
     }
     var paired: Bool { pairedKey != nil }
-    // The simulators (the firmware running on this Mac, from ~/esp/amoled_demo/sim) are displays of their own: Bobble
-    // Bubble (the round board) and Bobble Square (the 4" square one). One Device follows the board, one each simulator,
-    // and chats go to all of them. dir: where it keeps its things (its port file), under Application Support.
+    // The simulator (the firmware running on this Mac, from ~/esp/amoled_demo/sim) is a display of its own: Bobble
+    // Square. One Device follows the board, one the simulator, and chats go to both. dir: where it keeps its things (its
+    // port file), under Application Support. (The round Bobble Bubble's simulator, and the one before it, are archived:
+    // their names are still left out of what's found on the network.)
     struct Sim { let name: String, dir: String, keyFile: String }
-    static let bubble = Sim(name: "Bobble Bubble", dir: "BobbleSim", keyFile: "sim-key")
     static let square = Sim(name: "Bobble Square", dir: "BobbleSquare", keyFile: "sim-square-key")
-    private static let simNames: Set = ["Bobble Simulator", bubble.name, square.name]
+    private static let simNames: Set = ["Bobble Simulator", "Bobble Bubble", square.name]
     let sim: Sim?
     var simulator: Bool { sim != nil }
     init(sim: Sim? = nil) { self.sim = sim }
@@ -47,16 +49,37 @@ final class Device {
         let b = NWBrowser(for: .bonjourWithTXTRecord(type: "_bobble._tcp", domain: nil), using: .tcp)
         b.browseResultsChangedHandler = { [weak self] results, _ in
             guard let self else { return }
-            self.boards = results.compactMap { r in
+            self.found = results.compactMap { r in
                 guard case let .service(name, _, _, _) = r.endpoint, !Device.simNames.contains(name) else { return nil }
                 var id: String?
                 if case let .bonjour(txt) = r.metadata { id = txt["id"] }
                 return Board(endpoint: r.endpoint, name: name, id: id)
             }.sorted { $0.name < $1.name }
-            self.follow()
+            self.sortBoards()
         }
         b.start(queue: .main)
         browser = b
+    }
+
+    // Only Bobble Squares: the round Bobble Bubble is archived, and the app no longer talks to one. A board says which
+    // it is in GET /info ("board"; firmware from before boards said: only the square says its "look"). One that
+    // doesn't answer is asked again in a while.
+    private func sortBoards() {
+        for b in found where square[b.endpoint] == nil {
+            square[b.endpoint] = false
+            request(b.endpoint, "/info", Data(), method: "GET") { [weak self] code, body in
+                guard let self else { return }
+                guard code == 200, let body, let j = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any] else {
+                    self.square[b.endpoint] = nil
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 15) { [weak self] in self?.sortBoards() }
+                    return
+                }
+                self.square[b.endpoint] = (j["board"] as? String ?? (j["look"] != nil ? "square" : "round")) == "square"
+                self.sortBoards()
+            }
+        }
+        boards = found.filter { square[$0.endpoint] == true }
+        follow()
     }
 
     // Which board is ours: the one we paired with (by its id), or, until we know, the only one about. With several
@@ -225,10 +248,9 @@ final class Device {
         }
     }
 
-    // ---- the square's look: "field" (Teenage Engineering-ish), "classic" (Apple-ish) or "tiles" (a phone's widgets).
-    // Round boards don't have one.
+    // ---- the look: "field" (Teenage Engineering-ish), "classic" (Apple-ish) or "tiles" (a phone's widgets)
 
-    // What it shows now (GET /info says it), or nil: a round board, older firmware, or not reachable
+    // What it shows now (GET /info says it), or nil: older firmware, or not reachable
     func fetchLook(_ done: @escaping (String?) -> Void) {
         guard let endpoint else { done(nil); return }
         request(endpoint, "/info", Data(), method: "GET") { code, body in

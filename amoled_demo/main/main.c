@@ -23,7 +23,9 @@
 #include "esp_attr.h"
 #include "esp_lcd_panel_io.h"
 #include "esp_lcd_panel_ops.h"
-#include "esp_lcd_sh8601.h"
+#ifdef BOBBLE_SIM
+#include "esp_lcd_sh8601.h"                      // (the simulator's stand-in panel)
+#endif
 #include "nvs_flash.h"
 #include "nvs.h"
 #include "esp_pm.h"
@@ -57,6 +59,7 @@ static bool show_empty;              // battery ran out: showing "plug in" befor
 #define FRAME_US 33000               // ~30 fps for ordinary updates...
 #define FRAME_US_MOVING 4000         // ...and as fast as frames can be made while things move (smaller steps = less tearing)
 
+#ifdef BOBBLE_SIM                    // (the simulator's stand-in panel)
 #define PIN_CS   9
 #define PIN_CLK  10
 #define PIN_D0   11
@@ -64,11 +67,13 @@ static bool show_empty;              // battery ran out: showing "plug in" befor
 #define PIN_D2   13
 #define PIN_D3   14
 #define PIN_RST  21
+#endif
 #define PIN_SDA  47
 #define PIN_SCL  48
 #define PIN_BOOT 0
 
 // ---------------------------------------------------------------- display
+#ifdef BOBBLE_SIM                    // (the simulator plays a QSPI panel: what draws on its glass)
 static const sh8601_lcd_init_cmd_t co5300_init[] = {
     {0x11, (uint8_t[]){0x00}, 0, 80},
     {0xC4, (uint8_t[]){0x80}, 1, 0},
@@ -81,15 +86,18 @@ static const sh8601_lcd_init_cmd_t co5300_init[] = {
 
 static esp_lcd_panel_handle_t panel;
 static esp_lcd_panel_io_handle_t panel_io;
+#endif
 static SemaphoreHandle_t buf_free;
 static uint16_t *bufs[NBUF];
 
+#ifdef BOBBLE_SIM
 static bool on_trans_done(esp_lcd_panel_io_handle_t io, esp_lcd_panel_io_event_data_t *e, void *ctx)
 {
     BaseType_t hp = pdFALSE;
     xSemaphoreGiveFromISR(buf_free, &hp);
     return hp == pdTRUE;
 }
+#endif
 
 static void display_init(void)
 {
@@ -100,8 +108,7 @@ static void display_init(void)
         bufs[i] = heap_caps_malloc(W * STRIP * 2, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
         assert(bufs[i]);
     }
-    return;
-#endif
+#else
     spi_bus_config_t bus = SH8601_PANEL_BUS_QSPI_CONFIG(PIN_CLK, PIN_D0, PIN_D1, PIN_D2, PIN_D3, W * STRIP * 2);
     ESP_ERROR_CHECK(spi_bus_initialize(SPI2_HOST, &bus, SPI_DMA_CH_AUTO));
 
@@ -133,6 +140,7 @@ static void display_init(void)
         bufs[i] = heap_caps_malloc(W * STRIP * 2, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
         assert(bufs[i]);
     }
+#endif
 }
 
 // ---------------------------------------------------------------- orientation (QMI8658 accelerometer)
@@ -403,50 +411,6 @@ static void tilt_cal_update(int64_t now)
     tilt_since = now;
 }
 
-#if SCREEN_ROUND                                     // (the square's, in the settings' style, come after touch_cal_draw)
-static void draw_arrow(uint16_t *buf, int y0, int h, int dir, uint16_t c)   // 0 down, 1 right, 2 up, 3 left
-{
-    for (int i = 0; i < 34; i++) {
-        int w = 34 - i;                                // head narrows towards the tip
-        switch (dir) {
-        case 0: fill_rect(buf, y0, h, CX - w, 392 + i, CX + w, 393 + i, c); break;
-        case 1: fill_rect(buf, y0, h, 392 + i, CY - w, 393 + i, CY + w, c); break;
-        case 2: fill_rect(buf, y0, h, CX - w, 73 - i, CX + w, 74 - i, c); break;
-        case 3: fill_rect(buf, y0, h, 73 - i, CY - w, 74 - i, CY + w, c); break;
-        }
-    }
-    switch (dir) {                                     // shaft
-    case 0: fill_rect(buf, y0, h, CX - 9, 352, CX + 9, 392, c); break;
-    case 1: fill_rect(buf, y0, h, 352, CY - 9, 392, CY + 9, c); break;
-    case 2: fill_rect(buf, y0, h, CX - 9, 74, CX + 9, 114, c); break;
-    case 3: fill_rect(buf, y0, h, 74, CY - 9, 114, CY + 9, c); break;
-    }
-}
-
-static void tilt_cal_draw(uint16_t *buf, int y0, int h)
-{
-    uint16_t white = rgb(255, 255, 255), accent = rgb(0, 230, 200), grey = rgb(70, 70, 90), dim = rgb(140, 140, 160);
-    if (tilt_step == 7) { text_c(buf, y0, h, 210, 3, "Tilt calibrated", accent); return; }
-    if (tilt_step == 8) {
-        text_c(buf, y0, h, 190, 3, "Let's try again", rgb(255, 150, 60));
-        text_c(buf, y0, h, 236, 2, "the positions didn't agree", dim);
-        return;
-    }
-    static const char *title[] = {"Stand it upright", "Right edge down", "Upside down", "Left edge down",
-                                  "Lay it flat", "Last: face down"};
-    static const char *sub[] = {"arrow pointing at the table", "arrow pointing at the table", "arrow pointing at the table",
-                                "arrow pointing at the table", "screen facing up", "screen on the table, then flip back"};
-    int i = tilt_step - 1;
-    text_c(buf, y0, h, 172, 3, title[i], white);
-    text_c(buf, y0, h, 212, 2, sub[i], dim);
-    if (i < 4) draw_arrow(buf, y0, h, i, accent);
-    char step[48];
-    snprintf(step, sizeof step, "Position %d of %d - hold still", tilt_step, TILT_POSES);
-    text_c(buf, y0, h, 146, 1, step, dim);
-    fill_rect(buf, y0, h, CX - 100, 262, CX + 100, 272, grey);
-    fill_rect(buf, y0, h, CX - 100, 262, CX - 100 + (int)(200 * (tilt_progress > 1 ? 1 : tilt_progress)), 272, accent);
-}
-#endif
 
 // ---------------------------------------------------------------- touch (FT3168)
 static i2c_master_dev_handle_t touch_dev;
@@ -547,14 +511,9 @@ static bool read_touch(int *x, int *y)
 
 // ---------------------------------------------------------------- touch calibration screen
 // (the square: its corners too, round from the top left, where the keyboard's outer keys are)
-#if SCREEN_ROUND
-static const int cal_pts[][2] = {{CX, CY}, {CX, 70}, {CX, H - 70}, {70, CY}, {W - 70, CY}};
-#define N_CAL_PTS 5
-#else
 static const int cal_pts[][2] = {{CX, CY}, {60, 60}, {CX, 60}, {W - 60, 60}, {W - 60, CY}, {W - 60, H - 60},
                                  {CX, H - 60}, {60, H - 60}, {60, CY}};
 #define N_CAL_PTS 9
-#endif
 static bool calibrating, cal_retry;
 static int cal_idx, cal_raw[N_CAL_PTS][2], cal_tries;
 static char cal_note[48];                // shown after a run: why it's starting over, or why it gave up
@@ -665,7 +624,6 @@ static void touch_cal_update(bool down, int rx, int ry, int64_t now)
     was = down;
 }
 
-#if !SCREEN_ROUND
 // The square, in the settings' style: a blue ring with a soft halo to tap, the words in the Inter fonts, and the steps as
 // a row of dots (done white, this one blue)
 static void ftext_mid(uint16_t *buf, int y0, int h, int cx, int y, const font_t *f, const char *t, uint16_t col)
@@ -789,24 +747,6 @@ static void ota_draw(uint16_t *buf, int y0, int h)
     snprintf(t, sizeof t, "%d%%", p);
     ftext_mid(buf, y0, h, CX, 356, &font_label, t, grey);
 }
-#else
-static void touch_cal_draw(uint16_t *buf, int y0, int h)
-{
-    uint16_t white = rgb(255, 255, 255), accent = rgb(0, 230, 200), grey = rgb(130, 130, 150), dim = rgb(80, 80, 98);
-    int tx = cal_pts[cal_idx][0], ty = cal_pts[cal_idx][1];
-    bool centre = cal_idx == 0;
-    int top = centre ? 140 : CY - 40;
-    if (cal_retry && centre) text_c(buf, y0, h, 112, 2, "Didn't line up - try again", rgb(255, 150, 60));
-    text_c(buf, y0, h, top, 2, "Tap the centre of the dot", white);
-    char n[32];
-    snprintf(n, sizeof n, "%d of %d", cal_idx + 1, N_CAL_PTS);
-    text_c(buf, y0, h, centre ? 300 : CY + 28, 2, n, grey);
-    text_c(buf, y0, h, centre ? 330 : CY + 56, 2, "Press BOOT to cancel", dim);
-    fill_circle(buf, y0, h, tx, ty, 18, accent);
-    fill_circle(buf, y0, h, tx, ty, 12, 0);
-    fill_circle(buf, y0, h, tx, ty, 4, white);
-}
-#endif
 
 // ---------------------------------------------------------------- screens
 // Wi-Fi settings is a card that slides down over the calendar. `sheet` is the card's bottom edge in
@@ -867,12 +807,7 @@ static void dim_rows(uint16_t *buf, int y0, int from, int to, int k)
 
 // Pages you swipe between under the card: the pet, calendar, Spotify's Now Playing, and your Spotify library; and on
 // the square board (it has a speaker and microphones), talking with Claude, left of the chats
-#if SCREEN_ROUND
-enum { PAGE_PET, PAGE_CAL, PAGE_MUSIC, PAGE_LIB, N_PAGES };
-#define PAGE_CHAT (-100)                   // (no such page)
-#else
 enum { PAGE_CHAT, PAGE_PET, PAGE_CAL, PAGE_MUSIC, PAGE_LIB, N_PAGES };
-#endif
 static int page = PAGE_PET;                // the eyes are home: where it starts and wakes
 static bool page_auto;     // Now Playing was opened automatically (so it may close itself too)
 
@@ -891,11 +826,11 @@ static int snap_page[3] = {-2, -2, -2};   // which page each holds (-1 = empty/b
 static int64_t snap_time[3];
 static uint16_t *snap_a, *snap_b;          // the two being composited this frame
 
-// Where the battery bar sits: at the top edge on most screens, but inside the meeting ring on the
-// calendar face, gliding up to the edge as the card is pulled down
+// Where the battery bar sits while the card is pulled down: 18 px down on most pages, but on the calendar 58,
+// gliding up to 18 as the card comes down
 static int status_bar_top(int fs)
 {
-    if (page != PAGE_CAL || !cal_ui_is_face()) return 18;
+    if (page != PAGE_CAL) return 18;
     int k = fs > 60 ? 60 : (fs < 0 ? 0 : fs);
     return 58 - 40 * k / 60;
 }
@@ -909,7 +844,6 @@ static void page_bg(int p, uint16_t *buf, int y0, int y1)
 
 // the pet's face stays clear of the battery until it's getting low
 // (the square's corner is clear of everything: always there)
-static bool status_shown(int p) { return !SCREEN_ROUND || p != PAGE_PET || (battery_percent() <= 15 && !battery_charging()); }
 
 static void page_fg(int p, uint16_t *buf, int y0, int h)
 {
@@ -918,7 +852,6 @@ static void page_fg(int p, uint16_t *buf, int y0, int h)
     else if (p == PAGE_PET) pet_ui_draw(buf, y0, h);
     else if (p == PAGE_CHAT) chat_ui_draw(buf, y0, h);
     else cal_ui_draw(buf, y0, h);
-    if (SCREEN_ROUND && status_shown(p)) draw_status_bar(buf, y0, h, p == PAGE_CAL && cal_ui_is_face() ? 58 : 18);   // slides with its page
     // (the square's stays put over the sliding pages: drawn by draw_overlay and draw_strip instead)
 }
 
@@ -949,10 +882,8 @@ static void draw_overlay(uint16_t *buf, int y0, int h)
 {
     int fs = frame_sheet;
     if (ota_progress() >= 0) {                        // firmware update in progress
-#if !SCREEN_ROUND
         ota_draw(buf, y0, h);
         return;
-#endif
         char p[24];
         snprintf(p, sizeof p, "%d%%", ota_progress());
         text_c(buf, y0, h, 180, 3, "Updating", rgb(255, 255, 255));
@@ -963,7 +894,6 @@ static void draw_overlay(uint16_t *buf, int y0, int h)
         return;
     }
     if (show_empty) {
-#if !SCREEN_ROUND                                    // (the square: in the settings' style)
         const uint16_t red = rgb(255, 69, 58);
         aa_rrect(buf, y0, h, CX - 58, 150, CX + 50, 208, 14, red);           // an empty battery: outline,
         aa_rrect(buf, y0, h, CX - 53, 155, CX + 45, 203, 10, rgb(0, 0, 0));
@@ -971,13 +901,6 @@ static void draw_overlay(uint16_t *buf, int y0, int h)
         aa_rrect(buf, y0, h, CX + 54, 168, CX + 62, 190, 4, red);            // and its tip
         ftext_mid(buf, y0, h, CX, 246, &font_body, "Battery empty", rgb(255, 255, 255));
         ftext_mid(buf, y0, h, CX, 292, &font_label, "Plug in to charge", rgb(150, 150, 158));
-        return;
-#endif
-        fill_rrect(buf, y0, h, CX - 60, 150, CX + 52, 210, 10, rgb(220, 60, 60));    // empty battery outline
-        fill_rrect(buf, y0, h, CX - 54, 156, CX + 46, 204, 6, rgb(0, 0, 0));
-        fill_rect(buf, y0, h, CX + 52, 168, CX + 62, 192, rgb(220, 60, 60));
-        text_c(buf, y0, h, 250, 3, "Battery empty", rgb(255, 255, 255));
-        text_c(buf, y0, h, 292, 2, "Plug in to charge", rgb(140, 140, 160));
         return;
     }
     if (calibrating) { touch_cal_draw(buf, y0, h); return; }
@@ -990,20 +913,11 @@ static void draw_overlay(uint16_t *buf, int y0, int h)
         else if (page == PAGE_CHAT) chat_ui_draw(buf, y0, h);
         else cal_ui_draw(buf, y0, h);
         if (fs == 0) {
-            if (SCREEN_ROUND && status_shown(page)) draw_status_bar(buf, y0, h, status_bar_top(0));
-            if (snap_buf[0]) {                         // keep the current page's snapshot up to date (round-clipped)
-                for (int r = 0; r < h; r++) {
-                    int y = y0 + r;
-                    float dy = y - CY + 0.5f;
-                    int half = SCREEN_ROUND ? (int)sqrtf(fmaxf(0, (W / 2) * (W / 2) - dy * dy)) : W / 2, xa = CX - half, xb = CX + half;
-                    uint16_t *d = snap_buf[0] + y * W;
-                    memset(d, 0, xa * 2);
-                    memcpy(d + xa, buf + r * W + xa, (xb - xa) * 2);
-                    memset(d + xb, 0, (W - xb) * 2);
-                }
+            if (snap_buf[0]) {                         // keep the current page's snapshot up to date
+                memcpy(snap_buf[0] + y0 * W, buf, h * W * 2);
                 if (y0 + h >= H) { snap_page[0] = page; snap_time[0] = esp_timer_get_time(); }
             }
-            if (!SCREEN_ROUND) draw_status_bar(buf, y0, h, 0);   // (after the snapshot, which leaves it out)
+            draw_status_bar(buf, y0, h, 0);   // (after the snapshot, which leaves it out)
             // no network to join (or still none after 20 s): say where Wi-Fi is set up; on the eyes, under them
             if ((page != PAGE_PET || agent_known()) && !calendar_loaded() && (wifi_state() == WS_PORTAL || (wifi_state() != WS_CONNECTED && esp_timer_get_time() > 20000000)))
                 text_c(buf, y0, h, page == PAGE_PET ? 380 : 262, 1, "Swipe down from the top for Wi-Fi", rgb(140, 140, 160));
@@ -1056,10 +970,10 @@ static void set_brightness(int b)
     brightness = b;
 #if SQUARE_HW
     sq_backlight(b);
-    return;
-#endif
+#else
     uint8_t v = b;
     esp_lcd_panel_io_tx_param(panel_io, (0x02 << 24) | (0x51 << 8), &v, 1);   // write display brightness (QSPI)
+#endif
 }
 
 int screen_brightness_get(void) { return bright_pref; }
@@ -1146,7 +1060,7 @@ static void set_locked(bool on)
 
 int device_volume_get(void) { return volume_pref; }
 
-int ui_look(void) { return SCREEN_ROUND ? LOOK_CLASSIC : look_pref; }
+int ui_look(void) { return look_pref; }
 bool ui_field(void) { return ui_look() == LOOK_FIELD; }
 bool ui_tiles(void) { return ui_look() == LOOK_TILES; }
 
@@ -1244,9 +1158,10 @@ static bool touch_off;        // the touch chip's asleep (locked by the PWR butt
 static void panel_cmd(uint8_t cmd)
 {
 #if SQUARE_HW
-    return;                                            // (the 4" panel's commands go through the slow expander: the light does it)
-#endif
+    (void)cmd;                                         // (the 4" panel's commands go through the slow expander: the light does it)
+#else
     esp_lcd_panel_io_tx_param(panel_io, (0x02 << 24) | (cmd << 8), NULL, 0);
+#endif
 }
 
 static void imu_power(bool on)
@@ -1372,7 +1287,7 @@ static int part_r;
 // Columns of a strip to send: the round glass's widest row in the strip, narrowed to part_r's circle
 static void strip_window(int y0, int h, int *x0, int *x1)
 {
-    if (!SCREEN_ROUND && !part_r) { *x0 = 0; *x1 = W; return; }   // (the square glass: every row is all of it)
+    if (!part_r) { *x0 = 0; *x1 = W; return; }   // (the square glass: every row is all of it)
     int dmin = H;                                       // the strip's row closest to the centre is its widest
     for (int y = y0; y < y0 + h; y++) {
         int d = abs(2 * y + 1 - H) / 2;
@@ -1393,12 +1308,9 @@ static int win_x0, win_x1 = W;   // the window of the strip being sampled
 static void sample_rows(uint16_t *dst, int y0, int y1)
 {
     const int32_t c = (W - 1) * 32768;                 // centre, 16.16
-    const int R = W / 2;
     int xa_row[STRIP], xb_row[STRIP];
-    for (int py = y0; py < y1; py++) {                 // visible span of each glass row (round: a chord; square: all)
-        int dyi = 2 * py - (W - 1);
-        int half = SCREEN_ROUND ? (int)sqrtf((float)(R * R) - dyi * dyi / 4.0f) : W / 2;
-        int xa = W / 2 - half, xb = W / 2 + half;
+    for (int py = y0; py < y1; py++) {                 // span of each glass row to sample: the strip's window
+        int xa = 0, xb = W;
         xa_row[py - y0] = xa < win_x0 ? win_x0 : xa;
         xb_row[py - y0] = xb > win_x1 ? win_x1 : xb;
         if (xb_row[py - y0] < xa_row[py - y0]) xb_row[py - y0] = xa_row[py - y0];
@@ -1466,13 +1378,6 @@ static void snapshot(int p, uint16_t *dst)
         int h = (y0 + STRIP > H) ? H - y0 : STRIP;
         split_rows(page_render_bg, dst + y0 * W, y0, h);
         page_fg(p, dst + y0 * W, y0, h);
-    }
-    for (int y = 0; y < H && SCREEN_ROUND; y++) {    // clip to the round glass: pages slide past as discs (square: whole)
-        float dy = y - CY + 0.5f;
-        int half = (int)sqrtf(fmaxf(0, (W / 2) * (W / 2) - dy * dy));
-        int xa = CX - half, xb = CX + half;
-        if (xa > 0) memset(dst + y * W, 0, xa * 2);
-        if (xb < W) memset(dst + y * W + xb, 0, (W - xb) * 2);
     }
 }
 
@@ -1545,7 +1450,7 @@ static void draw_strip(uint16_t *buf, int y0, int h)
     int off = (int)lroundf(pg_off);
     cmp_off = off > W ? W : (off < -W ? -W : off);
     split_rows(compose_rows, buf, y0, h);            // both cores copy half the strip each
-    if (!SCREEN_ROUND) draw_status_bar(buf, y0, h, 0);   // the square's status bar doesn't slide
+    draw_status_bar(buf, y0, h, 0);                     // the status bar doesn't slide
 }
 
 // Send a finished strip to the glass, but only the part inside the round display: the square's
@@ -1589,11 +1494,8 @@ static void render_frame(bool content)
 {
     static int prev_sheet;
     frame_sheet = (int)(sheet + 0.5f);
-#if !SCREEN_ROUND
     status_bar_clock(page != PAGE_CAL || frame_sheet > 0 || pages_sliding());   // (the calendar shows the time big)
-#endif
     if (pages_sliding()) prepare_snapshots();
-#if !SCREEN_ROUND
     card_snap = frame_sheet > 0 && frame_sheet < H && snap_buf[0] && !calibrating && !tilt_step && ota_progress() < 0 && !show_empty;
     // (the snapshot is kept up to date while the page shows; coming back from the open card it's from before, so
     // it's drawn afresh once)
@@ -1615,7 +1517,6 @@ static void render_frame(bool content)
         }
     }
     card_cached = card_moving;
-#endif
     prev_sheet = frame_sheet;
     if (ang != 0 && frame) {
         rs_slide = pages_sliding() && snap_a && snap_b;
@@ -1624,9 +1525,7 @@ static void render_frame(bool content)
             cmp_off = off > W ? W : (off < -W ? -W : off);
             frame_valid = false;
         }
-#if !SCREEN_ROUND
         if (rs_slide) { rs_slide = false; content = true; }   // (compose upright, with the status bar on top, then turn)
-#endif
         bool part = part_on && frame_valid && !rs_slide;
         int64_t p0 = esp_timer_get_time();
         int bi = 0;
@@ -1659,25 +1558,20 @@ static void render_frame(bool content)
         // other way give the box on the glass, rows and columns)
         bi = 0;
         for (int k = 0; k < (part ? part_cnt : 1); k++) {
-            int ga = 0, gb = H, gx0 = 0, gx1 = W;
+            int ga = 0, gb = H;
             if (part) {
-                float co = cosf(r), si = sinf(r), mnx = W, mxx = 0, mny = H, mxy = 0;
+                float co = cosf(r), si = sinf(r), mny = H, mxy = 0;
                 for (int q = 0; q < 4; q++) {
                     float px = part_rect[k][q & 1 ? 2 : 0] - (W - 1) / 2.0f, py = part_rect[k][q & 2 ? 3 : 1] - (W - 1) / 2.0f;
-                    float gx = (W - 1) / 2.0f + co * px - si * py, gy = (W - 1) / 2.0f + si * px + co * py;
-                    mnx = fminf(mnx, gx); mxx = fmaxf(mxx, gx); mny = fminf(mny, gy); mxy = fmaxf(mxy, gy);
+                    float gy = (W - 1) / 2.0f + si * px + co * py;
+                    mny = fminf(mny, gy); mxy = fmaxf(mxy, gy);
                 }
-                ga = (int)mny - 3; gb = (int)mxy + 4; gx0 = (int)mnx - 3; gx1 = (int)mxx + 4;
+                ga = (int)mny - 3; gb = (int)mxy + 4;
             }
             for (int y0 = 0; y0 < H; y0 += STRIP) {
                 int h = (y0 + STRIP > H) ? H - y0 : STRIP;
                 if (part && strip_skipped(y0, h, ga, gb)) continue;
                 strip_window(y0, h, &win_x0, &win_x1);
-                if (part && SCREEN_ROUND) {            // (only the columns the area covers; even edges for the panel.
-                    int a = gx0 & ~1, b = (gx1 + 1) & ~1;   // The square sends whole rows: its DMA copies only those,
-                    if (a > win_x0) win_x0 = a;              // and the CPU writing part rows into PSRAM itself stalls
-                    if (b < win_x1) win_x1 = b;              // everything, which glitched the voice chat's orb)
-                }
                 if (win_x1 <= win_x0) continue;
                 xSemaphoreTake(buf_free, portMAX_DELAY);
                 split_rows(sample_rows, bufs[bi], y0, h);
@@ -1848,7 +1742,6 @@ void app_main(void)
             asleep_from = 0;
             slept_by_hand = false;
             ESP_LOGI(TAG, "wake (%s)", agent ? "agent" : meeting ? "meeting" : touch ? (hw_locked ? "unlocked" : "touch") : moved ? "picked up" : updating ? "update" : pwr_press ? "power button" : "button");
-            if (page != PAGE_PET && SCREEN_ROUND) { page = PAGE_PET; page_auto = false; cal_ui_enter(); }   // wakes to the eyes (home)
             // (the square wakes where it was left: it shouldn't pull you off a page you chose)
             power_screen_on();
             update_orientation(true);                  // face the right way straight away, no spin
@@ -1985,9 +1878,6 @@ void app_main(void)
         pet_ui_set_welcome(agent_known() ? 0 : offline ? 1 : 2);   // (set up already: a dropped Wi-Fi just gets the hint)
         if (pet_ui_wants_wifi() && sheet <= 0) { card_animate(H); wifi_ui_show_phone(); }
         if (!locked && agent_calls()) {               // (the square stays on whatever page you're on)
-            if (SCREEN_ROUND && page != PAGE_PET && now - last_use > 10000000 && sheet <= 0 && !pg_drag && pg_off == 0 && !card_drag) {
-                page = PAGE_PET; page_auto = false; force_redraw = true;
-            }
             last_use = now;
             if (power == PW_FADING_OUT && !slept_by_hand) power = PW_FADING_IN;   // (not after the PWR button)
         }
@@ -2178,11 +2068,7 @@ void app_main(void)
         if (look_changed) { force_redraw = true; look_changed = false; }
         bool lib_dirty = page == PAGE_LIB && library_ui_dirty(), music_dirty = page == PAGE_MUSIC && spotify_ui_dirty();
         bool pet_dirty = page == PAGE_PET && pet_ui_dirty(), chat_dirty = page == PAGE_CHAT && chat_ui_dirty();
-#if !SCREEN_ROUND
         bool reels_dirty = page == PAGE_MUSIC && spotify_ui_reels_dirty();
-#else
-        bool reels_dirty = false;
-#endif
         // the pet page has no clock: a full frame every 10 s is plenty, plus one (smoothly turned) once the eyes settle
         static int64_t pet_moved;
         if (pet_dirty) pet_moved = now;
@@ -2198,11 +2084,9 @@ void app_main(void)
             part_cnt = chat_ui_take_rect(r) && !others && ang == last_ang ? 1 : 0;
             if (part_cnt) memcpy(part_rect[0], r, sizeof r);
         }
-#if !SCREEN_ROUND
         if (reels_dirty) {                             // the music page: just the tape reels turning, if that's all
             part_cnt = spotify_ui_take_reels(part_rect) && !others && ang == last_ang ? 2 : 0;
         }
-#endif
         part_on = part_cnt > 0;
         if (pet_dirty && !part_on) pet_ui_take_rect(NULL, NULL, NULL, NULL);
         // dragging the brightness slider on the open card: just its rows (the whole card made the slider lag)

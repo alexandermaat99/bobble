@@ -2,9 +2,9 @@
 // Bobble.zip). A few times a day the app looks at the newest release; when its build number is higher than ours, it
 // downloads the zip, checks it's Bobble, swaps it in for itself and starts again. Files the app downloads itself
 // aren't quarantined, so macOS doesn't ask again (only the first, hand-installed copy needs Open Anyway).
-// The same release carries the display's firmware, built with that build number: bobble-firmware.bin for the round
-// board, bobble-firmware-square.bin for the square. Once the app is current, the board we're paired with gets the
-// one for it too, over Wi-Fi with our key, when no chat is busy.
+// The same release carries the display's firmware, built with that build number: bobble-firmware-square.bin, Bobble
+// Square's (the round Bobble Bubble is archived: releases have none for it). Once the app is current, the board we're
+// paired with gets it too, over Wi-Fi with our key, when no chat is busy.
 import AppKit
 
 final class Updater {
@@ -61,12 +61,10 @@ final class Updater {
                     self.status = .failed("Couldn't reach GitHub")
                     return
                 }
-                // the display's firmware, for each board (a release from before the square had one: the round's only)
+                // the display's firmware (for the square: a round board isn't followed, and gets none)
                 var fw: [String: URL] = [:]
-                for (board, name) in [("round", "bobble-firmware.bin"), ("square", "bobble-firmware-square.bin")] {
-                    fw[board] = (assets.first { $0["name"] as? String == name }?["browser_download_url"] as? String)
-                        .flatMap(URL.init(string:))
-                }
+                fw["square"] = (assets.first { $0["name"] as? String == "bobble-firmware-square.bin" }?["browser_download_url"] as? String)
+                    .flatMap(URL.init(string:))
                 if n > Updater.build {
                     guard self.installed else { self.status = .failed("Build \(n) is out (this copy isn't in Applications)"); return }
                     self.install(url, build: n)      // (the new copy sees to the board once it's running)
@@ -80,7 +78,7 @@ final class Updater {
 
     // The board's firmware: only a release build older than this release (an everyday build, which says release false,
     // is someone developing on it). It restarts (~10 s), so not while a chat is busy: looked at again each minute.
-    // Only the firmware made for its board: the round's would never do on the square, or the other way round.
+    // Only the firmware made for its board (a round one, which Device leaves out anyway, would get none).
     private func updateBoard(_ urls: [String: URL], build n: Int) {
         guard let board, board.paired else { status = .upToDate; return }
         board.firmware { [weak self] fw in

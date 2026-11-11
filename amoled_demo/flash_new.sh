@@ -36,7 +36,7 @@ fi
 dir=$(mktemp -d)
 url=https://github.com/$repo/releases/latest/download
 echo "Downloading the latest Bobble release..."
-for f in bobble-bootloader.bin bobble-partitions.bin bobble-otadata.bin bobble-firmware.bin; do
+for f in bobble-bootloader.bin bobble-partitions.bin bobble-otadata.bin bobble-firmware-square.bin; do
     curl -fsSL -o $dir/$f $url/$f || { echo "Couldn't download $f (is the latest release missing it?)"; exit 1; }
 done
 
@@ -46,8 +46,8 @@ if (( ! keep )); then
 fi
 echo "Flashing..."
 $esptool --chip esp32s3 --port $port -b 460800 --before default_reset --after hard_reset write_flash \
-    --flash_mode dio --flash_freq 80m --flash_size 16MB \
-    0x0 $dir/bobble-bootloader.bin 0x8000 $dir/bobble-partitions.bin 0xf000 $dir/bobble-otadata.bin 0x20000 $dir/bobble-firmware.bin
+    --flash_mode keep --flash_freq keep --flash_size keep \
+    0x0 $dir/bobble-bootloader.bin 0x8000 $dir/bobble-partitions.bin 0xf000 $dir/bobble-otadata.bin 0x20000 $dir/bobble-firmware-square.bin
 rm -rf $dir
 echo
 echo "Done: the Bobble restarts by itself."
