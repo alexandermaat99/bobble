@@ -47,7 +47,7 @@ static int64_t last;
 
 #define SAG_MAGIC   0x5A600001
 #define OFF_MAGIC   0x0FF5E701
-#define LOG_MAGIC   0x1060B001
+#define LOG_MAGIC   0x1060B002          // (0x1060B001: before the gauge was kept beside each reading)
 #define SOT_MAGIC   0x507E0001
 #define LOG_MAX     240
 #define FULL_MV     4150              // a run starts when a charged battery drops below this
@@ -90,6 +90,7 @@ static struct {
     uint32_t magic;
     uint16_t n, step_min;             // n entries, one every step_min minutes from the start of the run
     uint16_t mv[LOG_MAX];
+    uint8_t gauge[LOG_MAX];           // the power chip's fuel gauge then (%, 255: none), to check the curve against it
 } lg;
 static enum { RUN_IDLE, RUN_ARMED, RUN_LOGGING } run;   // ARMED: battery seen full, waiting for it to drain
 static int64_t run_t0;                // esp_timer time of entry 0
@@ -103,6 +104,8 @@ static struct { uint32_t magic, on_ms, bat_ms; } sot = {SOT_MAGIC, 0, 0};
 static int64_t sot_saved_at, plugged_at;
 
 static int shown = -1;                // % on screen
+static bool charger_full(void);       // (the power chip says Full)
+static int gauge_now(void);           // its fuel gauge, % (255: none)
 // On USB the board reads well above the cell's own voltage (charger): learned from the step at each plug / unplug
 #if SQUARE_HW
 static float usb_offset = 0.10f;      // (the power chip measures at the cell: ~0.19 ohm x the 500 mA charge current)
@@ -117,7 +120,7 @@ static int below_max;                 // highest reading while below the shown %
 
 // Flash writes pause both cores' access to PSRAM for a moment, which would show as a hitch if done here on the
 // render loop: keep a copy and let a small background task write it
-#define N_SLOTS 6                     // one for each key: bsag, boff, bcurve, blog, blast, bsot
+#define N_SLOTS 7                     // one for each key: bsag, boff, bcurve, blog, blast, bsot, btop
 EXT_RAM_BSS_ATTR static struct { const char *key; uint8_t data[sizeof lg]; size_t len; bool pending, erase; } slots[N_SLOTS];
 static SemaphoreHandle_t slot_lock;
 static TaskHandle_t writer;
@@ -169,6 +172,19 @@ static bool nvs_get(const char *key, void *p, size_t len)
     bool r = nvs_get_blob(h, key, p, &l) == ESP_OK && l == len;
     nvs_close(h);
     return r;
+}
+
+// A run log from NVS (key: blog, the one being recorded, or blast, the last one), also one kept before the gauge was
+// (its readings: no gauge)
+static bool load_log(const char *key, typeof(lg) *l)
+{
+    if (nvs_get(key, l, sizeof *l) && l->magic == LOG_MAGIC) return true;
+    EXT_RAM_BSS_ATTR static struct { uint32_t magic; uint16_t n, step_min; uint16_t mv[LOG_MAX]; } old;
+    if (!nvs_get(key, &old, sizeof old) || old.magic != 0x1060B001) return false;
+    *l = (typeof(lg)){.magic = LOG_MAGIC, .n = old.n, .step_min = old.step_min};
+    memcpy(l->mv, old.mv, sizeof old.mv);
+    memset(l->gauge, 255, sizeof l->gauge);
+    return true;
 }
 
 static void save_curve(void)
@@ -241,7 +257,7 @@ static void load_learning(float v_now)
     if (nvs_get("boff", &o, sizeof o) && o.magic == OFF_MAGIC) usb_offset = o.off;
     ESP_LOGI(TAG, "curve (%d runs), mV at 100/90/80/70/60/50/40/30/20/10/5/0%%: %d %d %d %d %d %d %d %d %d %d %d %d", curve_runs,
              curve[0], curve[1], curve[2], curve[3], curve[4], curve[5], curve[6], curve[7], curve[8], curve[9], curve[10], curve[11]);
-    if (!nvs_get("blog", &lg, sizeof lg) || lg.magic != LOG_MAGIC || lg.n == 0) { lg.n = 0; return; }
+    if (!load_log("blog", &lg) || lg.n == 0) { lg.n = 0; return; }
 
     // a run was in progress when we last stopped: did the battery die, get charged, or did we just reboot?
     int mv = (int)(v_now * 1000), last_mv = lg.mv[lg.n - 1];
@@ -263,9 +279,11 @@ static void log_tick(int64_t now)
     int mv = (int)(volts * 1000);
     bool usb = plugged_in();
 
-    if (run == RUN_IDLE && mv >= FULL_MV + 20) run = RUN_ARMED;
+    if (run == RUN_IDLE && (mv >= FULL_MV + 20 || (usb && charger_full()))) run = RUN_ARMED;   // (the charger says Full: after a restart
+                                                                                           // the voltage may have settled below)
     if (run == RUN_ARMED && !usb && mv < FULL_MV && unplugged_at && now - unplugged_at > 120000000) {   // settled
         lg = (typeof(lg)){.magic = LOG_MAGIC, .step_min = 2};
+        lg.gauge[lg.n] = gauge_now();
         lg.mv[lg.n++] = mv;
         run = RUN_LOGGING;
         run_t0 = now;
@@ -288,10 +306,11 @@ static void log_tick(int64_t now)
 
     if (now - run_t0 < (int64_t)lg.n * lg.step_min * 60000000) return;
     if (lg.n == LOG_MAX) {                            // full: halve the resolution
-        for (int i = 0; i < LOG_MAX / 2; i++) lg.mv[i] = lg.mv[2 * i];
+        for (int i = 0; i < LOG_MAX / 2; i++) lg.mv[i] = lg.mv[2 * i], lg.gauge[i] = lg.gauge[2 * i];
         lg.n = LOG_MAX / 2;
         lg.step_min *= 2;
     }
+    lg.gauge[lg.n] = gauge_now();
     lg.mv[lg.n++] = mv;
     if (mv <= EMPTY_MV) { learn_from_log(); return; }
     save_log();                                       // (every point, so a restart loses none of it)
@@ -321,17 +340,19 @@ static void take_taught(void)
     if (!taught || run == RUN_LOGGING) return;        // (not over a run being recorded: after it)
     lg = (typeof(lg)){.magic = LOG_MAGIC, .step_min = (uint16_t)taught_step, .n = (uint16_t)taught_n};
     memcpy(lg.mv, taught_mv, taught_n * sizeof *taught_mv);
+    memset(lg.gauge, 255, sizeof lg.gauge);
     ESP_LOGI(TAG, "learning from a run sent back: %d min, %d to %d mV", (lg.n - 1) * lg.step_min, lg.mv[0], lg.mv[lg.n - 1]);
     learn_from_log();
     taught = false;
 }
 
-int battery_last_run(uint16_t *mv, int max, int *step_min)
+int battery_last_run(uint16_t *mv, uint8_t *gauge, int max, int *step_min)
 {
     EXT_RAM_BSS_ATTR static typeof(lg) l;              // (big: PSRAM; only GET /battery/run asks)
-    if (!nvs_get("blast", &l, sizeof l) || l.magic != LOG_MAGIC) return 0;
+    if (!load_log("blast", &l)) return 0;
     int n = l.n < max ? l.n : max;
     memcpy(mv, l.mv, n * sizeof *mv);
+    if (gauge) memcpy(gauge, l.gauge, n);
     *step_min = l.step_min;
     return n;
 }
@@ -414,6 +435,7 @@ static void sag_sample(float raw, int64_t now)
 }
 
 static void diag_refresh(int64_t now);
+static void top_tick(int64_t now);
 
 static void sot_tick(int64_t now, bool first)
 {
@@ -445,6 +467,7 @@ void battery_update(void)
     int64_t now = esp_timer_get_time();
     if (!ok || now - last < 500000) return;
     diag_refresh(now);
+    top_tick(now);
     bool first = last == 0;
     sot_tick(now, first);                             // (before usb_prev and last move on)
     last = now;
@@ -567,6 +590,61 @@ int battery_set_charge_ma(int ma)
 #endif
 }
 
+// ---------------------------------------------------------------- topping up
+// The last stretch of a charge: the charger holds the cell at full while its current tapers off. The power chip can't
+// measure that current, so the voltage (less the charger offset at full current) stalls near 80% to the end. The %
+// climbs by time instead, from where it was to 99 over as long as topping up took the last times (learned from
+// Topping up to Full, NVS "btop"; 40 min until one's been seen). A blip out of it for under a minute doesn't start over.
+#define TOP_MAGIC 0x70B0F001
+static struct { uint32_t magic; float min; uint8_t n; } top = {TOP_MAGIC, 40, 0};
+static int64_t top_at, top_out;      // when topping up started (0: it isn't); since when it's been out of it
+static int top_from;                 // the % then
+
+static void top_tick(int64_t now)
+{
+    static bool loaded;
+    if (!loaded) {
+        loaded = true;
+        typeof(top) t;
+        if (nvs_get("btop", &t, sizeof t) && t.magic == TOP_MAGIC && t.min > 5 && t.min < 300) top = t;
+    }
+    if (!plugged_in()) { top_at = 0; return; }
+    if (diag.stage == 3) {
+        if (!top_at) {
+            top_at = now;
+            top_from = shown >= 0 ? shown : 0;
+            ESP_LOGI(TAG, "topping up from %d%%: to 99%% over %.0f min", top_from, top.min);
+        }
+        top_out = 0;
+        return;
+    }
+    if (!top_at) return;
+    if (diag.stage == 4) {                            // Full: how long that took
+        float m = (now - top_at) / 60e6f;
+        if (m > 5 && m < 300 && top_from < 95) {
+            int w = top.n > 3 ? 3 : top.n;            // (newer charges count more, as the cell ages)
+            top.min = (top.min * w + m) / (w + 1);
+            if (top.n < 255) top.n++;
+            nvs_put("btop", &top, sizeof top);
+            ESP_LOGI(TAG, "topped up in %.0f min: %.0f min learned (%d charges)", m, top.min, top.n);
+        }
+        top_at = 0;
+        return;
+    }
+    if (!top_out) top_out = now;
+    else if (now - top_out > 60000000) top_at = 0;
+}
+
+static bool charger_full(void) { return diag.stage == 4; }
+static int gauge_now(void) { return diag.gauge_pct >= 0 && diag.gauge_pct <= 100 ? diag.gauge_pct : 255; }
+
+static int top_pct(int64_t now)
+{
+    if (!top_at) return -1;
+    float t = (now - top_at) / (top.min * 60e6f);
+    return top_from + (int)((99 - top_from) * (t > 1 ? 1 : t));
+}
+
 const char *battery_state_text(const battery_diag_t *d)
 {
     if (!d->battery) return d->usb ? "No battery found" : "No battery";
@@ -627,9 +705,13 @@ int battery_percent(void)
     int g = diag.gauge_pct;
     if (!compared_at || now - compared_at > 600000000) {
         compared_at = now;
-        ESP_LOGI(TAG, "%.2f V: gauge %d%%, curve %d%% (%d runs)", volts, g, p, curve_runs);
+        ESP_LOGI(TAG, "%.2f V: gauge %d%%, curve %d%% (%d runs), charger %s, top-up %d%% (%.0f min learned)", volts, g, p,
+                 curve_runs, battery_stage_text(diag.stage), top_pct(now), top.min);
     }
     if (g >= 0 && !curve_runs) p = g;
+    int r = top_pct(now);                              // topping up: by time (see top_tick); Full is 100
+    if (r > p) p = r;
+    if (diag.stage == 4 && plugged_in()) p = 100;
 #endif
     if (shown < 0 || battery_charging()) { shown = p; below_since = above_since = 0; return shown; }
     // on battery: drop once the reading has stayed lower for 20 s (to the best of it, so Wi-Fi blips don't count);
