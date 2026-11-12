@@ -2086,6 +2086,14 @@ void app_main(void)
                 chat_ui_cancel_touch();
             }
         }
+        {   /*SWIPEDBG*/ static int dbg_x, dbg_y, dbg_n; static bool dbg_pg, dbg_held;
+            if (down && tx >= 0) { if (!dbg_n) dbg_held = !page_has_touch; dbg_x = tx; dbg_y = ty; dbg_n++; dbg_pg |= pg_drag; }
+            else if (!down && was_down && dbg_n) {
+                ESP_LOGI(TAG, "swipedbg: page %d from %d,%d to %d,%d in %d samples, page swipe %d, page_has_touch %d (sheet %d target %d card %d pg_off %.0f)",
+                         page, sw_x0, sw_y0, dbg_x, dbg_y, dbg_n, dbg_pg, !dbg_held, (int)sheet, target, card_drag, pg_off);
+                dbg_n = 0; dbg_pg = false;
+            }
+        }
         if (pg_drag) {
             static int64_t drag_t;
             if (down) {
