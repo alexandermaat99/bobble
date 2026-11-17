@@ -1070,7 +1070,7 @@ static void draw_overlay(uint16_t *buf, int y0, int h)
 #ifdef BOBBLE_SIM
 #define SLEEP_AFTER_US (365 * 24 * 3600 * 1000000LL)   // the simulator: never dozes off on its own (Lock still works)
 #else
-#define SLEEP_AFTER_US (60 * 1000000LL)
+#define SLEEP_AFTER_US (20 * 1000000LL)   // (the backlight is most of what the screen draws: ~290 mA at full; POST /power)
 #endif
 #define AUTO_LOCK_US (2 * 3600 * 1000000LL)   // asleep this long on battery: lock (radio + motion off, 3 s touch wakes)
 enum { PW_AWAKE, PW_FADING_OUT, PW_ASLEEP, PW_FADING_IN };
@@ -1127,16 +1127,118 @@ static bool agent_calls(void)
     agent_seen = ag.activity;
     return call;
 }
-// The radio stays fully awake on USB, and on battery while the screen's on (modem sleep adds up to ~1 s to every
-// packet: a skip, which is a few HTTPS requests in a row, took seconds, and so did its cover); it naps between beacons
-// only while the screen sleeps on battery. Checked every second (the radio can restart), set only when it changes.
+// The radio stays fully awake on USB, and on battery on the music and library pages (modem sleep adds up to ~1 s to
+// every packet: a skip, which is a few HTTPS requests in a row, took seconds, and so did its cover); elsewhere on
+// battery it naps between beacons, screen on or off (awake it cost ~60 mA, measured with POST /power). Checked every
+// second (the radio can restart), set only when it changes.
+static int pt_wifi = -1;              // the power test's Wi-Fi setting (-1: as usual)
 static void wifi_power_update(int64_t now)
 {
     static int64_t last;
     if (now - last < 1000000) return;
     last = now;
-    wifi_ps_type_t want = battery_charging() || power != PW_ASLEEP ? WIFI_PS_NONE : WIFI_PS_MIN_MODEM, cur;
+    bool music = power != PW_ASLEEP && (page == PAGE_MUSIC || page == PAGE_LIB);
+    wifi_ps_type_t want = battery_charging() || music ? WIFI_PS_NONE : WIFI_PS_MIN_MODEM, cur;
+    if (pt_wifi >= 0) want = pt_wifi == 0 ? WIFI_PS_NONE : pt_wifi == 1 ? WIFI_PS_MIN_MODEM : WIFI_PS_MAX_MODEM;
     if (esp_wifi_get_ps(&cur) != ESP_OK || cur != want) esp_wifi_set_ps(want);
+}
+
+// ---------------------------------------------------------------- power test (POST /power)
+// Two settings take turns (A B B A A B B A..., so a steady fall in voltage cancels out) every half_s with the screen
+// held on, and the battery's voltage is averaged under each, after a few seconds' settling. A setting that draws more
+// sags the battery more: the difference over the battery's resistance is the current it costs. (The resistance comes
+// from the same test on USB, switching the charge current.)
+#define PT_SETTLE_US 5000000
+static struct {
+    volatile bool want, stop;         // (from the web server's task)
+    power_cfg_t c[2], next[2];
+    int half_s, total_s, next_half, next_total;
+    bool on;
+    int k;                            // which half it's on (0, 1, 2...)
+    int64_t from, switched, read_at;
+    double sum[2];
+    int n[2];
+} pt;
+
+static void pt_apply(const power_cfg_t *c)
+{
+    set_brightness(c->bright >= 0 ? c->bright : bright_pref);
+    pt_wifi = c->wifi;
+    int mhz = c->cpu > 0 ? c->cpu : 240;
+    esp_pm_config_t pm = {.max_freq_mhz = mhz, .min_freq_mhz = mhz, .light_sleep_enable = false};
+    esp_pm_configure(&pm);
+#if SQUARE_HW
+    battery_diag_t d;
+    battery_diag(&d);
+    if (d.usb) sq_charge_apply(c->chg > 0 ? c->chg : d.charge_now_ma);
+#endif
+}
+
+void power_test_start(const power_cfg_t *a, const power_cfg_t *b, int half_s, int total_s)
+{
+    pt.next[0] = *a;
+    pt.next[1] = *b;
+    pt.next_half = half_s;
+    pt.next_total = total_s;
+    pt.want = true;
+}
+void power_test_stop(void) { pt.stop = true; }
+
+static bool power_test_tick(int64_t now)   // true: hold the screen on
+{
+    static const power_cfg_t usual = {-1, -1, -1, -1};
+    if (pt.want) {
+        pt.want = false;
+        memcpy(pt.c, pt.next, sizeof pt.c);
+        pt.half_s = pt.next_half;
+        pt.total_s = pt.next_total;
+        pt.on = true;
+        pt.k = 0;
+        pt.from = pt.switched = now;
+        pt.sum[0] = pt.sum[1] = 0;
+        pt.n[0] = pt.n[1] = 0;
+        pt_apply(&pt.c[0]);
+        ESP_LOGI(TAG, "power test: %d s halves for %d s", pt.half_s, pt.total_s);
+    }
+    if (!pt.on) return false;
+    if (pt.stop || now - pt.from > pt.total_s * 1000000LL) {
+        pt.stop = false;
+        pt.on = false;
+        pt_apply(&usual);
+        pt_wifi = -1;
+        ESP_LOGI(TAG, "power test done: A %.1f mV (%d), B %.1f mV (%d)", pt.n[0] ? pt.sum[0] / pt.n[0] : 0, pt.n[0],
+                 pt.n[1] ? pt.sum[1] / pt.n[1] : 0, pt.n[1]);
+        return false;
+    }
+    int k = (int)((now - pt.from) / (pt.half_s * 1000000LL));
+    if (k != pt.k) {
+        pt.k = k;
+        pt.switched = now;
+        pt_apply(&pt.c[((k + 1) >> 1) & 1]);
+    }
+    const power_cfg_t *c = &pt.c[((pt.k + 1) >> 1) & 1];
+    if (power == PW_AWAKE) set_brightness(c->bright >= 0 ? c->bright : bright_pref);   // (after the fade in)
+    if (now - pt.switched < PT_SETTLE_US || now - pt.read_at < 100000) return true;
+    pt.read_at = now;
+#if SQUARE_HW
+    float v = sq_battery_volts();
+#else
+    float v = battery_read_now();
+#endif
+    if (v < 2.5f) return true;
+    int w = ((pt.k + 1) >> 1) & 1;
+    pt.sum[w] += v * 1000;
+    pt.n[w]++;
+    return true;
+}
+
+int power_test_json(char *out, int max)
+{
+    double a = pt.n[0] ? pt.sum[0] / pt.n[0] : 0, b = pt.n[1] ? pt.sum[1] / pt.n[1] : 0;
+    return snprintf(out, max, "{\"on\":%s,\"elapsed_s\":%d,\"total_s\":%d,\"half_s\":%d,\"a_mv\":%.2f,\"a_n\":%d,\"b_mv\":%.2f,"
+                    "\"b_n\":%d,\"a_minus_b_mv\":%.2f}\n", pt.on ? "true" : "false",
+                    pt.from ? (int)((esp_timer_get_time() - pt.from) / 1000000) : 0, pt.total_s, pt.half_s, a, pt.n[0], b, pt.n[1],
+                    pt.n[0] && pt.n[1] ? a - b : 0);
 }
 static bool locked, auto_locked;   // auto_locked: by the 2-hour timer (a meeting may still wake it), not by hand
 
@@ -1837,7 +1939,7 @@ void app_main(void)
             bool touch = read_touch_raw(&rx, &ry), moved = board_moved() && !slept_by_hand;   // (put to sleep by the
                                                                                           // button: not by being handled)
             boot_prev = boot;
-            bool updating = ota_progress() >= 0;
+            bool updating = ota_progress() >= 0 || pt.want;   // (a power test wants the screen on)
             // a meeting about to start: the screen comes on by itself (once per meeting), unless locked by hand
             static int64_t mt_checked;
             static time_t mt_woken;
@@ -1919,6 +2021,7 @@ void app_main(void)
         imu_read();
         battery_update();
         wifi_power_update(now);
+        if (power_test_tick(now)) last_use = now;
         ota_confirm_if_healthy();
         if (ota_progress() >= 0) last_use = now;      // keep the screen on during an update
         static int64_t empty_at;
