@@ -46,6 +46,7 @@
 #include "boot_ui.h"
 #include "pet_ui.h"
 #include "agent.h"
+#include "race.h"
 #include "screen.h"
 #include "tiles.h"
 #include "statusbar.h"
@@ -932,6 +933,7 @@ static void dim_rows(uint16_t *buf, int y0, int from, int to, int k)
 enum { PAGE_CHAT, PAGE_PET, PAGE_CAL, PAGE_MUSIC, PAGE_LIB, N_PAGES };
 static int page = PAGE_PET;                // the eyes are home: where it starts and wakes
 static bool page_auto;     // Now Playing was opened automatically (so it may close itself too)
+static bool race_on;       // sim racing telemetry is coming in: the lap delta screen is up (race.c)
 
 // Sideways page swipes: the page follows the finger with its neighbour sliding in beside it.
 // pg_off > 0 means we're heading to the next page (content moving left), < 0 to the previous one.
@@ -989,7 +991,7 @@ static void page_render_bg(uint16_t *buf, int y0, int y1) { page_bg(pg_render, b
 static void render_bg(uint16_t *buf, int y0, int y1)
 {
     int fs = frame_sheet;
-    if (calibrating || tilt_step || fs >= H || ota_progress() >= 0 || show_empty) { memset(buf, 0, (y1 - y0) * W * 2); return; }
+    if (calibrating || tilt_step || fs >= H || ota_progress() >= 0 || show_empty || (race_on && fs <= 0)) { memset(buf, 0, (y1 - y0) * W * 2); return; }
     int a = y0 > fs ? y0 : (fs < y1 ? fs : y1);        // first calendar row below the card, within this strip
     if (a > y0) memset(buf, 0, (a - y0) * W * 2);
     if (a < y1 && card_snap) memcpy(buf + (a - y0) * W, snap_buf[0] + a * W, (y1 - a) * W * 2);
@@ -1029,6 +1031,7 @@ static void draw_overlay(uint16_t *buf, int y0, int h)
     }
     if (calibrating) { touch_cal_draw(buf, y0, h); return; }
     if (tilt_step) { tilt_cal_draw(buf, y0, h); return; }
+    if (race_on && fs <= 0) { race_draw(buf, y0, h); return; }   // on track: the lap delta takes the screen
     if (fs < H) {
         if (card_snap) {}                              // (already in the copied rows)
         else if (page == PAGE_MUSIC) spotify_ui_draw(buf, y0, h);
@@ -1952,6 +1955,7 @@ void app_main(void)
             }
             if (meeting && locked) set_locked(false);
             bool agent = !locked && (agent_calls() || agent_pairing(NULL));   // a message from Claude, or a pairing code: show it
+            if (!locked && !slept_by_hand && race_active()) agent = true;   // telemetry from the rig: you're on track
             meeting = meeting || agent;
             if (locked && pwr_press) { set_locked(false); moved = false; }   // (the button's a deliberate press: unlocks)
             if (locked && !updating) {                 // locked: only a finger held on the glass for 3 s
@@ -2116,6 +2120,13 @@ void app_main(void)
                 if (power == PW_FADING_OUT && !slept_by_hand) power = PW_FADING_IN;   // (not after the PWR button)
             }
         }
+        bool race_now = !locked && race_active();       // on track (telemetry from the rig): stay on, delta up
+        if (race_now != race_on) { race_on = race_now; force_redraw = true; }
+        bool race_changed = race_on && race_dirty();
+        if (race_on) {
+            last_use = now;
+            if (power == PW_FADING_OUT && !slept_by_hand) power = PW_FADING_IN;   // (not after the PWR button)
+        }
         if (power == PW_AWAKE && now - last_use > SLEEP_AFTER_US && !card_drag) power = PW_FADING_OUT;
         if (power == PW_FADING_OUT) {
             set_brightness(brightness - 20);
@@ -2187,14 +2198,6 @@ void app_main(void)
                 library_ui_cancel_touch();
                 pet_ui_cancel_touch();
                 chat_ui_cancel_touch();
-            }
-        }
-        {   /*SWIPEDBG*/ static int dbg_x, dbg_y, dbg_n; static bool dbg_pg, dbg_held;
-            if (down && tx >= 0) { if (!dbg_n) dbg_held = !page_has_touch; dbg_x = tx; dbg_y = ty; dbg_n++; dbg_pg |= pg_drag; }
-            else if (!down && was_down && dbg_n) {
-                ESP_LOGI(TAG, "swipedbg: page %d from %d,%d to %d,%d in %d samples, page swipe %d, page_has_touch %d (sheet %d target %d card %d pg_off %.0f)",
-                         page, sw_x0, sw_y0, dbg_x, dbg_y, dbg_n, dbg_pg, !dbg_held, (int)sheet, target, card_drag, pg_off);
-                dbg_n = 0; dbg_pg = false;
             }
         }
         if (pg_drag) {
@@ -2309,7 +2312,7 @@ void app_main(void)
         if (pet_dirty) pet_moved = now;
         else if (pet_moved && now - pet_moved > 250000) { pet_moved = 0; force_redraw = true; }
         int64_t full_every = page == PAGE_PET && sheet <= 0 ? 10000000 : 1000000;
-        bool others = force_redraw || pg_drag || pg_off != 0 || ota_progress() >= 0 || cal_ui_animating() || music_dirty || lib_dirty ||
+        bool others = force_redraw || race_changed || pg_drag || pg_off != 0 || ota_progress() >= 0 || cal_ui_animating() || music_dirty || lib_dirty ||
                       ((down || prev_down) && page != PAGE_PET) || card_drag || target >= 0 || sheet > 0 || now - last_full >= full_every;
         bool content = others || pet_dirty || chat_dirty || reels_dirty;
         // just the eyes moved: redraw only around them (a full frame still comes every second for the clock and status)
