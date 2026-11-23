@@ -738,10 +738,21 @@ static int percent_of(float v)
     return 0;
 }
 
+// The charger's offset is learned at the chosen current; when the chip runs hot and the current is stepped down
+// (charge_cool), the offset shrinks with it (it's mostly the current through the cell's resistance)
+static float offset_now(void)
+{
+#if SQUARE_HW
+    if (diag.charge_now_ma > 0 && diag.charge_ma > 0 && diag.charge_now_ma < diag.charge_ma)
+        return usb_offset * diag.charge_now_ma / diag.charge_ma;
+#endif
+    return usb_offset;
+}
+
 int battery_percent(void)
 {
     if (volts < 2.5f) return -1;                        // nothing plugged in
-    int p = percent_of(battery_charging() ? volts - usb_offset : volts);   // on USB: the cell's own voltage
+    int p = percent_of(battery_charging() ? volts - offset_now() : volts);   // on USB: the cell's own voltage
     int64_t now = esp_timer_get_time();
 #if SQUARE_HW
     // A curve learned from a real run on this cell wins; until there is one, the power chip's fuel gauge (load doesn't
@@ -759,6 +770,8 @@ int battery_percent(void)
     if (r > p) p = r;
     if (diag.stage == 4 && plugged_in()) p = 100;
 #endif
+    // charging: the % only climbs once the plug-in step has settled (screen, Wi-Fi and the hot-chip steps move the reading)
+    if (battery_charging() && shown >= 0 && p < shown && plugged_at && now - plugged_at > 120000000) return shown;
     if (shown < 0 || battery_charging()) { shown = p; below_since = above_since = 0; return shown; }
     // on battery: drop once the reading has stayed lower for 20 s (to the best of it, so Wi-Fi blips don't count);
     // go up only after a big rise that lasts two minutes (a wall charger we can't otherwise see)
