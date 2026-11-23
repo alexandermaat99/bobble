@@ -49,6 +49,7 @@ static int64_t last;
 #define OFF_MAGIC   0x0FF5E701
 #define LOG_MAGIC   0x1060B002          // (0x1060B001: before the gauge was kept beside each reading)
 #define SOT_MAGIC   0x507E0001
+#define DRN_MAGIC   0x0D7A1001
 #define LOG_MAX     240
 #define FULL_MV     4150              // a run starts when a charged battery drops below this
 #define EMPTY_MV    3400              // ...and is complete at this
@@ -103,6 +104,17 @@ static int64_t rise_since;
 static struct { uint32_t magic, on_ms, bat_ms; } sot = {SOT_MAGIC, 0, 0};
 static int64_t sot_saved_at, plugged_at;
 
+// Drain with the screen on and off (GET /battery), over the same stretch as sot. Each step down of the fuel gauge ends
+// a stretch; a least-squares fit of  % used = on_h * a + off_h * b  over the stretches gives a and b in %/hour.
+// level 255: no gauge reading yet; the first step only lines up the start (it began partway through a %)
+static struct {
+    uint32_t magic;
+    float s_oo, s_of, s_ff, s_oy, s_fy, s_y, s_h;     // sums over the stretches (hours, %)
+    uint32_t on_ms, off_ms;                           // the stretch so far
+    uint16_t n;
+    uint8_t level, primed;
+} drn = {.magic = DRN_MAGIC, .level = 255};
+
 static int shown = -1;                // % on screen
 static bool charger_full(void);       // (the power chip says Full)
 static int gauge_now(void);           // its fuel gauge, % (255: none)
@@ -120,7 +132,7 @@ static int below_max;                 // highest reading while below the shown %
 
 // Flash writes pause both cores' access to PSRAM for a moment, which would show as a hitch if done here on the
 // render loop: keep a copy and let a small background task write it
-#define N_SLOTS 7                     // one for each key: bsag, boff, bcurve, blog, blast, bsot, btop
+#define N_SLOTS 8                     // one for each key: bsag, boff, bcurve, blog, blast, bsot, btop, bdrn
 EXT_RAM_BSS_ATTR static struct { const char *key; uint8_t data[sizeof lg]; size_t len; bool pending, erase; } slots[N_SLOTS];
 static SemaphoreHandle_t slot_lock;
 static TaskHandle_t writer;
@@ -437,12 +449,39 @@ static void sag_sample(float raw, int64_t now)
 static void diag_refresh(int64_t now);
 static void top_tick(int64_t now);
 
+static void drain_tick(int64_t dt)
+{
+    if (screen_on) drn.on_ms += dt / 1000;
+    else drn.off_ms += dt / 1000;
+    int g = gauge_now();
+    if (g > 100 || (drn.level <= 100 && g >= drn.level)) return;   // (no gauge, or no step down: it bounces up too)
+    if (drn.level > 100 || !drn.primed) {
+        drn.primed = drn.level <= 100;
+        drn.level = g;
+        drn.on_ms = drn.off_ms = 0;
+        return;
+    }
+    float o = drn.on_ms / 3.6e6f, f = drn.off_ms / 3.6e6f, y = drn.level - g;
+    drn.s_oo += o * o, drn.s_of += o * f, drn.s_ff += f * f;
+    drn.s_oy += o * y, drn.s_fy += f * y, drn.s_y += y, drn.s_h += o + f;
+    drn.n++;
+    drn.level = g;
+    drn.on_ms = drn.off_ms = 0;
+    nvs_put("bdrn", &drn, sizeof drn);
+    float on_ph, off_ph, all_ph;
+    battery_drain(&on_ph, &off_ph, &all_ph);
+    ESP_LOGI(TAG, "drain: gauge %d%% after %.0f min on, %.0f min off; %.1f %%/h overall, screen on %.1f, off %.1f (%d steps)",
+             g, o * 60, f * 60, all_ph, on_ph, off_ph, drn.n);
+}
+
 static void sot_tick(int64_t now, bool first)
 {
     bool usb = plugged_in();
     if (first) {
         typeof(sot) s;
         if (nvs_get("bsot", &s, sizeof s) && s.magic == SOT_MAGIC) sot = s;
+        typeof(drn) d;
+        if (nvs_get("bdrn", &d, sizeof d) && d.magic == DRN_MAGIC) drn = d;
         if (usb) plugged_at = now;
         return;
     }
@@ -453,13 +492,19 @@ static void sot_tick(int64_t now, bool first)
     if (usb_prev && plugged_at && now - plugged_at >= 300000000) {   // off a real charge: start over
         sot.on_ms = sot.bat_ms = 0;
         sot_saved_at = 0;
+        drn = (typeof(drn)){.magic = DRN_MAGIC, .level = 255};
     }
     plugged_at = 0;
     int64_t dt = now - last;
     if (dt > 60000000) dt = 60000000;                 // (the loop stalled: don't guess)
     sot.bat_ms += dt / 1000;
     if (screen_on) sot.on_ms += dt / 1000;
-    if (!sot_saved_at || now - sot_saved_at > 300000000) { nvs_put("bsot", &sot, sizeof sot); sot_saved_at = now; }
+    drain_tick(dt);
+    if (!sot_saved_at || now - sot_saved_at > 300000000) {
+        nvs_put("bsot", &sot, sizeof sot);
+        nvs_put("bdrn", &drn, sizeof drn);
+        sot_saved_at = now;
+    }
 }
 
 void battery_update(void)
@@ -474,7 +519,8 @@ void battery_update(void)
     float raw = read_once();
     if (raw < 2.5f) { volts = raw; return; }            // no battery
     sag_sample(raw, now);
-    float v = raw + (screen_on ? sag : 0), before = volts;
+    // (on USB the charger carries the screen, so the cell doesn't sag: adding it there made the % jump with the screen)
+    float v = raw + (screen_on && !plugged_in() ? sag : 0), before = volts;
     volts = volts < 2.5f ? v : volts * 0.9f + v * 0.1f;  // smooth out ADC noise
     bool usb = plugged_in();
     if (have_usb_prev && usb != usb_prev) { usb_edge_at = now; usb_edge_v = before; }   // plugged in / unplugged
@@ -692,10 +738,21 @@ static int percent_of(float v)
     return 0;
 }
 
+// The charger's offset is learned at the chosen current; when the chip runs hot and the current is stepped down
+// (charge_cool), the offset shrinks with it (it's mostly the current through the cell's resistance)
+static float offset_now(void)
+{
+#if SQUARE_HW
+    if (diag.charge_now_ma > 0 && diag.charge_ma > 0 && diag.charge_now_ma < diag.charge_ma)
+        return usb_offset * diag.charge_now_ma / diag.charge_ma;
+#endif
+    return usb_offset;
+}
+
 int battery_percent(void)
 {
     if (volts < 2.5f) return -1;                        // nothing plugged in
-    int p = percent_of(battery_charging() ? volts - usb_offset : volts);   // on USB: the cell's own voltage
+    int p = percent_of(battery_charging() ? volts - offset_now() : volts);   // on USB: the cell's own voltage
     int64_t now = esp_timer_get_time();
 #if SQUARE_HW
     // A curve learned from a real run on this cell wins; until there is one, the power chip's fuel gauge (load doesn't
@@ -713,6 +770,8 @@ int battery_percent(void)
     if (r > p) p = r;
     if (diag.stage == 4 && plugged_in()) p = 100;
 #endif
+    // charging: the % only climbs once the plug-in step has settled (screen, Wi-Fi and the hot-chip steps move the reading)
+    if (battery_charging() && shown >= 0 && p < shown && plugged_at && now - plugged_at > 120000000) return shown;
     if (shown < 0 || battery_charging()) { shown = p; below_since = above_since = 0; return shown; }
     // on battery: drop once the reading has stayed lower for 20 s (to the best of it, so Wi-Fi blips don't count);
     // go up only after a big rise that lasts two minutes (a wall charger we can't otherwise see)
@@ -726,9 +785,27 @@ int battery_percent(void)
     return shown;
 }
 
-void battery_save_now(void) { if (sot.bat_ms) nvs_put("bsot", &sot, sizeof sot); }
+void battery_save_now(void)
+{
+    if (sot.bat_ms) nvs_put("bsot", &sot, sizeof sot);
+    if (drn.n || drn.primed) nvs_put("bdrn", &drn, sizeof drn);
+}
 
 void battery_screen_time(uint32_t *on_s, uint32_t *bat_s) { *on_s = sot.on_ms / 1000; *bat_s = sot.bat_ms / 1000; }
+
+// %/hour with the screen on and off, and overall (-1: not enough yet; on and off need stretches that mix them
+// differently, or the fit can't tell them apart)
+int battery_drain(float *on_ph, float *off_ph, float *all_ph)
+{
+    *on_ph = *off_ph = *all_ph = -1;
+    if (drn.s_h > 0) *all_ph = drn.s_y / drn.s_h;
+    float det = drn.s_oo * drn.s_ff - drn.s_of * drn.s_of;
+    if (drn.n >= 3 && det > 0.02f * drn.s_oo * drn.s_ff) {
+        *on_ph = (drn.s_oy * drn.s_ff - drn.s_fy * drn.s_of) / det;
+        *off_ph = (drn.s_fy * drn.s_oo - drn.s_oy * drn.s_of) / det;
+    }
+    return drn.n;
+}
 
 int battery_learned_runs(void) { return curve_runs; }
 bool battery_logging(void) { return run == RUN_LOGGING; }

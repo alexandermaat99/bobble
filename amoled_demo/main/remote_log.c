@@ -88,16 +88,22 @@ static esp_err_t get_battery(httpd_req_t *req)
         battery_set_charge_ma(atoi(v));
     battery_diag_t d;
     battery_diag(&d);
-    char out[640];
+    uint32_t on_s, bat_s;
+    battery_screen_time(&on_s, &bat_s);
+    float on_ph, off_ph, all_ph;
+    int steps = battery_drain(&on_ph, &off_ph, &all_ph);
+    char out[900];
     snprintf(out, sizeof out,
              "{\"state\":\"%s\",\"chip\":%s,\"usb\":%s,\"battery\":%s,\"charge_on\":%s,\"current\":\"%s\","
              "\"stage\":\"%s\",\"battery_mv\":%d,\"usb_mv\":%d,\"system_mv\":%d,\"gauge_pct\":%d,\"shown_pct\":%d,"
              "\"charge_ma\":%d,\"charge_now_ma\":%d,\"full_mv\":%d,\"usb_limit_ma\":%d,\"chip_c\":%.1f,\"learned_runs\":%d,\"logging\":%s,"
+             "\"screen_on_s\":%u,\"battery_s\":%u,\"drain_pct_h\":{\"overall\":%.2f,\"screen_on\":%.2f,\"screen_off\":%.2f,\"steps\":%d},"
              "\"raw\":{\"status1\":\"%02x\",\"status2\":\"%02x\",\"ts\":\"%02x\",\"irq\":\"%02x %02x %02x\"}}\n",
              battery_state_text(&d), d.chip ? "true" : "false", d.usb ? "true" : "false", d.battery ? "true" : "false",
              d.charge_on ? "true" : "false", d.dir == 1 ? "charging" : d.dir == 2 ? "discharging" : d.dir == 0 ? "none" : "-",
              battery_stage_text(d.stage), d.vbat_mv, d.vbus_mv, d.vsys_mv, d.gauge_pct, battery_percent(),
-             d.charge_ma, d.charge_now_ma, d.full_mv, d.in_limit_ma, d.chip_c, battery_learned_runs(), battery_logging() ? "true" : "false", d.st1, d.st2, d.ts, d.irq[0], d.irq[1], d.irq[2]);
+             d.charge_ma, d.charge_now_ma, d.full_mv, d.in_limit_ma, d.chip_c, battery_learned_runs(), battery_logging() ? "true" : "false",
+             (unsigned)on_s, (unsigned)bat_s, all_ph, on_ph, off_ph, steps, d.st1, d.st2, d.ts, d.irq[0], d.irq[1], d.irq[2]);
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_sendstr(req, out);
 }
@@ -208,6 +214,45 @@ static esp_err_t post_display(httpd_req_t *req)
 #endif
 }
 
+// The power test (testing): POST /power?a=b255,w0,c240&b=b40&half=20&total=600 (b brightness, w Wi-Fi sleep 0/1/2,
+// c CPU MHz, g charge mA; left out: as usual), POST /power?stop=1, GET /power for the averages so far
+static void parse_cfg(const char *q, const char *key, power_cfg_t *c)
+{
+    *c = (power_cfg_t){-1, -1, -1, -1};
+    char v[48];
+    if (httpd_query_key_value(q, key, v, sizeof v) != ESP_OK) return;
+    for (char *t = strtok(v, ","); t; t = strtok(NULL, ",")) {
+        int n = atoi(t + 1);
+        if (*t == 'b') c->bright = n;
+        else if (*t == 'w') c->wifi = n;
+        else if (*t == 'c') c->cpu = n;
+        else if (*t == 'g') c->chg = n;
+    }
+}
+static esp_err_t post_power(httpd_req_t *req)
+{
+    if (!token_ok(req)) return ESP_OK;
+    char q[160], v[12];
+    if (httpd_req_get_url_query_str(req, q, sizeof q) != ESP_OK) return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "need ?a=..&b=..");
+    if (httpd_query_key_value(q, "stop", v, sizeof v) == ESP_OK) { power_test_stop(); return httpd_resp_sendstr(req, "stopping\n"); }
+    power_cfg_t a, b;
+    parse_cfg(q, "a", &a);
+    parse_cfg(q, "b", &b);
+    int half = httpd_query_key_value(q, "half", v, sizeof v) == ESP_OK ? atoi(v) : 20;
+    int total = httpd_query_key_value(q, "total", v, sizeof v) == ESP_OK ? atoi(v) : 600;
+    if (half < 8 || total < 2 * half) return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "half >= 8 s, total >= 2 halves");
+    power_test_start(&a, &b, half, total);
+    return httpd_resp_sendstr(req, "started\n");
+}
+static esp_err_t get_power(httpd_req_t *req)
+{
+    if (!token_ok(req)) return ESP_OK;
+    char out[256];
+    power_test_json(out, sizeof out);
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, out);
+}
+
 void remote_log_register(httpd_handle_t server)
 {
     const httpd_uri_t a = {.uri = "/log", .method = HTTP_GET, .handler = get_log};
@@ -224,4 +269,8 @@ void remote_log_register(httpd_handle_t server)
     const httpd_uri_t g = {.uri = "/battery/run", .method = HTTP_POST, .handler = post_run};
     httpd_register_uri_handler(server, &f);
     httpd_register_uri_handler(server, &g);
+    const httpd_uri_t i = {.uri = "/power", .method = HTTP_POST, .handler = post_power};
+    const httpd_uri_t j = {.uri = "/power", .method = HTTP_GET, .handler = get_power};
+    httpd_register_uri_handler(server, &i);
+    httpd_register_uri_handler(server, &j);
 }
