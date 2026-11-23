@@ -45,6 +45,7 @@
 #include "chat_ui.h"
 #include "boot_ui.h"
 #include "pet_ui.h"
+#include "status_ui.h"
 #include "agent.h"
 #include "screen.h"
 #include "tiles.h"
@@ -929,7 +930,7 @@ static void dim_rows(uint16_t *buf, int y0, int from, int to, int k)
 
 // Pages you swipe between under the card: the pet, calendar, Spotify's Now Playing, and your Spotify library; and on
 // the square board (it has a speaker and microphones), talking with Claude, left of the chats
-enum { PAGE_CHAT, PAGE_PET, PAGE_CAL, PAGE_MUSIC, PAGE_LIB, N_PAGES };
+enum { PAGE_CHAT, PAGE_STATUS, PAGE_PET, PAGE_CAL, PAGE_MUSIC, PAGE_LIB, N_PAGES };   // (status: the eyes acting out what you're up to)
 static int page = PAGE_PET;                // the eyes are home: where it starts and wakes
 static bool page_auto;     // Now Playing was opened automatically (so it may close itself too)
 
@@ -973,6 +974,7 @@ static void page_fg(int p, uint16_t *buf, int y0, int h)
     else if (p == PAGE_LIB) library_ui_draw(buf, y0, h);
     else if (p == PAGE_PET) pet_ui_draw(buf, y0, h);
     else if (p == PAGE_CHAT) chat_ui_draw(buf, y0, h);
+    else if (p == PAGE_STATUS) status_ui_draw(buf, y0, h);
     else cal_ui_draw(buf, y0, h);
     // (the square's stays put over the sliding pages: drawn by draw_overlay and draw_strip instead)
 }
@@ -995,7 +997,7 @@ static void render_bg(uint16_t *buf, int y0, int y1)
     if (a < y1 && card_snap) memcpy(buf + (a - y0) * W, snap_buf[0] + a * W, (y1 - a) * W * 2);
     else if (a < y1) {
         if (page == PAGE_MUSIC) spotify_ui_render_bg(buf + (a - y0) * W, a, y1);
-        else if (page == PAGE_LIB || page == PAGE_PET || page == PAGE_CHAT) memset(buf + (a - y0) * W, 0, (y1 - a) * W * 2);
+        else if (page == PAGE_LIB || page == PAGE_PET || page == PAGE_CHAT || page == PAGE_STATUS) memset(buf + (a - y0) * W, 0, (y1 - a) * W * 2);
         else cal_ui_render_bg(buf + (a - y0) * W, a, y1);
     }
 }
@@ -1035,6 +1037,7 @@ static void draw_overlay(uint16_t *buf, int y0, int h)
         else if (page == PAGE_LIB) library_ui_draw(buf, y0, h);
         else if (page == PAGE_PET) pet_ui_draw(buf, y0, h);
         else if (page == PAGE_CHAT) chat_ui_draw(buf, y0, h);
+        else if (page == PAGE_STATUS) status_ui_draw(buf, y0, h);
         else cal_ui_draw(buf, y0, h);
         if (fs == 0) {
             if (snap_buf[0]) {                         // keep the current page's snapshot up to date
@@ -2034,7 +2037,7 @@ void app_main(void)
         bool page_has_touch = sheet <= 0 && target < 0 && !card_drag && !pg_drag && pg_off == 0;
         bool cal_has_touch = page_has_touch && page == PAGE_CAL, music_has_touch = page_has_touch && page == PAGE_MUSIC;
         bool lib_has_touch = page_has_touch && page == PAGE_LIB, pet_has_touch = page_has_touch && page == PAGE_PET;
-        bool chat_has_touch = page_has_touch && page == PAGE_CHAT;
+        bool chat_has_touch = page_has_touch && page == PAGE_CHAT, status_has_touch = page_has_touch && page == PAGE_STATUS;
         bool wifi_has_touch = sheet >= H && target < 0 && !card_drag;
 
         // start dragging the card. Down: only from the very top edge, so scrolling never opens it. Up: from the
@@ -2084,6 +2087,7 @@ void app_main(void)
                 library_ui_cancel_touch();
                 pet_ui_cancel_touch();
                 chat_ui_cancel_touch();
+                status_ui_cancel_touch();
             }
         }
         {   /*SWIPEDBG*/ static int dbg_x, dbg_y, dbg_n; static bool dbg_pg, dbg_held;
@@ -2169,6 +2173,7 @@ void app_main(void)
         static int was_page = -1;
         if (was_page == PAGE_CHAT && page != PAGE_CHAT) chat_ui_leave();   // the chat ends when you leave its page
         was_page = page;
+        status_ui_update(status_has_touch && !card_drag ? tx : -1, status_has_touch && !card_drag ? ty : -1, now);   // (every page: a meeting changes the status)
         if (page == PAGE_CHAT) chat_ui_update(chat_has_touch && !card_drag ? tx : -1, chat_has_touch && !card_drag ? ty : -1, now);
         if (page == PAGE_PET) {
             float up[3];
@@ -2201,12 +2206,13 @@ void app_main(void)
         bool lib_dirty = page == PAGE_LIB && library_ui_dirty(), music_dirty = page == PAGE_MUSIC && spotify_ui_dirty();
         bool pet_dirty = page == PAGE_PET && pet_ui_dirty(), chat_dirty = page == PAGE_CHAT && chat_ui_dirty();
         bool reels_dirty = page == PAGE_MUSIC && spotify_ui_reels_dirty();
+        bool status_dirty = page == PAGE_STATUS && status_ui_dirty();   // (the eyes there never stop)
         // the pet page has no clock: a full frame every 10 s is plenty, plus one (smoothly turned) once the eyes settle
         static int64_t pet_moved;
         if (pet_dirty) pet_moved = now;
         else if (pet_moved && now - pet_moved > 250000) { pet_moved = 0; force_redraw = true; }
         int64_t full_every = page == PAGE_PET && sheet <= 0 ? 10000000 : 1000000;
-        bool others = force_redraw || pg_drag || pg_off != 0 || ota_progress() >= 0 || cal_ui_animating() || music_dirty || lib_dirty ||
+        bool others = force_redraw || status_dirty || pg_drag || pg_off != 0 || ota_progress() >= 0 || cal_ui_animating() || music_dirty || lib_dirty ||
                       ((down || prev_down) && page != PAGE_PET) || card_drag || target >= 0 || sheet > 0 || now - last_full >= full_every;
         bool content = others || pet_dirty || chat_dirty || reels_dirty;
         // just the eyes moved: redraw only around them (a full frame still comes every second for the clock and status)
