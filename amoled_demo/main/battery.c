@@ -519,7 +519,8 @@ void battery_update(void)
     float raw = read_once();
     if (raw < 2.5f) { volts = raw; return; }            // no battery
     sag_sample(raw, now);
-    float v = raw + (screen_on ? sag : 0), before = volts;
+    // (on USB the charger carries the screen, so the cell doesn't sag: adding it there made the % jump with the screen)
+    float v = raw + (screen_on && !plugged_in() ? sag : 0), before = volts;
     volts = volts < 2.5f ? v : volts * 0.9f + v * 0.1f;  // smooth out ADC noise
     bool usb = plugged_in();
     if (have_usb_prev && usb != usb_prev) { usb_edge_at = now; usb_edge_v = before; }   // plugged in / unplugged
