@@ -15,6 +15,9 @@ void pet_ui_draw(uint16_t *buf, int y0, int h);
 // for it), else 0. Works with the screen off too.
 time_t pet_ui_meeting_window(void);
 bool pet_ui_dirty(void);
+// One eye drawn on its own in colour c (0 .. 255 each), for the Status page: middle x, y, size w x hh, and lid, tilt, happy
+// as the eyes have them
+void pet_ui_draw_eye(uint16_t *buf, int y0, int h, float x, float y, float w, float hh, float lid, float tilt, float happy, const int c[3]);
 bool pet_ui_bubble_open(void);
 // First run: 1 = no Wi-Fi yet (a bubble says hello, a tap opens Wi-Fi setup), 2 = online but no Mac yet (points to
 // Agent Bridge), 0 = set up

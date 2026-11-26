@@ -25,9 +25,13 @@
 #include "screen.h"
 #include "tiles.h"
 
-#define EYE_GAP 88          // eye centres sit this far either side of the middle
-#define EYE_D   124         // eye diameter
+#define EYE_GAP 98          // eye centres sit this far either side of the middle
+#define EYE_D   168         // eye diameter
 #define EYE_Y   (CY - 4)
+#define DASH_EX 72          // the dashboard's shrunk eyes: where their middle sits (top left)...
+#define DASH_EY 86
+#define DASH_ES 0.3f        // ...and how big they are, as a share of full size
+#define SHOW_DOTS 0   // 1: the chats' logos down the left edge (off: the eyes alone; chats live in the dashboard)
 
 // One eye (an ellipse, normally a circle): centre, size, top lid (0 open .. 1 shut), lid slope (+ = inner corner lower: cross),
 // happy (0 .. 1: cut away from below into an upturned arc)
@@ -40,6 +44,13 @@ static float col[3] = {255, 255, 255}, col_drawn[3];
 static int64_t last_us, next_blink, blink_t0 = -1, blink_len = 160000, next_glance;
 static int64_t happy_until, surprise_until, dizzy_until, hop_t0 = -1, wink_t0 = -1, last_touch, last_pickup;
 static int wink_eye;
+// The dashboard: swipe up and the eyes shrink into the top left corner with the chats listed below (swipe down, or tap
+// the eyes, to go back; tap a chat to see its words on the eyes).
+static bool dash_open, t_swiped, dash_vis_drawn;
+static float dash, dash_v;                    // 0 .. 1: how far open (a spring, so it overshoots a little)
+static agent_chat_t dash_rows[AGENT_MAX];
+static int dash_n;
+static bool dash_tap(int x, int y, int64_t now);
 static float glance_x, glance_y;
 static float up_prev[3], shake;
 static float ang_prev = 1000, spin_rate, spin_total;   // the screen turning: degrees/s, recent degrees
@@ -294,9 +305,10 @@ static void tap(int x, int y, int64_t now)
         if (strcmp(pair_shown, "ok")) agent_pair_cancel();
         return;
     }
+    if (dash_open) { dash_tap(x, y, now); return; }
     int near = -1;                                    // on (or by) a chat's dot: that chat  (even the only one: a finished chat goes back to just its logo, and this brings its bubble back)
     float best = 24 * 24;
-    for (int i = 0; i < dots.n; i++) {
+    for (int i = 0; SHOW_DOTS && i < dots.n; i++) {
         int dx, dy;
         dot_pos(i, dots.n, &dx, &dy);
         dx = x - dx; dy = y - dy;
@@ -470,6 +482,7 @@ void pet_ui_wake(void)
     int64_t now = esp_timer_get_time();
     surprise_until = now + 700000;
     next_blink = now + 800000;
+    dash_open = false;                                // (waking up: the eyes, as always)
     dirty = true;
 }
 
@@ -510,16 +523,24 @@ void pet_ui_update(int tx, int ty, int64_t now, const float up[3], float ang, in
 
     // ---- touch: follow the finger, tap for a hop or a wink, stroke to pet
     bool down = tx >= 0;
-    if (down && !was_down) { t_down = now; t_x0 = t_lx = tx; t_y0 = t_ly = ty; t_path = 0; }
+    if (down && !was_down) { t_down = now; t_x0 = t_lx = tx; t_y0 = t_ly = ty; t_path = 0; t_swiped = false; }
     if (down) {
         t_path += abs(tx - t_lx) + abs(ty - t_ly);
         t_lx = tx;
         t_ly = ty;
         last_touch = now;
-        if (t_path > 160 && now - t_down > 500000) petting = true;
+        if (t_path > 160 && now - t_down > 500000 && !t_swiped) petting = true;
+        int sdx = tx - t_x0, sdy = ty - t_y0;         // a clear swipe up opens the dashboard, down closes it
+        if (!t_swiped && abs(sdy) > 56 && abs(sdy) > 2 * abs(sdx) && !pair_shown[0] && !crowd_on && (sdy < 0) != dash_open) {
+            dash_open = sdy < 0;
+            t_swiped = true;
+            petting = false;
+            dirty = true;
+        }
     }
     if (!down && was_down) {
-        if (petting) happy_until = now + 1200000;
+        if (t_swiped) { /* a swipe opened or closed the dashboard: not a tap */ }
+        else if (petting) happy_until = now + 1200000;
         else if (now - t_down < 400000 && abs(t_lx - t_x0) + abs(t_ly - t_y0) < 24) {
             if (!crowd_tap(t_lx, t_ly, now)) tap(t_lx, t_ly, now);
         }
@@ -728,7 +749,7 @@ void pet_ui_update(int tx, int ty, int64_t now, const float up[3], float ang, in
     int64_t se = scroll_end();
     // (only once it's finished: while it works or waits for you, the bubble stays up at the end, showing it's going)
     bub_closed = cap_kind == CAP_DONE && se > 0 && now > se + CLOSE_AFTER_US;
-    bool want = cap_kind != CAP_PLAIN && !bub_closed;
+    bool want = cap_kind != CAP_PLAIN && !bub_closed && !dash_open;
     float target = want || pop > 0.25f, pop_target = want && compact > 0.55f;
     float bw = bub_x1 - bub_x0, bh = bub_y1 - bub_y0;
     for (float left = dt; left > 0; left -= 0.004f) {
@@ -745,6 +766,12 @@ void pet_ui_update(int tx, int ty, int64_t now, const float up[3], float ang, in
         box_hv += (bwk * bwk * (bh - box_h) - 2 * bwk * box_hv) * st;
         box_h += box_hv * st;
     }
+    for (float left = dt; left > 0; left -= 0.004f) {  // the dashboard sliding open: lively, a little overshoot
+        float st = fminf(left, 0.004f), w = 13;
+        dash_v += (w * w * ((dash_open ? 1 : 0) - dash) - 2 * 0.6f * w * dash_v) * st;
+        dash += dash_v * st;
+    }
+    if (dash < 0) dash = dash_v = 0;
     static const float palette[8][6] = {{0}, {40, 40, 50, 228, 228, 236}, {244, 244, 247, 22, 22, 28}, {208, 240, 218, 16, 72, 40},
                                         {34, 34, 40, 118, 118, 128}, {244, 244, 247, 22, 22, 28},
                                         {244, 244, 247, 22, 22, 28}, {40, 40, 50, 190, 190, 200}};   // (meet: white; meetq: quiet)   // (plain, working, waiting, done, stopped: greyed out, hello)
@@ -817,6 +844,13 @@ void pet_ui_update(int tx, int ty, int64_t now, const float up[3], float ang, in
             shown[i].h *= 1 - 0.94f * sinf((float)M_PI * (now - blink_t0) / blink_len);
         if (wink_t0 >= 0 && i == wink_eye && now - wink_t0 < 450000)
             shown[i].h *= 1 - 0.93f * sinf((float)M_PI * (now - wink_t0) / 450000.0f);
+        if (dash > 0.001f) {                          // the dashboard: shrunk into the top left corner
+            float ds = fmaxf(1 - (1 - DASH_ES) * dash, 0.12f), side = i ? 1 : -1;
+            shown[i].w *= ds;
+            shown[i].h *= ds;
+            shown[i].x += (DASH_EX + side * EYE_GAP * ds - shown[i].x) * dash;
+            shown[i].y += (DASH_EY - shown[i].y) * dash;
+        }
     }
     if (EYE_COLOR && !asleep && cap_kind >= CAP_WORK && cap_kind <= CAP_STOP)   // (a chat's bubble is what's up)
         for (int c = 0; c < 3; c++) tc[c] = 255 + (chat_col[shown_slot][c] - 255) * EYE_COLOR / 100.0f;
@@ -851,6 +885,8 @@ void pet_ui_update(int tx, int ty, int64_t now, const float up[3], float ang, in
     }
 
     crowd_update(now, dt);
+    if (crowd_on || (dash_open && now - last_touch > 45000000)) dash_open = false;   // (a question's up, or left alone: back to the eyes)
+    if (dash > 0.001f || dash_vis_drawn) dirty = true;   // (the rows move all the time)
 
     // ---- anything visibly different from the last frame?
     zzz_step = asleep ? (int)(t * 12) : -1;
@@ -886,7 +922,7 @@ bool pet_ui_dirty(void)
     // scan-out out of PSRAM fell behind (broken rows). Its poses change 3-7 times a second: 10 frames is plenty.
     static int64_t last;
     int64_t now = esp_timer_get_time();
-    if (crowd_on && now - last < 100000) return false;   // (stays dirty: it goes out next time)
+    if ((crowd_on || dash > 0.001f) && now - last < (!crowd_on && fabsf(dash_v) > 0.05f ? 66000 : 100000)) return false;   // (stays dirty: it goes out next time)
     last = now;
     dirty = false;
     return true;
@@ -954,8 +990,9 @@ int pet_ui_take_rects(int r[2][4])
     cap_kind_drawn = cap_kind;
     strcpy(cap_label_drawn, cap_label);
     ring_drawn = ring_q;
-    bool crowd = crowd_on || crowd_drawn_last;        // (the crowd, or just gone: the whole page)
+    bool dv = dash > 0.001f, crowd = crowd_on || crowd_drawn_last || dv || dash_vis_drawn;   // (the crowd or the dashboard, or just gone: the whole page)
     crowd_drawn_last = crowd_on;
+    dash_vis_drawn = dv;
     return part && !crowd && drawn[0].w > 0 ? n : 0;
 }
 
@@ -1400,6 +1437,154 @@ static void draw_pairing(uint16_t *buf, int y0, int h)
     draw_ftext(buf, y0, h, CX - ftext_width(s, t3) / 2, CY + 82, s, t3, rgb(90, 90, 100));
 }
 
+// ---------------------------------------------------------------- the dashboard
+#define DASH_ROW_Y 142                        // the first chat row's top
+#define DASH_ROW_H 54
+#define DASH_ROW_STEP 60
+#define DASH_ROWS 5                           // rows shown (any more: "+n more")
+#define DASH_X0 20
+#define DASH_X1 (W - 20)
+
+static const int dash_amber[3] = {255, 190, 70}, dash_green[3] = {70, 225, 130}, dash_grey[3] = {130, 130, 142};
+static const int dash_ink_amber[3] = {30, 20, 0}, dash_ink_green[3] = {10, 40, 20};
+static const int dash_spark[3] = {255, 240, 160}, dash_warm[3] = {255, 215, 130}, dash_dim[3] = {150, 150, 168};
+
+static uint16_t rgbk(const int c[3], float k) { return rgb((int)(c[0] * k), (int)(c[1] * k), (int)(c[2] * k)); }
+
+// s cut to fit maxw px (with "..." when it had to be), newlines as spaces
+static void dash_fit(const font_t *f, const char *s, int maxw, char *out, int cap)
+{
+    strlcpy(out, s, cap);
+    for (char *q = out; *q; q++) if (*q == '\n') *q = ' ';
+    if (ftext_width(f, out) <= maxw) return;
+    int n = (int)strlen(out);
+    while (n > 0) {
+        n--;
+        while (n > 0 && ((uint8_t)out[n] & 0xC0) == 0x80) n--;   // (never halfway through a character)
+        char t[64];
+        snprintf(t, sizeof t, "%.*s...", n, out);
+        if (ftext_width(f, t) <= maxw || n == 0) { strlcpy(out, t, cap); return; }
+    }
+}
+
+static bool dash_tap(int x, int y, int64_t now)
+{
+    if (x < 170 && y < 130) { dash_open = false; hop_t0 = now; happy_until = now + 1200000; return true; }   // the eyes: home
+    int n = dash_n < DASH_ROWS ? dash_n : DASH_ROWS;
+    for (int i = 0; i < n; i++) {
+        int ry = DASH_ROW_Y + i * DASH_ROW_STEP;
+        if (y >= ry - 3 && y < ry + DASH_ROW_H + 3) {   // a chat: back to the eyes, with its words up
+            meet_pin_until = 0;
+            agent_select_slot(dash_rows[i].slot);
+            bub_closed = false;
+            scroll_t0 = now;
+            dash_open = false;
+            return true;
+        }
+    }
+    return true;
+}
+
+static void draw_dash(uint16_t *buf, int y0, int h)
+{
+    int64_t now = esp_timer_get_time();
+    float t = now / 1e6f;
+    int n = dash_n, working = 0, waiting = 0, done = 0;
+    for (int i = 0; i < n; i++) {
+        agent_state_t st = dash_rows[i].state;
+        if (st == AG_WORKING) working++;
+        else if (st == AG_WAITING) waiting++;
+        else if (st == AG_DONE) done++;
+    }
+    // beside the eyes: how it's going, in a few words
+    char head[40], sub[64];
+    sub[0] = 0;
+    if (!n) { strcpy(head, "All quiet"); strcpy(sub, "Start a chat and it shows up here"); }
+    else {
+        if (waiting) { if (waiting == 1) strcpy(head, "Psst! One needs you"); else snprintf(head, sizeof head, "Psst! %d need you", waiting); }
+        else if (working) { if (working == 1) strcpy(head, "Hard at work"); else snprintf(head, sizeof head, "%d busy bees", working); }
+        else if (done) strcpy(head, "All done!");
+        else strcpy(head, "Taking a break");
+        int o = 0;
+        if (working) o += snprintf(sub + o, sizeof sub - o, "%d working", working);
+        if (waiting && o < 40) o += snprintf(sub + o, sizeof sub - o, "%s%d waiting", o ? ", " : "", waiting);
+        if (done && o < 40) o += snprintf(sub + o, sizeof sub - o, "%s%d done", o ? ", " : "", done);
+    }
+    float ha = clampf((dash - 0.15f) / 0.5f, 0, 1);
+    if (ha > 0.01f) {
+        int hx = 150 + (int)((1 - ha) * 30);
+        draw_ftext(buf, y0, h, hx, 54, &font_body, head, rgb((int)(245 * ha), (int)(245 * ha), (int)(250 * ha)));
+        draw_ftext(buf, y0, h, hx, 100, &font_small, sub, rgb((int)(140 * ha), (int)(140 * ha), (int)(158 * ha)));
+    }
+    int shown_n = n < DASH_ROWS ? n : DASH_ROWS;
+    for (int i = 0; i < shown_n; i++) {
+        const agent_chat_t *c = &dash_rows[i];
+        float a = clampf((dash - 0.2f - 0.07f * i) / 0.45f, 0, 1);   // each row tumbles in a beat after the one above
+        if (a < 0.01f) continue;
+        float ea = 1 - (1 - a) * (1 - a);
+        int ry = DASH_ROW_Y + i * DASH_ROW_STEP + (int)((1 - ea) * 44);
+        if (ry >= y0 + h || ry + DASH_ROW_H + 3 <= y0) continue;
+        const int *cc = chat_col[c->slot % AGENT_MAX];
+        int ix = DASH_X0 + 46, iy = ry + DASH_ROW_H / 2;
+        float elapsed = (now - c->since) / 1e6f;
+        if (c->state == AG_WAITING) {                 // needs you: a pulsing amber edge
+            float p = 0.5f + 0.5f * sinf(t * 6);
+            aa_rrect(buf, y0, h, DASH_X0 - 2, ry - 2, DASH_X1 + 2, ry + DASH_ROW_H + 2, 18, rgbk(dash_amber, (0.3f + 0.5f * p) * ea));
+        }
+        aa_rrect(buf, y0, h, DASH_X0, ry, DASH_X1, ry + DASH_ROW_H, 16, rgbk(cc, 0.14f * ea));
+        aa_rrect(buf, y0, h, DASH_X0 + 10, ry + 13, DASH_X0 + 14, ry + DASH_ROW_H - 13, 2, rgbk(cc, ea));
+        switch (c->state) {
+        case AG_WORKING:                              // three dots bouncing along, like typing
+            for (int k = 0; k < 3; k++)
+                aa_disc(buf, y0, h, ix - 15 + 15 * k, iy - 7 * fmaxf(0, sinf(t * 7 - k * 0.8f)), 4.2f, rgbk(cc, ea));
+            break;
+        case AG_WAITING:                              // a pulsing "!"
+            aa_disc(buf, y0, h, ix, iy, 15 + 3 * sinf(t * 7), rgbk(dash_amber, 0.25f * ea));
+            aa_disc(buf, y0, h, ix, iy, 12, rgbk(dash_amber, ea));
+            draw_ftext(buf, y0, h, ix - ftext_width(&font_label, "!") / 2, iy - font_label.line_h / 2 - 1, &font_label, "!",
+                       rgbk(dash_ink_amber, ea));
+            break;
+        case AG_DONE: {                               // a check mark, with sparkles circling for the first few seconds
+            aa_disc(buf, y0, h, ix, iy, 13, rgbk(dash_green, ea));
+            const float chk[6] = {ix - 6.0f, iy + 0.5f, ix - 1.5f, iy + 5.0f, ix + 6.5f, iy - 5.0f};
+            aa_path(buf, y0, h, chk, 3, false, 3.0f, rgbk(dash_ink_green, ea));
+            if (elapsed < 8)
+                for (int k = 0; k < 3; k++) {
+                    float ang = k * 2.1f + t * 1.4f, r = 2.8f * fmaxf(0, sinf(t * 6 + k * 2.0f));
+                    if (r > 0.3f) aa_disc(buf, y0, h, ix + cosf(ang) * 22, iy + sinf(ang) * 22, r, rgbk(dash_spark, ea));
+                }
+            break;
+        }
+        default:                                      // stopped (or idle): paused
+            aa_rrect(buf, y0, h, ix - 7, iy - 8, ix - 2, iy + 8, 2, rgbk(dash_grey, ea));
+            aa_rrect(buf, y0, h, ix + 2, iy - 8, ix + 7, iy + 8, 2, rgbk(dash_grey, ea));
+            break;
+        }
+        char tm[12];                                  // how long it's been like this
+        long sec = (long)elapsed;
+        if (sec < 60) snprintf(tm, sizeof tm, "%lds", sec < 0 ? 0 : sec);
+        else if (sec < 3600) snprintf(tm, sizeof tm, "%ldm", sec / 60);
+        else snprintf(tm, sizeof tm, "%ldh", sec / 3600);
+        int tw = ftext_width(&font_label, tm), tx0 = DASH_X0 + 76, maxw = DASH_X1 - 14 - tw - 14 - tx0;
+        draw_ftext(buf, y0, h, DASH_X1 - 14 - tw, ry + 5, &font_label, tm, rgbk(dash_grey, ea));
+        char line[64];
+        dash_fit(&font_label, c->title[0] ? c->title : c->project[0] ? c->project : "Chat", maxw, line, sizeof line);
+        draw_ftext(buf, y0, h, tx0, ry + 5, &font_label, line, rgbk(cc, ea));
+        const char *what = c->state == AG_DONE ? "Finished" : c->state == AG_STOPPED ? "Stopped" : c->detail[0] ? c->detail
+                           : c->state == AG_WAITING ? "Needs you" : c->state == AG_WORKING ? "Working" : "Idle";
+        dash_fit(&font_small, what, DASH_X1 - 14 - tx0, line, sizeof line);
+        draw_ftext(buf, y0, h, tx0, ry + 31, &font_small, line, rgbk(c->state == AG_WAITING ? dash_warm : dash_dim, ea));
+    }
+    if (n > DASH_ROWS && dash > 0.9f) {
+        char more[24];
+        snprintf(more, sizeof more, "+%d more", n - DASH_ROWS);
+        draw_ftext(buf, y0, h, CX - ftext_width(&font_small, more) / 2, DASH_ROW_Y + DASH_ROWS * DASH_ROW_STEP + 4, &font_small, more,
+                   rgb(140, 140, 158));
+    }
+    if (ha > 0.01f)                                   // a handle at the bottom: swipe down to go back
+        aa_rrect(buf, y0, h, CX - 24, H - 14, CX + 24, H - 10, 2, rgb((int)(70 * ha), (int)(70 * ha), (int)(82 * ha)));
+}
+
 // The halo: brightest at the edge of the glass, fading out over ~55 px towards the middle, faint
 #define HALO_IN 178
 #define HALO_OUT 233
@@ -1421,9 +1606,10 @@ void pet_ui_draw(uint16_t *buf, int y0, int h)
     } else if (ring_q >= 0) {
         draw_ring(buf, y0, h, ring_q / (2.0f * MT_LEAD), ring_q <= 60 ? 255 : 170);
     }
-    if (bf.on) draw_bubble(buf, y0, h);
+    if (bf.on && dash < 0.02f) draw_bubble(buf, y0, h);
     for (int i = 0; i < 2; i++) draw_eye(buf, y0, h, &shown[i]);
-    if (dots.n) draw_dots(buf, y0, h);
+    if (dash > 0.001f) draw_dash(buf, y0, h);
+    if (SHOW_DOTS && dots.n) draw_dots(buf, y0, h);
     if (pair_shown[0]) draw_pairing(buf, y0, h);
     if (zzz_step >= 0) {                              // fast asleep: z's drifting up
         float p = zzz_step / 12.0f / 2.4f;
@@ -1529,6 +1715,8 @@ static void crowd_update(int64_t now, float dt)
     static agent_chat_t all[AGENT_MAX + 1];           // (3 KB: off the main task's stack)
     agent_chat_t *pick[AGENT_MAX + 1], *rest[AGENT_MAX];
     int n = agent_get_chats(all), m = 0, r = 0;
+    dash_n = n;
+    memcpy(dash_rows, all, sizeof(agent_chat_t) * n);
     // a chat waiting on a choice takes the whole screen, the one that asked first; the rest step aside till it's
     // answered, then the next one asking goes
     agent_chat_t *ask = NULL;
@@ -1546,18 +1734,9 @@ static void crowd_update(int64_t now, float dt)
         if (quiet) { c->bubble = false; rest[r++] = c; }
         else pick[m++] = c;
     }
-    // the host: what the eyes would be saying (the welcome, a meeting), when no chat's up front or there's a meeting
-    const char *say = cap_kind == CAP_MEET || cap_kind == CAP_MEETQ || cap_kind == CAP_HELLO || (cap_kind == CAP_PLAIN && caption[0])
-                      ? caption : mt_caption;
-    if (!ask && (!m || say[0])) {
-        agent_chat_t *hc = &all[n];
-        memset(hc, 0, sizeof *hc);
-        hc->slot = HOST_SLOT;
-        hc->bubble = say[0] != 0;
-        hc->state = cap_kind == CAP_MEET || cap_kind == CAP_HELLO ? AG_WAITING : AG_IDLE;   // (announcing: waving)
-        strlcpy(hc->detail, say, sizeof hc->detail);
-        pick[m++] = hc;
-    }
+    // The eyes are Bobble: they show working, done and meetings in their own bubble. The pixel characters only come
+    // when a chat asks you a choice, since its answer buttons are drawn here.
+    if (!ask) m = r = 0;
     for (int i = 1; i < m; i++)                       // the most pressing first (needs you, working, ...; newest among equals)
         for (int j = i; j > 0; j--) {
             agent_chat_t *a = pick[j - 1], *b = pick[j];
@@ -1904,4 +2083,13 @@ static void crowd_draw(uint16_t *buf, int y0, int h)
         const font_t *mf = fl ? &font_mono : f;
         draw_ftext(buf, y0, h, W - 14 - ftext_width(mf, t), H - (fl ? 44 : 34), mf, t, fl ? rgb(255, 102, 26) : rgb(120, 120, 132));
     }
+}
+
+void pet_ui_draw_eye(uint16_t *buf, int y0, int h, float x, float y, float w, float hh, float lid, float tilt, float happy, const int c[3])
+{
+    float keep[3] = {col[0], col[1], col[2]};
+    for (int k = 0; k < 3; k++) col[k] = c[k];
+    eye_t e = {x, y, w, hh, lid, tilt, happy};
+    draw_eye(buf, y0, h, &e);
+    for (int k = 0; k < 3; k++) col[k] = keep[k];
 }
