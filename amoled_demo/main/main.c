@@ -47,6 +47,7 @@
 #include "pet_ui.h"
 #include "status_ui.h"
 #include "agent.h"
+#include "race.h"
 #include "screen.h"
 #include "tiles.h"
 #include "statusbar.h"
@@ -933,6 +934,7 @@ static void dim_rows(uint16_t *buf, int y0, int from, int to, int k)
 enum { PAGE_CHAT, PAGE_STATUS, PAGE_PET, PAGE_CAL, PAGE_MUSIC, PAGE_LIB, N_PAGES };   // (status: the eyes acting out what you're up to)
 static int page = PAGE_PET;                // the eyes are home: where it starts and wakes
 static bool page_auto;     // Now Playing was opened automatically (so it may close itself too)
+static bool race_on;       // sim racing telemetry is coming in: the lap delta screen is up (race.c)
 
 // Sideways page swipes: the page follows the finger with its neighbour sliding in beside it.
 // pg_off > 0 means we're heading to the next page (content moving left), < 0 to the previous one.
@@ -991,7 +993,7 @@ static void page_render_bg(uint16_t *buf, int y0, int y1) { page_bg(pg_render, b
 static void render_bg(uint16_t *buf, int y0, int y1)
 {
     int fs = frame_sheet;
-    if (calibrating || tilt_step || fs >= H || ota_progress() >= 0 || show_empty) { memset(buf, 0, (y1 - y0) * W * 2); return; }
+    if (calibrating || tilt_step || fs >= H || ota_progress() >= 0 || show_empty || (race_on && fs <= 0)) { memset(buf, 0, (y1 - y0) * W * 2); return; }
     int a = y0 > fs ? y0 : (fs < y1 ? fs : y1);        // first calendar row below the card, within this strip
     if (a > y0) memset(buf, 0, (a - y0) * W * 2);
     if (a < y1 && card_snap) memcpy(buf + (a - y0) * W, snap_buf[0] + a * W, (y1 - a) * W * 2);
@@ -1031,6 +1033,7 @@ static void draw_overlay(uint16_t *buf, int y0, int h)
     }
     if (calibrating) { touch_cal_draw(buf, y0, h); return; }
     if (tilt_step) { tilt_cal_draw(buf, y0, h); return; }
+    if (race_on && fs <= 0) { race_draw(buf, y0, h); return; }   // on track: the lap delta takes the screen
     if (fs < H) {
         if (card_snap) {}                              // (already in the copied rows)
         else if (page == PAGE_MUSIC) spotify_ui_draw(buf, y0, h);
@@ -1073,7 +1076,7 @@ static void draw_overlay(uint16_t *buf, int y0, int h)
 #ifdef BOBBLE_SIM
 #define SLEEP_AFTER_US (365 * 24 * 3600 * 1000000LL)   // the simulator: never dozes off on its own (Lock still works)
 #else
-#define SLEEP_AFTER_US (60 * 1000000LL)
+#define SLEEP_AFTER_US (20 * 1000000LL)   // (the backlight is most of what the screen draws: ~290 mA at full; POST /power)
 #endif
 #define AUTO_LOCK_US (2 * 3600 * 1000000LL)   // asleep this long on battery: lock (radio + motion off, 3 s touch wakes)
 enum { PW_AWAKE, PW_FADING_OUT, PW_ASLEEP, PW_FADING_IN };
@@ -1130,16 +1133,118 @@ static bool agent_calls(void)
     agent_seen = ag.activity;
     return call;
 }
-// The radio stays fully awake on USB, and on battery while the screen's on (modem sleep adds up to ~1 s to every
-// packet: a skip, which is a few HTTPS requests in a row, took seconds, and so did its cover); it naps between beacons
-// only while the screen sleeps on battery. Checked every second (the radio can restart), set only when it changes.
+// The radio stays fully awake on USB, and on battery on the music and library pages (modem sleep adds up to ~1 s to
+// every packet: a skip, which is a few HTTPS requests in a row, took seconds, and so did its cover); elsewhere on
+// battery it naps between beacons, screen on or off (awake it cost ~60 mA, measured with POST /power). Checked every
+// second (the radio can restart), set only when it changes.
+static int pt_wifi = -1;              // the power test's Wi-Fi setting (-1: as usual)
 static void wifi_power_update(int64_t now)
 {
     static int64_t last;
     if (now - last < 1000000) return;
     last = now;
-    wifi_ps_type_t want = battery_charging() || power != PW_ASLEEP ? WIFI_PS_NONE : WIFI_PS_MIN_MODEM, cur;
+    bool music = power != PW_ASLEEP && (page == PAGE_MUSIC || page == PAGE_LIB);
+    wifi_ps_type_t want = battery_charging() || music ? WIFI_PS_NONE : WIFI_PS_MIN_MODEM, cur;
+    if (pt_wifi >= 0) want = pt_wifi == 0 ? WIFI_PS_NONE : pt_wifi == 1 ? WIFI_PS_MIN_MODEM : WIFI_PS_MAX_MODEM;
     if (esp_wifi_get_ps(&cur) != ESP_OK || cur != want) esp_wifi_set_ps(want);
+}
+
+// ---------------------------------------------------------------- power test (POST /power)
+// Two settings take turns (A B B A A B B A..., so a steady fall in voltage cancels out) every half_s with the screen
+// held on, and the battery's voltage is averaged under each, after a few seconds' settling. A setting that draws more
+// sags the battery more: the difference over the battery's resistance is the current it costs. (The resistance comes
+// from the same test on USB, switching the charge current.)
+#define PT_SETTLE_US 5000000
+static struct {
+    volatile bool want, stop;         // (from the web server's task)
+    power_cfg_t c[2], next[2];
+    int half_s, total_s, next_half, next_total;
+    bool on;
+    int k;                            // which half it's on (0, 1, 2...)
+    int64_t from, switched, read_at;
+    double sum[2];
+    int n[2];
+} pt;
+
+static void pt_apply(const power_cfg_t *c)
+{
+    set_brightness(c->bright >= 0 ? c->bright : bright_pref);
+    pt_wifi = c->wifi;
+    int mhz = c->cpu > 0 ? c->cpu : 240;
+    esp_pm_config_t pm = {.max_freq_mhz = mhz, .min_freq_mhz = mhz, .light_sleep_enable = false};
+    esp_pm_configure(&pm);
+#if SQUARE_HW
+    battery_diag_t d;
+    battery_diag(&d);
+    if (d.usb) sq_charge_apply(c->chg > 0 ? c->chg : d.charge_now_ma);
+#endif
+}
+
+void power_test_start(const power_cfg_t *a, const power_cfg_t *b, int half_s, int total_s)
+{
+    pt.next[0] = *a;
+    pt.next[1] = *b;
+    pt.next_half = half_s;
+    pt.next_total = total_s;
+    pt.want = true;
+}
+void power_test_stop(void) { pt.stop = true; }
+
+static bool power_test_tick(int64_t now)   // true: hold the screen on
+{
+    static const power_cfg_t usual = {-1, -1, -1, -1};
+    if (pt.want) {
+        pt.want = false;
+        memcpy(pt.c, pt.next, sizeof pt.c);
+        pt.half_s = pt.next_half;
+        pt.total_s = pt.next_total;
+        pt.on = true;
+        pt.k = 0;
+        pt.from = pt.switched = now;
+        pt.sum[0] = pt.sum[1] = 0;
+        pt.n[0] = pt.n[1] = 0;
+        pt_apply(&pt.c[0]);
+        ESP_LOGI(TAG, "power test: %d s halves for %d s", pt.half_s, pt.total_s);
+    }
+    if (!pt.on) return false;
+    if (pt.stop || now - pt.from > pt.total_s * 1000000LL) {
+        pt.stop = false;
+        pt.on = false;
+        pt_apply(&usual);
+        pt_wifi = -1;
+        ESP_LOGI(TAG, "power test done: A %.1f mV (%d), B %.1f mV (%d)", pt.n[0] ? pt.sum[0] / pt.n[0] : 0, pt.n[0],
+                 pt.n[1] ? pt.sum[1] / pt.n[1] : 0, pt.n[1]);
+        return false;
+    }
+    int k = (int)((now - pt.from) / (pt.half_s * 1000000LL));
+    if (k != pt.k) {
+        pt.k = k;
+        pt.switched = now;
+        pt_apply(&pt.c[((k + 1) >> 1) & 1]);
+    }
+    const power_cfg_t *c = &pt.c[((pt.k + 1) >> 1) & 1];
+    if (power == PW_AWAKE) set_brightness(c->bright >= 0 ? c->bright : bright_pref);   // (after the fade in)
+    if (now - pt.switched < PT_SETTLE_US || now - pt.read_at < 100000) return true;
+    pt.read_at = now;
+#if SQUARE_HW
+    float v = sq_battery_volts();
+#else
+    float v = battery_read_now();
+#endif
+    if (v < 2.5f) return true;
+    int w = ((pt.k + 1) >> 1) & 1;
+    pt.sum[w] += v * 1000;
+    pt.n[w]++;
+    return true;
+}
+
+int power_test_json(char *out, int max)
+{
+    double a = pt.n[0] ? pt.sum[0] / pt.n[0] : 0, b = pt.n[1] ? pt.sum[1] / pt.n[1] : 0;
+    return snprintf(out, max, "{\"on\":%s,\"elapsed_s\":%d,\"total_s\":%d,\"half_s\":%d,\"a_mv\":%.2f,\"a_n\":%d,\"b_mv\":%.2f,"
+                    "\"b_n\":%d,\"a_minus_b_mv\":%.2f}\n", pt.on ? "true" : "false",
+                    pt.from ? (int)((esp_timer_get_time() - pt.from) / 1000000) : 0, pt.total_s, pt.half_s, a, pt.n[0], b, pt.n[1],
+                    pt.n[0] && pt.n[1] ? a - b : 0);
 }
 static bool locked, auto_locked;   // auto_locked: by the 2-hour timer (a meeting may still wake it), not by hand
 
@@ -1840,7 +1945,7 @@ void app_main(void)
             bool touch = read_touch_raw(&rx, &ry), moved = board_moved() && !slept_by_hand;   // (put to sleep by the
                                                                                           // button: not by being handled)
             boot_prev = boot;
-            bool updating = ota_progress() >= 0;
+            bool updating = ota_progress() >= 0 || pt.want;   // (a power test wants the screen on)
             // a meeting about to start: the screen comes on by itself (once per meeting), unless locked by hand
             static int64_t mt_checked;
             static time_t mt_woken;
@@ -1853,6 +1958,7 @@ void app_main(void)
             }
             if (meeting && locked) set_locked(false);
             bool agent = !locked && (agent_calls() || agent_pairing(NULL));   // a message from Claude, or a pairing code: show it
+            if (!locked && !slept_by_hand && race_active()) agent = true;   // telemetry from the rig: you're on track
             meeting = meeting || agent;
             if (locked && pwr_press) { set_locked(false); moved = false; }   // (the button's a deliberate press: unlocks)
             if (locked && !updating) {                 // locked: only a finger held on the glass for 3 s
@@ -1922,6 +2028,7 @@ void app_main(void)
         imu_read();
         battery_update();
         wifi_power_update(now);
+        if (power_test_tick(now)) last_use = now;
         ota_confirm_if_healthy();
         if (ota_progress() >= 0) last_use = now;      // keep the screen on during an update
         static int64_t empty_at;
@@ -2016,6 +2123,13 @@ void app_main(void)
                 if (power == PW_FADING_OUT && !slept_by_hand) power = PW_FADING_IN;   // (not after the PWR button)
             }
         }
+        bool race_now = !locked && race_active();       // on track (telemetry from the rig): stay on, delta up
+        if (race_now != race_on) { race_on = race_now; force_redraw = true; }
+        bool race_changed = race_on && race_dirty();
+        if (race_on) {
+            last_use = now;
+            if (power == PW_FADING_OUT && !slept_by_hand) power = PW_FADING_IN;   // (not after the PWR button)
+        }
         if (power == PW_AWAKE && now - last_use > SLEEP_AFTER_US && !card_drag) power = PW_FADING_OUT;
         if (power == PW_FADING_OUT) {
             set_brightness(brightness - 20);
@@ -2088,14 +2202,6 @@ void app_main(void)
                 pet_ui_cancel_touch();
                 chat_ui_cancel_touch();
                 status_ui_cancel_touch();
-            }
-        }
-        {   /*SWIPEDBG*/ static int dbg_x, dbg_y, dbg_n; static bool dbg_pg, dbg_held;
-            if (down && tx >= 0) { if (!dbg_n) dbg_held = !page_has_touch; dbg_x = tx; dbg_y = ty; dbg_n++; dbg_pg |= pg_drag; }
-            else if (!down && was_down && dbg_n) {
-                ESP_LOGI(TAG, "swipedbg: page %d from %d,%d to %d,%d in %d samples, page swipe %d, page_has_touch %d (sheet %d target %d card %d pg_off %.0f)",
-                         page, sw_x0, sw_y0, dbg_x, dbg_y, dbg_n, dbg_pg, !dbg_held, (int)sheet, target, card_drag, pg_off);
-                dbg_n = 0; dbg_pg = false;
             }
         }
         if (pg_drag) {
@@ -2212,7 +2318,7 @@ void app_main(void)
         if (pet_dirty) pet_moved = now;
         else if (pet_moved && now - pet_moved > 250000) { pet_moved = 0; force_redraw = true; }
         int64_t full_every = page == PAGE_PET && sheet <= 0 ? 10000000 : 1000000;
-        bool others = force_redraw || status_dirty || pg_drag || pg_off != 0 || ota_progress() >= 0 || cal_ui_animating() || music_dirty || lib_dirty ||
+        bool others = force_redraw || status_dirty || race_changed || pg_drag || pg_off != 0 || ota_progress() >= 0 || cal_ui_animating() || music_dirty || lib_dirty ||
                       ((down || prev_down) && page != PAGE_PET) || card_drag || target >= 0 || sheet > 0 || now - last_full >= full_every;
         bool content = others || pet_dirty || chat_dirty || reels_dirty;
         // just the eyes moved: redraw only around them (a full frame still comes every second for the clock and status)

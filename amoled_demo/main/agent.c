@@ -15,6 +15,7 @@
 #include "gfx.h"
 #include "screen.h"
 #include "agent.h"
+#include "race.h"
 #include "chat.h"
 #include "secrets.h"
 #include "esp_attr.h"
@@ -446,6 +447,7 @@ void agent_register(httpd_handle_t server)
         {.uri = "/look", .method = HTTP_POST, .handler = look_post},
     };
     for (int i = 0; i < (int)(sizeof u / sizeof u[0]); i++) httpd_register_uri_handler(server, &u[i]);
+    race_register(server);   // (sim racing telemetry: POST /race)
 }
 
 static float clamp01(float v) { return v < 0 ? 0 : v > 1 ? 1 : v; }

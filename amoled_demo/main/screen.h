@@ -26,3 +26,10 @@ void motion_turn(int degrees);
 void motion_tilt_cal(bool on);   // (testing, GET /motion?tilt=1 / 0) start or stop the tilt calibration
 int motion_tilt_step(float *progress);   // its step (0: not calibrating) and how long this one's been held (s)   // (testing, GET /motion?turn=90) turn the screen there until the board's tipped again
 
+// A power test (POST /power, testing): two settings in turn with the screen held on, the battery's voltage averaged
+// under each. -1 in a field: as usual. bright 0..255; wifi 0 awake, 1 min modem sleep, 2 max; cpu MHz (80/160/240);
+// chg: the charge current (mA, on USB: switching it gives the battery's resistance, to turn volts into mA)
+typedef struct { int bright, wifi, cpu, chg; } power_cfg_t;
+void power_test_start(const power_cfg_t *a, const power_cfg_t *b, int half_s, int total_s);
+void power_test_stop(void);
+int power_test_json(char *out, int max);
